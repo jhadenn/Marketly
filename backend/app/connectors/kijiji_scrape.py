@@ -1,191 +1,191 @@
-import json
-from urllib.parse import urlparse
-
 import re
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urljoin
 
 import httpx
-from selectolax.parser import HTMLParser
+from bs4 import BeautifulSoup
 
 from app.connectors.base import MarketplaceConnector
 from app.models.listing import Listing, Money
+
+BASE = "https://www.kijiji.ca"
+
+# Matches URLs like:
+# /v-cell-phone/edmonton/iphone-12-and-iphone-xr/1731510626
+LISTING_HREF_RE = re.compile(r"^/v-[^/]+/.+/\d+/?$")
+
+PRICE_RE = re.compile(r"\$\s*([\d,]+(?:\.\d{1,2})?)")
 
 
 class KijijiScrapeConnector(MarketplaceConnector):
     source_name = "kijiji"
 
     def __init__(self, region: str = "canada"):
-        # region examples: "canada", or a city/area path if you later want it
         self.region = region
-
         self._headers = {
-            # A realistic UA helps avoid instant blocks
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
             "Accept-Language": "en-CA,en;q=0.9",
         }
 
     def _build_search_url(self, query: str) -> str:
-        """
-        Kijiji URL patterns can vary by category/region.
-        This pattern works often, but if it doesn't, do this:
-        1) search manually on kijiji.ca
-        2) copy the resulting URL
-        3) update this function to match that pattern
-        """
-        q = quote_plus(query)
-        # Common pattern:
-        # https://www.kijiji.ca/b-buy-sell/canada/<query>/k0l0
-        return f"https://www.kijiji.ca/b-buy-sell/{self.region}/c10l0?query={q}"
+        # This URL pattern matches what you see in the browser for “iphone” searches
+        # e.g. https://www.kijiji.ca/b-canada/iphone/k0l0?dc=true&view=list
+        q = quote_plus(query.strip())
+        return f"{BASE}/b-canada/{q}/k0l0?dc=true&view=list"
+
+    def _abs_url(self, href: str) -> str:
+        return urljoin(BASE, href)
 
     def _parse_price(self, text: str) -> float | None:
-        # Examples: "$1,200.00", "$1200", "Free", "Please Contact"
+        if not text:
+            return None
         t = text.strip().lower()
         if "free" in t:
             return 0.0
         if "please contact" in t:
             return None
-
-        # Extract numbers like 1,200.00
-        m = re.search(r"([\d][\d,]*(?:\.\d{1,2})?)", text.replace(",", ""))
+        m = PRICE_RE.search(text)
         if not m:
             return None
+        val = m.group(1).replace(",", "")
         try:
-            return float(m.group(1))
+            return float(val)
         except ValueError:
             return None
 
-    def _extract_listing_id(self, url: str) -> str:
-    # Kijiji often uses adId in the URL path (not always). We’ll fallback to URL.
-    # Example paths can look like: /v-something/1234567890
-        path = urlparse(url).path
-        parts = [p for p in path.split("/") if p]
-        for p in reversed(parts):
-            if p.isdigit():
-                return p
-        return url
-
-    def _abs_url(self, url: str) -> str:
-        if url.startswith("/"):
-            return "https://www.kijiji.ca" + url
-        return url
-
-    def _parse_json_ld_itemlist(self, html: str) -> list[dict]:
-        tree = HTMLParser(html)
-        scripts = tree.css("script[type='application/ld+json']")
-        payloads: list[dict] = []
-
-        for s in scripts:
-            raw = s.text(strip=True)
-            if not raw:
-                continue
-
-            # Some sites embed multiple JSON objects; try best-effort
-            try:
-                data = json.loads(raw)
-            except Exception:
-                continue
-
-            def collect(obj):
-                if isinstance(obj, dict):
-                    payloads.append(obj)
-                    # JSON-LD can store items in @graph
-                    g = obj.get("@graph")
-                    if isinstance(g, list):
-                        for x in g:
-                            if isinstance(x, dict):
-                                payloads.append(x)
-                elif isinstance(obj, list):
-                    for x in obj:
-                        collect(x)
-
-            collect(data)
-
-        items: list[dict] = []
-
-        for p in payloads:
-            if p.get("@type") == "ItemList" and isinstance(p.get("itemListElement"), list):
-                for entry in p.get("itemListElement", []):
-                    if isinstance(entry, dict) and isinstance(entry.get("item"), dict):
-                        items.append(entry["item"])
-
-        return items
-
-
+    def _token_score(self, query: str, title: str) -> int:
+        # Generic relevance scoring (works for any item type, not just iphones)
+        q_tokens = [t.lower() for t in query.split() if len(t) >= 2]
+        t = (title or "").lower()
+        return sum(1 for tok in q_tokens if tok in t)
 
     async def search(self, query: str, limit: int = 20) -> list[Listing]:
         url = self._build_search_url(query)
 
         async with httpx.AsyncClient(
-            timeout=15,
+            timeout=20,
             headers=self._headers,
-            follow_redirects=True
+            follow_redirects=True,
         ) as client:
             r = await client.get(url)
             r.raise_for_status()
 
-        html = r.text
+        soup = BeautifulSoup(r.text, "lxml")
+        # DEBUG: show what links exist in the HTML we received
+        hrefs = [a.get("href") for a in soup.find_all("a", href=True)]
+        print("KIJIJI(BS4): total <a href> =", len(hrefs))
+        print("KIJIJI(BS4): first 40 hrefs =", hrefs[:40])
 
-        # ✅ Primary path: parse JSON-LD ItemList (what your debug output shows)
-        items = self._parse_json_ld_itemlist(html)
+        v_links = [h for h in hrefs if h and "/v-" in h]
+        print("KIJIJI(BS4): links containing /v- =", len(v_links))
+        print("KIJIJI(BS4): first 20 /v- links =", v_links[:20])
 
-        results: list[Listing] = []
-        for it in items:
-            if len(results) >= limit:
-                break
+        # 1) Grab candidate listing links
+        anchors = soup.find_all("a", href=True)
+        candidates: list[tuple[int, str, str, str]] = []
+        # tuple: (score, url, title, blob_text)
 
-            title = (it.get("name") or "").strip()
+        seen = set()
+
+        for a in anchors:
+            href = a.get("href", "")
+            if not href:
+                continue
+
+            # Normalize absolute vs relative
+            if href.startswith("http"):
+                # absolute url
+                if "kijiji.ca" not in href:
+                    continue
+                path = href.replace(BASE, "")  # convert to /v-...
+                full_url = href
+            else:
+                # relative url like /v-...
+                path = href
+                full_url = self._abs_url(href)
+
+            # Now apply regex to the PATH
+            if not LISTING_HREF_RE.match(path):
+                continue
+            if full_url in seen:
+                continue
+            seen.add(full_url)
+
+            # 2) Find a reasonable “card container” around this link
+            container = a
+            for _ in range(6):
+                if container.parent:
+                    container = container.parent
+                else:
+                    break
+
+            blob = container.get_text(" ", strip=True)
+            # title: prefer visible text near the link; fallback to blob
+            title = a.get_text(" ", strip=True) or ""
+            if not title or len(title) < 4:
+                # sometimes the link text is empty; try h3/h2 in container
+                h = container.find(["h3", "h2"])
+                if h:
+                    title = h.get_text(" ", strip=True) or title
+
+            title = (title or "").strip()
             if not title:
                 continue
 
-            listing_url = it.get("url")
-            if not listing_url:
+            score = self._token_score(query, title)
+            candidates.append((score, full_url, title, blob))
+
+        # 3) Sort by relevance score (descending), then take top N
+        candidates.sort(key=lambda x: x[0], reverse=True)
+
+        results: list[Listing] = []
+        for score, listing_url, title, blob in candidates:
+            if len(results) >= limit:
+                break
+
+            # If the query has tokens, require at least ONE token hit.
+            # (This prevents random junk, but won’t kill results for broad searches.)
+            if query.strip() and score == 0:
                 continue
-            listing_url = self._abs_url(listing_url)
 
-            desc = it.get("description")
-
-            # Images: can be string or list
-            imgs = it.get("image")
+            price_val = self._parse_price(blob)
             image_urls: list[str] = []
-            if isinstance(imgs, str) and imgs:
-                image_urls = [imgs]
-            elif isinstance(imgs, list):
-                image_urls = [x for x in imgs if isinstance(x, str)]
 
-            # Offers -> price/currency
-            offers = it.get("offers") or {}
-            price_val = 0.0
-            currency = "CAD"
-
-            # offers can be dict or list
-            if isinstance(offers, list) and offers:
-                offers = offers[0]
-
-            if isinstance(offers, dict):
-                currency = offers.get("priceCurrency") or currency
-                p = offers.get("price")
-                try:
-                    if p is not None:
-                        price_val = float(p)
-                except Exception:
-                    price_val = 0.0
+            # Try to grab an image near the listing card (best-effort)
+            # We need to refind the card by URL: quick hack via searching the soup again.
+            card_link = soup.find("a", href=re.compile(re.escape(listing_url.replace(BASE, ""))))
+            if card_link:
+                card = card_link
+                for _ in range(6):
+                    if card.parent:
+                        card = card.parent
+                    else:
+                        break
+                img = card.find("img")
+                if img:
+                    src = img.get("src") or img.get("data-src")
+                    if src:
+                        image_urls = [src]
 
             results.append(
                 Listing(
                     source="kijiji",
-                    source_listing_id=self._extract_listing_id(listing_url),
+                    source_listing_id=listing_url,  # MVP: use URL as id
                     title=title,
-                    price=Money(amount=price_val, currency=currency),
+                    price=Money(amount=price_val or 0.0, currency="CAD"),
                     url=listing_url,
                     image_urls=image_urls,
                     location=None,
                     condition=None,
-                    snippet=desc,
+                    snippet=None,
                 )
             )
-            print("DEBUG URL:", listing_url)
 
+        print("KIJIJI(BS4): url =", url)
+        print("KIJIJI(BS4): candidates =", len(candidates), "returned =", len(results))
+        if results:
+            print("KIJIJI(BS4): top titles =", [r.title for r in results[:10]])
 
-    # Fallback path: if JSON-LD fails, you can keep your old CSS scraping here later.
         return results
