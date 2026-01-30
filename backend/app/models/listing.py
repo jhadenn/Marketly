@@ -1,5 +1,5 @@
 from pydantic import BaseModel, HttpUrl, Field
-from typing import Literal
+from typing import Literal, Optional, List
 
 
 Source = Literal["ebay", "kijiji"]
@@ -11,16 +11,19 @@ class Money(BaseModel):
 
 
 class Listing(BaseModel):
-    source: Source
+    source: str
     source_listing_id: str
     title: str
-    price: Money
-    url: HttpUrl
-    image_urls: list[HttpUrl] = []
-    location: str | None = None
-    condition: str | None = None
-    snippet: str | None = None
+    price: Optional[Money] = None
+    url: str
+    image_urls: List[str] = []
+    location: Optional[str] = None
+    condition: Optional[str] = None
+    snippet: Optional[str] = None
 
+    # NEW: ranking metadata
+    score: float = Field(default=0.0, description="Relevance score (higher is better)")
+    score_reason: Optional[str] = Field(default=None, description="Debug string explaining score")
 
 class SearchResponse(BaseModel):
     query: str

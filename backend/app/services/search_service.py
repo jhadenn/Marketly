@@ -3,6 +3,7 @@ from app.connectors import CONNECTORS
 from app.core.cache import TTLCache
 from app.core.config import settings
 from app.models.listing import Listing
+from app.services.scoring import score_listing
 
 _cache = TTLCache()
 
