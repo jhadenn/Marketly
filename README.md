@@ -1,22 +1,73 @@
 # Marketly
-Marketly is a modular marketplace tracking platform that aggregates and normalizes listings from multiple online marketplaces into a single, unified system. It enables price monitoring, listing discovery, and data analysis across platforms, starting with Kijiji and designed to scale to additional marketplaces.
+Marketly is a web app that makes it easier to browse marketplace listings from multiple apps in one place. It scrapes listings from eBay, Kijiji, and Facebook Marketplace, then displays them in a unified view for the user.
 
-## How to run
+## Features
+- Aggregated listings across multiple marketplaces
+- Normalized listing data for consistent display
+- Backend API with scraping and data access
+- Web UI for browsing results
 
-0. ensure your running the backend
+## Tech Stack
+**Frontend**
+- Next.js (App Router)
+- React
+- TypeScript
+- Tailwind CSS
 
-* cd backend
+**Backend**
+- FastAPI
+- Python 3.10+
+- Requests + BeautifulSoup + Selectolax + lxml (scraping/parsing)
+- SQLAlchemy + Alembic
 
-1. create virtual environment 
+**Data**
+- PostgreSQL (via Docker Compose)
 
-* python -m venv .venv
-* .venv\Scripts\activate
+## Project Structure
+- `frontend/` Next.js app
+- `backend/` FastAPI app and scraping services
 
+## Getting Started
+### Prerequisites
+- Node.js 18+ (or current LTS)
+- Python 3.10+
+- Docker (optional, for Postgres)
 
-2. install dependencies
+### Backend (local)
+```powershell
+cd backend
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e ".[dev]"
+uvicorn app.main:app --reload
+```
 
-* pip install -e ".[dev]"
+### Frontend (local)
+```powershell
+cd frontend
+npm install
+npm run dev
+```
 
-3. run the API
+### Database (Docker)
+```powershell
+cd backend
+docker compose up -d
+```
 
-* uvicorn app.main:app --reload
+## Environment Variables
+Backend env vars live in `backend/.env` (see `backend/.env.example`):
+- `ENV`
+- `CACHE_TTL_SECONDS`
+
+If running the backend against Docker Postgres, set:
+```
+DATABASE_URL=postgresql+psycopg2://marketly:marketly@localhost:5432/marketly
+```
+
+## Roadmap
+- Improve scraping reliability and anti-block handling
+- Add filters, sorting, and search on the frontend
+- Add saved searches and price alerts
+- Expand to more marketplaces
+- Add user accounts and personalization
