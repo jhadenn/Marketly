@@ -6,6 +6,7 @@ from app.db import get_db
 from app.models.saved_search import SavedSearch
 from app.schemas.saved_search import SavedSearchCreate, SavedSearchOut
 from fastapi import FastAPI, Query, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from app.core.logging import setup_logging
 from app.models.listing import SearchResponse, Source
 from app.services.search_service import unified_search
@@ -16,6 +17,16 @@ setup_logging()
 app = FastAPI(title="Marketly API", version="0.1.0")
 print("LOADED MAIN.PY ✅", __file__)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/health")
 def health():
