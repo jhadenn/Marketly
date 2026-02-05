@@ -18,19 +18,10 @@ services:
 
   api:
     build: .
-    container_name: marketly_api
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      # IMPORTANT: inside docker, DB host is the service name "db"
-      DATABASE_URL: postgresql+psycopg2://marketly:marketly@db:5432/marketly
     ports:
       - "8000:8000"
-    volumes:
-      # lets you edit code locally and auto-reload if you use reload CMD
-      - .:/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      DATABASE_URL: postgresql+psycopg2://marketly:marketly@db:5432/marketly
 
 volumes:
   marketly_pgdata:
