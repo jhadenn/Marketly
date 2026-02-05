@@ -40,4 +40,4 @@ async def unified_search(query: str, sources: list[str], limit: int = 20) -> lis
     # Sort best first and cut to limit
     scored.sort(key=lambda x: x.score, reverse=True)
     return scored[:limit]
-    return results
+

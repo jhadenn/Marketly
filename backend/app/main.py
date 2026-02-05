@@ -97,7 +97,6 @@ def list_saved_searches(db: Session = Depends(get_db)):
         for r in rows
     ]
 
-
 @app.delete("/saved-searches/{search_id}")
 def delete_saved_search(search_id: int, db: Session = Depends(get_db)):
     row = db.query(SavedSearch).filter(SavedSearch.id == search_id).first()
@@ -107,19 +106,25 @@ def delete_saved_search(search_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"deleted": True, "id": search_id}
 
+
 @app.get("/saved-searches/{search_id}/run", response_model=SearchResponse)
-async def run_saved_search(search_id: int, limit: int = 20, db: Session = Depends(get_db)):
+async def run_saved_search(
+    search_id: int,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+):
     row = db.query(SavedSearch).filter(SavedSearch.id == search_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Saved search not found")
 
-    source_list = [s.strip() for s in row.sources.split(",") if s.strip()]
+    source_list = [s.strip() for s in (row.sources or "").split(",") if s.strip()]
+
+    # LIVE fetch every time (DO NOT STORE results)
     results = await unified_search(query=row.query, sources=source_list, limit=limit)
 
     return SearchResponse(
         query=row.query,
-        sources=source_list,  # FastAPI validates against Source
+        sources=source_list,
         count=len(results),
         results=results,
     )
-
