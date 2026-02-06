@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useAuth } from "./providers";
 
 type Money = {
   amount: number;
@@ -41,15 +43,17 @@ function formatPrice(price?: Money | null) {
 }
 
 export default function HomePage() {
+  const { user, loading: authLoading, signOut, accessToken } = useAuth();
+
   const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
   // search form state
   const [q, setQ] = useState("iphone");
-  const [sources, setSources] = useState("kijiji");
+  const [sources, setSources] = useState("kijiji,ebay");
   const [limit, setLimit] = useState(20);
 
   // search results state
-  const [loading, setLoading] = useState(false);
+  const [searchLoading, setSearchLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<SearchResponse | null>(null);
 
@@ -69,9 +73,23 @@ export default function HomePage() {
   async function fetchSavedSearches() {
     setSavedLoading(true);
     setSavedError(null);
+
     try {
-      const res = await fetch(`${API_BASE}/saved-searches`, { cache: "no-store" });
-      if (!res.ok) throw new Error(`GET /saved-searches failed (${res.status})`);
+      if (!accessToken) {
+        setSaved([]);
+        return;
+      }
+
+      const res = await fetch(`${API_BASE}/saved-searches`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        cache: "no-store",
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`GET /saved-searches failed (${res.status}): ${text}`);
+      }
+
       const json = (await res.json()) as SavedSearch[];
       setSaved(json);
     } catch (err: any) {
@@ -81,15 +99,16 @@ export default function HomePage() {
     }
   }
 
+  // when auth changes, refresh saved searches
   useEffect(() => {
-    // load saved searches on first render
-    fetchSavedSearches();
+    if (user) fetchSavedSearches();
+    else setSaved([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [user, accessToken]);
 
   async function onSearch(e: React.FormEvent) {
     e.preventDefault();
-    setLoading(true);
+    setSearchLoading(true);
     setError(null);
     setData(null);
 
@@ -104,15 +123,18 @@ export default function HomePage() {
     } catch (err: any) {
       setError(err?.message ?? "Unknown error");
     } finally {
-      setLoading(false);
+      setSearchLoading(false);
     }
   }
 
   async function onSaveCurrentSearch() {
     setSavedError(null);
+
     try {
+      if (!accessToken) throw new Error("Please log in to save searches.");
+
       const payload = {
-        query: q,
+        query: q.trim(),
         sources: sources
           .split(",")
           .map((s) => s.trim())
@@ -121,7 +143,10 @@ export default function HomePage() {
 
       const res = await fetch(`${API_BASE}/saved-searches`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
         body: JSON.stringify(payload),
       });
 
@@ -138,14 +163,20 @@ export default function HomePage() {
 
   async function onDeleteSavedSearch(id: number) {
     setSavedError(null);
+
     try {
+      if (!accessToken) throw new Error("Please log in to delete saved searches.");
+
       const res = await fetch(`${API_BASE}/saved-searches/${id}`, {
         method: "DELETE",
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
+
       if (!res.ok) {
         const text = await res.text();
         throw new Error(`DELETE /saved-searches/${id} failed (${res.status}): ${text}`);
       }
+
       await fetchSavedSearches();
     } catch (err: any) {
       setSavedError(err?.message ?? "Failed to delete saved search");
@@ -153,29 +184,36 @@ export default function HomePage() {
   }
 
   async function onRunSavedSearch(id: number) {
-    setLoading(true);
+    setSearchLoading(true);
     setError(null);
     setData(null);
 
     try {
-      const res = await fetch(`${API_BASE}/saved-searches/${id}/run?limit=${limit}`, {
-        cache: "no-store",
-      });
+      const s = saved.find((x) => x.id === id);
+      if (!s) throw new Error("Saved search not found.");
+
+      // sync form inputs
+      setQ(s.query);
+      setSources(s.sources.join(","));
+
+      // run normal search endpoint (fresh results)
+      const params = new URLSearchParams();
+      params.set("q", s.query);
+      params.set("sources", s.sources.join(","));
+      params.set("limit", String(limit));
+
+      const res = await fetch(`${API_BASE}/search?${params.toString()}`, { cache: "no-store" });
       if (!res.ok) {
         const text = await res.text();
         throw new Error(`Run saved search failed (${res.status}): ${text}`);
       }
+
       const json = (await res.json()) as SearchResponse;
-
-      // sync the form inputs to what was saved (nice UX)
-      setQ(json.query);
-      setSources(json.sources.join(","));
-
       setData(json);
     } catch (err: any) {
       setError(err?.message ?? "Failed to run saved search");
     } finally {
-      setLoading(false);
+      setSearchLoading(false);
     }
   }
 
@@ -188,6 +226,27 @@ export default function HomePage() {
             Unified marketplace search (starting with Kijiji). Backend: {API_BASE}
           </p>
         </header>
+
+        <div className="flex items-center gap-3">
+          {authLoading ? (
+            <span className="text-sm text-gray-500">Loading auth...</span>
+          ) : user ? (
+            <>
+              <span className="text-sm">Logged in as: {user.email}</span>
+              <button
+                onClick={signOut}
+                className="rounded-md border px-3 py-1 text-sm"
+                type="button"
+              >
+                Logout
+              </button>
+            </>
+          ) : (
+            <Link className="text-sm underline" href="/login">
+              Login
+            </Link>
+          )}
+        </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* LEFT: Search */}
@@ -232,9 +291,9 @@ export default function HomePage() {
                 <button
                   type="submit"
                   className="rounded-lg bg-black text-white px-4 py-2 disabled:opacity-60"
-                  disabled={loading || !q.trim()}
+                  disabled={searchLoading || !q.trim()}
                 >
-                  {loading ? "Searching..." : "Search"}
+                  {searchLoading ? "Searching..." : "Search"}
                 </button>
 
                 <button
@@ -344,15 +403,15 @@ export default function HomePage() {
               )}
 
               {saved.length === 0 ? (
-                <p className="text-sm text-gray-500">No saved searches yet.</p>
+                <p className="text-sm text-gray-500">
+                  {user ? "No saved searches yet." : "Log in to see your saved searches."}
+                </p>
               ) : (
                 <ul className="space-y-2">
                   {saved.map((s) => (
                     <li key={s.id} className="rounded-lg border p-3 space-y-2">
                       <div className="text-sm font-medium line-clamp-1">{s.query}</div>
-                      <div className="text-xs text-gray-500">
-                        {s.sources.join(", ")} • id {s.id}
-                      </div>
+                      <div className="text-xs text-gray-500">{s.sources.join(", ")} • id {s.id}</div>
 
                       <div className="flex gap-2">
                         <button
