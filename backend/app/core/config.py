@@ -2,6 +2,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     DATABASE_URL: str
+    SUPABASE_JWT_SECRET: str | None = None
+    SUPABASE_URL: str | None = None
+    SUPABASE_ANON_KEY: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

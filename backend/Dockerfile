@@ -10,7 +10,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir -U pip setuptools wheel
 
 # Copy everything first so editable install can see /app/app
-COPY . /app
+COPY app /app/app
+COPY alembic /app/alembic
+COPY alembic.ini /app/alembic.ini
+COPY pyproject.toml /app/pyproject.toml
+COPY README.md /app/README.md
 
 # Now editable install works because app/ exists
 RUN pip install --no-cache-dir -e ".[dev]"

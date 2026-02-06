@@ -66,8 +66,12 @@ DATABASE_URL=postgresql+psycopg2://marketly:marketly@localhost:5432/marketly
 ```
 
 ## Roadmap
+- Expand to more marketplaces (ebay, facebook marketplace)
 - Improve scraping reliability and anti-block handling
 - Add filters, sorting, and search on the frontend
-- Add saved searches and price alerts
-- Expand to more marketplaces
-- Add user accounts and personalization
+- Add price alerts
+- Add user personalization
+
+## API Keys
+
+- https://developer.ebay.com/my/keys

@@ -2,6 +2,7 @@
 from fastapi import Depends
 from sqlalchemy.orm import Session
 
+from app.auth import get_current_user_id
 from app.db import get_db
 from app.models.saved_search import SavedSearch
 from app.schemas.saved_search import SavedSearchCreate, SavedSearchOut
@@ -66,8 +67,13 @@ async def search(
     )
 
 @app.post("/saved-searches", response_model=SavedSearchOut)
-def create_saved_search(payload: SavedSearchCreate, db: Session = Depends(get_db)):
+def create_saved_search(
+    payload: SavedSearchCreate,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
     row = SavedSearch(
+        user_id=user_id,
         query=payload.query,
         sources=",".join(payload.sources),
     )
@@ -84,8 +90,16 @@ def create_saved_search(payload: SavedSearchCreate, db: Session = Depends(get_db
 
 
 @app.get("/saved-searches", response_model=list[SavedSearchOut])
-def list_saved_searches(db: Session = Depends(get_db)):
-    rows = db.query(SavedSearch).order_by(SavedSearch.created_at.desc()).all()
+def list_saved_searches(
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    rows = (
+        db.query(SavedSearch)
+        .filter(SavedSearch.user_id == user_id)
+        .order_by(SavedSearch.created_at.desc())
+        .all()
+    )
 
     return [
         SavedSearchOut(
@@ -98,8 +112,16 @@ def list_saved_searches(db: Session = Depends(get_db)):
     ]
 
 @app.delete("/saved-searches/{search_id}")
-def delete_saved_search(search_id: int, db: Session = Depends(get_db)):
-    row = db.query(SavedSearch).filter(SavedSearch.id == search_id).first()
+def delete_saved_search(
+    search_id: int,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    row = (
+        db.query(SavedSearch)
+        .filter(SavedSearch.id == search_id, SavedSearch.user_id == user_id)
+        .first()
+    )
     if not row:
         raise HTTPException(status_code=404, detail="Saved search not found")
     db.delete(row)
@@ -112,8 +134,13 @@ async def run_saved_search(
     search_id: int,
     limit: int = 20,
     db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
 ):
-    row = db.query(SavedSearch).filter(SavedSearch.id == search_id).first()
+    row = (
+        db.query(SavedSearch)
+        .filter(SavedSearch.id == search_id, SavedSearch.user_id == user_id)
+        .first()
+    )
     if not row:
         raise HTTPException(status_code=404, detail="Saved search not found")
 
