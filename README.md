@@ -59,6 +59,16 @@ docker compose up -d
 Backend env vars live in `backend/.env` (see `backend/.env.example`):
 - `ENV`
 - `CACHE_TTL_SECONDS`
+- `DATABASE_URL`
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
+- `SUPABASE_JWT_SECRET`
+- `EBAY_ENV` (`production` or `sandbox`)
+- `EBAY_CLIENT_ID`
+- `EBAY_CLIENT_SECRET`
+- `EBAY_MARKETPLACE_ID` (for Canada use `EBAY_CA`)
+- `EBAY_ACCEPT_LANGUAGE` (for Canada use `en-CA`)
+- `EBAY_SCOPE` (optional, defaults to `https://api.ebay.com/oauth/api_scope`)
 
 If running the backend against Docker Postgres, set:
 ```
