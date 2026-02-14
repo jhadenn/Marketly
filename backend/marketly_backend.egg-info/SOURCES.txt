@@ -5,7 +5,7 @@ app/db.py
 app/main.py
 app/connectors/__init__.py
 app/connectors/base.py
-app/connectors/ebay_mock.py
+app/connectors/ebay_connector.py
 app/connectors/kijiji_scrape.py
 app/core/__init__.py
 app/core/cache.py
