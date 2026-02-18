@@ -1,22 +1,20 @@
-
-from fastapi import Depends
+from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user_id
+from app.connectors import CONNECTORS
+from app.core.logging import setup_logging
 from app.db import get_db
+from app.models.listing import SearchResponse, SearchSort, Source
 from app.models.saved_search import SavedSearch
 from app.schemas.saved_search import SavedSearchCreate, SavedSearchOut
-from fastapi import FastAPI, Query, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from app.core.logging import setup_logging
-from app.models.listing import SearchResponse, Source
 from app.services.search_service import unified_search
-from app.connectors import CONNECTORS
 
 setup_logging()
 
 app = FastAPI(title="Marketly API", version="0.1.0")
-print("LOADED MAIN.PY ✅", __file__)
+print("LOADED MAIN.PY", __file__)
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,6 +26,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+DEFAULT_SOURCES: list[Source] = ["ebay", "kijiji"]
+
+
+def parse_sources(raw_sources: list[str] | None) -> list[str]:
+    if not raw_sources:
+        return list(DEFAULT_SOURCES)
+
+    parsed: list[str] = []
+    for source_value in raw_sources:
+        for token in source_value.split(","):
+            cleaned = token.strip()
+            if cleaned:
+                parsed.append(cleaned)
+
+    if not parsed:
+        raise HTTPException(status_code=400, detail="No sources provided")
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for source_name in parsed:
+        if source_name in seen:
+            continue
+        seen.add(source_name)
+        deduped.append(source_name)
+    return deduped
+
 
 @app.get("/health")
 def health():
@@ -42,29 +67,39 @@ def sources():
 @app.get("/search", response_model=SearchResponse)
 async def search(
     q: str = Query(min_length=1, description="Search query"),
-    sources: str = Query(default="ebay,kijiji", description="Comma-separated sources"),
+    sources: list[str] | None = Query(
+        default=None,
+        description="Sources (comma-separated or repeated query param)",
+    ),
     limit: int = Query(default=20, ge=1, le=50),
+    offset: int = Query(default=0, ge=0),
+    sort: SearchSort = Query(default="relevance"),
 ):
-    source_list = [s.strip() for s in sources.split(",") if s.strip()]
-    if not source_list:
-        raise HTTPException(status_code=400, detail="No sources provided")
+    source_list = parse_sources(sources)
 
-    # validate sources
-    for s in source_list:
-        if s not in CONNECTORS:
-            raise HTTPException(status_code=400, detail=f"Unknown source: {s}")
+    for source_name in source_list:
+        if source_name not in CONNECTORS:
+            raise HTTPException(status_code=400, detail=f"Unknown source: {source_name}")
 
-    results = await unified_search(query=q, sources=source_list, limit=limit)
+    results, total, next_offset = await unified_search(
+        query=q,
+        sources=source_list,
+        limit=limit,
+        offset=offset,
+        sort=sort,
+    )
 
-    # typed list for response model
-    typed_sources: list[Source] = [s for s in source_list]  # FastAPI will validate
+    typed_sources: list[Source] = [source_name for source_name in source_list]
 
     return SearchResponse(
         query=q,
         sources=typed_sources,
         count=len(results),
         results=results,
+        next_offset=next_offset,
+        total=total,
     )
+
 
 @app.post("/saved-searches", response_model=SavedSearchOut)
 def create_saved_search(
@@ -111,6 +146,7 @@ def list_saved_searches(
         for r in rows
     ]
 
+
 @app.delete("/saved-searches/{search_id}")
 def delete_saved_search(
     search_id: int,
@@ -132,7 +168,9 @@ def delete_saved_search(
 @app.get("/saved-searches/{search_id}/run", response_model=SearchResponse)
 async def run_saved_search(
     search_id: int,
-    limit: int = 20,
+    limit: int = Query(default=20, ge=1, le=50),
+    offset: int = Query(default=0, ge=0),
+    sort: SearchSort = Query(default="relevance"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
@@ -144,14 +182,26 @@ async def run_saved_search(
     if not row:
         raise HTTPException(status_code=404, detail="Saved search not found")
 
-    source_list = [s.strip() for s in (row.sources or "").split(",") if s.strip()]
+    source_list = parse_sources([row.sources or ""])
+    for source_name in source_list:
+        if source_name not in CONNECTORS:
+            raise HTTPException(status_code=400, detail=f"Unknown source: {source_name}")
 
-    # LIVE fetch every time (DO NOT STORE results)
-    results = await unified_search(query=row.query, sources=source_list, limit=limit)
+    results, total, next_offset = await unified_search(
+        query=row.query,
+        sources=source_list,
+        limit=limit,
+        offset=offset,
+        sort=sort,
+    )
+
+    typed_sources: list[Source] = [source_name for source_name in source_list]
 
     return SearchResponse(
         query=row.query,
-        sources=source_list,
+        sources=typed_sources,
         count=len(results),
         results=results,
+        next_offset=next_offset,
+        total=total,
     )

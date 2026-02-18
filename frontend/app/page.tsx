@@ -1,8 +1,20 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useAuth } from "./providers";
+
+const SOURCE_OPTIONS = ["kijiji", "ebay"] as const;
+const DEFAULT_SOURCES = [...SOURCE_OPTIONS];
+const SORT_OPTIONS = [
+  { value: "relevance", label: "Relevance", disabled: false },
+  { value: "price_asc", label: "Price: Low -> High", disabled: false },
+  { value: "price_desc", label: "Price: High -> Low", disabled: false },
+  { value: "newest", label: "Newest (unavailable)", disabled: true },
+] as const;
+
+type SourceOption = (typeof SOURCE_OPTIONS)[number];
+type SortOption = (typeof SORT_OPTIONS)[number]["value"];
 
 type Money = {
   amount: number;
@@ -28,6 +40,8 @@ type SearchResponse = {
   sources: string[];
   count: number;
   results: Listing[];
+  next_offset?: number | null;
+  total?: number | null;
 };
 
 type SavedSearch = {
@@ -37,38 +51,224 @@ type SavedSearch = {
   created_at: string;
 };
 
+function isSourceOption(value: string): value is SourceOption {
+  return SOURCE_OPTIONS.includes(value as SourceOption);
+}
+
 function formatPrice(price?: Money | null) {
-  if (!price) return "—";
+  if (!price) return "-";
   return `${price.currency} ${price.amount}`;
+}
+
+function formatSourceLabel(source: string) {
+  if (!source) return "";
+  return source.charAt(0).toUpperCase() + source.slice(1);
 }
 
 export default function HomePage() {
   const { user, loading: authLoading, signOut, accessToken } = useAuth();
-
   const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
-  // search form state
   const [q, setQ] = useState("iphone");
-  const [sources, setSources] = useState("kijiji,ebay");
+  const [sources, setSources] = useState<SourceOption[]>(DEFAULT_SOURCES);
+  const [sortBy, setSortBy] = useState<SortOption>("relevance");
   const [limit, setLimit] = useState(20);
 
-  // search results state
   const [searchLoading, setSearchLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [data, setData] = useState<SearchResponse | null>(null);
+  const [results, setResults] = useState<Listing[]>([]);
+  const [nextOffset, setNextOffset] = useState<number | null>(null);
+  const [total, setTotal] = useState<number | null>(null);
+  const [hasSearched, setHasSearched] = useState(false);
 
-  // saved searches state
+  const [activeQuery, setActiveQuery] = useState("");
+  const [activeSources, setActiveSources] = useState<SourceOption[]>(DEFAULT_SOURCES);
+  const [activeSort, setActiveSort] = useState<SortOption>("relevance");
+  const [activeLimit, setActiveLimit] = useState(20);
+
   const [saved, setSaved] = useState<SavedSearch[]>([]);
   const [savedLoading, setSavedLoading] = useState(false);
   const [savedError, setSavedError] = useState<string | null>(null);
 
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const seenKeysRef = useRef<Set<string>>(new Set());
+  const fetchInFlightRef = useRef(false);
+
   const requestUrl = useMemo(() => {
     const params = new URLSearchParams();
-    params.set("q", q);
-    params.set("sources", sources);
+    params.set("q", q.trim());
+    for (const source of sources) {
+      params.append("sources", source);
+    }
+    params.set("sort", sortBy);
     params.set("limit", String(limit));
+    params.set("offset", "0");
     return `${API_BASE}/search?${params.toString()}`;
-  }, [API_BASE, q, sources, limit]);
+  }, [API_BASE, limit, q, sortBy, sources]);
+
+  const hasMore = hasSearched && nextOffset !== null;
+
+  const buildSearchUrl = useCallback(
+    (
+      query: string,
+      selectedSources: SourceOption[],
+      selectedSort: SortOption,
+      selectedLimit: number,
+      offset: number,
+    ) => {
+      const params = new URLSearchParams();
+      params.set("q", query);
+      for (const source of selectedSources) {
+        params.append("sources", source);
+      }
+      params.set("sort", selectedSort);
+      params.set("limit", String(selectedLimit));
+      params.set("offset", String(offset));
+      return `${API_BASE}/search?${params.toString()}`;
+    },
+    [API_BASE],
+  );
+
+  const runSearch = useCallback(
+    async ({
+      query,
+      sourceList,
+      selectedSort,
+      selectedLimit,
+      offset,
+      append,
+    }: {
+      query: string;
+      sourceList: SourceOption[];
+      selectedSort: SortOption;
+      selectedLimit: number;
+      offset: number;
+      append: boolean;
+    }) => {
+      if (fetchInFlightRef.current) return;
+      fetchInFlightRef.current = true;
+
+      if (append) {
+        setLoadingMore(true);
+      } else {
+        setSearchLoading(true);
+        setError(null);
+        setResults([]);
+        setNextOffset(null);
+        setTotal(null);
+        seenKeysRef.current = new Set();
+      }
+
+      try {
+        const url = buildSearchUrl(query, sourceList, selectedSort, selectedLimit, offset);
+        const res = await fetch(url, { cache: "no-store" });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`API error ${res.status}: ${text}`);
+        }
+
+        const json = await res.json();
+        let incoming: Listing[] = [];
+        let incomingNextOffset: number | null | undefined;
+        let incomingTotal: number | null | undefined;
+
+        if (Array.isArray(json)) {
+          incoming = json as Listing[];
+        } else {
+          const payload = json as SearchResponse;
+          incoming = payload.results ?? [];
+          incomingNextOffset = payload.next_offset;
+          incomingTotal = payload.total ?? null;
+        }
+
+        const dedupedIncoming: Listing[] = [];
+        for (const item of incoming) {
+          const listingKey = `${item.source}:${item.source_listing_id || item.url}`;
+          if (seenKeysRef.current.has(listingKey)) continue;
+          seenKeysRef.current.add(listingKey);
+          dedupedIncoming.push(item);
+        }
+
+        if (append) {
+          setResults((prev) => [...prev, ...dedupedIncoming]);
+        } else {
+          setResults(dedupedIncoming);
+          setActiveQuery(query);
+          setActiveSources(sourceList);
+          setActiveSort(selectedSort);
+          setActiveLimit(selectedLimit);
+          setHasSearched(true);
+        }
+
+        if (incomingTotal !== undefined) {
+          setTotal(incomingTotal);
+        } else {
+          setTotal(null);
+        }
+
+        if (incomingNextOffset === undefined) {
+          setNextOffset(incoming.length < selectedLimit ? null : offset + selectedLimit);
+        } else {
+          setNextOffset(incomingNextOffset);
+        }
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : "Unknown error");
+      } finally {
+        if (append) {
+          setLoadingMore(false);
+        } else {
+          setSearchLoading(false);
+        }
+        fetchInFlightRef.current = false;
+      }
+    },
+    [buildSearchUrl],
+  );
+
+  const loadMore = useCallback(async () => {
+    if (!hasMore || nextOffset === null || searchLoading || loadingMore || fetchInFlightRef.current) {
+      return;
+    }
+
+    await runSearch({
+      query: activeQuery,
+      sourceList: activeSources,
+      selectedSort: activeSort,
+      selectedLimit: activeLimit,
+      offset: nextOffset,
+      append: true,
+    });
+  }, [
+    activeLimit,
+    activeQuery,
+    activeSort,
+    activeSources,
+    hasMore,
+    loadingMore,
+    nextOffset,
+    runSearch,
+    searchLoading,
+  ]);
+
+  useEffect(() => {
+    if (!hasMore || searchLoading || loadingMore) return;
+    const node = sentinelRef.current;
+    if (!node) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const first = entries[0];
+        if (first?.isIntersecting) {
+          void loadMore();
+        }
+      },
+      { rootMargin: "300px 0px" },
+    );
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [hasMore, loadMore, loadingMore, searchLoading]);
 
   async function fetchSavedSearches() {
     setSavedLoading(true);
@@ -92,39 +292,35 @@ export default function HomePage() {
 
       const json = (await res.json()) as SavedSearch[];
       setSaved(json);
-    } catch (err: any) {
-      setSavedError(err?.message ?? "Failed to load saved searches");
+    } catch (err: unknown) {
+      setSavedError(err instanceof Error ? err.message : "Failed to load saved searches");
     } finally {
       setSavedLoading(false);
     }
   }
 
-  // when auth changes, refresh saved searches
   useEffect(() => {
-    if (user) fetchSavedSearches();
-    else setSaved([]);
+    if (user) {
+      void fetchSavedSearches();
+    } else {
+      setSaved([]);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, accessToken]);
 
   async function onSearch(e: React.FormEvent) {
     e.preventDefault();
-    setSearchLoading(true);
-    setError(null);
-    setData(null);
+    const query = q.trim();
+    if (!query || sources.length === 0) return;
 
-    try {
-      const res = await fetch(requestUrl, { cache: "no-store" });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`API error ${res.status}: ${text}`);
-      }
-      const json = (await res.json()) as SearchResponse;
-      setData(json);
-    } catch (err: any) {
-      setError(err?.message ?? "Unknown error");
-    } finally {
-      setSearchLoading(false);
-    }
+    await runSearch({
+      query,
+      sourceList: sources,
+      selectedSort: sortBy,
+      selectedLimit: limit,
+      offset: 0,
+      append: false,
+    });
   }
 
   async function onSaveCurrentSearch() {
@@ -132,13 +328,11 @@ export default function HomePage() {
 
     try {
       if (!accessToken) throw new Error("Please log in to save searches.");
+      if (sources.length === 0) throw new Error("Select at least one source.");
 
       const payload = {
         query: q.trim(),
-        sources: sources
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean),
+        sources,
       };
 
       const res = await fetch(`${API_BASE}/saved-searches`, {
@@ -156,8 +350,8 @@ export default function HomePage() {
       }
 
       await fetchSavedSearches();
-    } catch (err: any) {
-      setSavedError(err?.message ?? "Failed to save search");
+    } catch (err: unknown) {
+      setSavedError(err instanceof Error ? err.message : "Failed to save search");
     }
   }
 
@@ -178,43 +372,51 @@ export default function HomePage() {
       }
 
       await fetchSavedSearches();
-    } catch (err: any) {
-      setSavedError(err?.message ?? "Failed to delete saved search");
+    } catch (err: unknown) {
+      setSavedError(err instanceof Error ? err.message : "Failed to delete saved search");
     }
   }
 
   async function onRunSavedSearch(id: number) {
-    setSearchLoading(true);
-    setError(null);
-    setData(null);
-
     try {
-      const s = saved.find((x) => x.id === id);
-      if (!s) throw new Error("Saved search not found.");
+      const savedSearch = saved.find((entry) => entry.id === id);
+      if (!savedSearch) throw new Error("Saved search not found.");
 
-      // sync form inputs
-      setQ(s.query);
-      setSources(s.sources.join(","));
+      const normalizedSources = savedSearch.sources.filter(isSourceOption);
+      if (normalizedSources.length === 0) throw new Error("Saved search has no valid sources.");
 
-      // run normal search endpoint (fresh results)
-      const params = new URLSearchParams();
-      params.set("q", s.query);
-      params.set("sources", s.sources.join(","));
-      params.set("limit", String(limit));
+      setQ(savedSearch.query);
+      setSources(normalizedSources);
 
-      const res = await fetch(`${API_BASE}/search?${params.toString()}`, { cache: "no-store" });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Run saved search failed (${res.status}): ${text}`);
-      }
-
-      const json = (await res.json()) as SearchResponse;
-      setData(json);
-    } catch (err: any) {
-      setError(err?.message ?? "Failed to run saved search");
-    } finally {
-      setSearchLoading(false);
+      await runSearch({
+        query: savedSearch.query,
+        sourceList: normalizedSources,
+        selectedSort: sortBy,
+        selectedLimit: limit,
+        offset: 0,
+        append: false,
+      });
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to run saved search");
     }
+  }
+
+  async function onChangeSort(nextSort: SortOption) {
+    setSortBy(nextSort);
+    if (!hasSearched) return;
+
+    await runSearch({
+      query: activeQuery,
+      sourceList: activeSources,
+      selectedSort: nextSort,
+      selectedLimit: activeLimit,
+      offset: 0,
+      append: false,
+    });
+  }
+
+  function toggleSource(source: SourceOption) {
+    setSources((prev) => (prev.includes(source) ? prev.filter((s) => s !== source) : [...prev, source]));
   }
 
   return (
@@ -222,20 +424,20 @@ export default function HomePage() {
       <div className="mx-auto max-w-6xl space-y-6">
         <header className="space-y-2">
           <h1 className="text-3xl font-semibold">Marketly MVP</h1>
-          <p className="text-sm text-gray-500">
-            Unified marketplace search (starting with Kijiji). Backend: {API_BASE}
+          <p className="text-sm text-gray-400">
+            Unified marketplace search (Kijiji + eBay). Backend: {API_BASE}
           </p>
         </header>
 
         <div className="flex items-center gap-3">
           {authLoading ? (
-            <span className="text-sm text-gray-500">Loading auth...</span>
+            <span className="text-sm text-gray-400">Loading auth...</span>
           ) : user ? (
             <>
               <span className="text-sm">Logged in as: {user.email}</span>
               <button
                 onClick={signOut}
-                className="rounded-md border px-3 py-1 text-sm"
+                className="rounded-md border border-gray-700 px-3 py-1 text-sm"
                 type="button"
               >
                 Logout
@@ -248,36 +450,98 @@ export default function HomePage() {
           )}
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* LEFT: Search */}
-          <section className="lg:col-span-2 space-y-4">
-            <form onSubmit={onSearch} className="rounded-xl border p-4 space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div className="space-y-1">
-                  <label className="text-sm font-medium">Search</label>
-                  <input
-                    className="w-full rounded-lg border px-3 py-2"
-                    value={q}
-                    onChange={(e) => setQ(e.target.value)}
-                    placeholder="e.g., iphone, macbook, snowboard"
-                  />
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+          <section className="space-y-4 lg:col-span-2">
+            <form onSubmit={onSearch} className="space-y-4 rounded-xl border border-gray-800 p-4">
+              <div className="space-y-1">
+                <label className="text-sm font-medium">Search</label>
+                <input
+                  className="w-full rounded-lg border border-gray-700 bg-transparent px-3 py-2"
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder="e.g., iphone, macbook, snowboard"
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="submit"
+                  className="rounded-lg bg-white px-4 py-2 text-black disabled:opacity-60"
+                  disabled={searchLoading || loadingMore || !q.trim() || sources.length === 0}
+                >
+                  {searchLoading ? "Searching..." : "Search"}
+                </button>
+
+                <button
+                  type="button"
+                  className="rounded-lg border border-gray-700 px-4 py-2 disabled:opacity-60"
+                  onClick={onSaveCurrentSearch}
+                  disabled={!q.trim() || sources.length === 0}
+                >
+                  Save search
+                </button>
+
+                <a
+                  className="text-sm text-gray-300 underline"
+                  href={`${API_BASE}/docs`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Open API docs
+                </a>
+              </div>
+
+              <div className="break-all text-xs text-gray-500">Request: {requestUrl}</div>
+            </form>
+
+            <div className="sticky top-3 z-10 rounded-xl border border-gray-800 bg-black/85 p-3 backdrop-blur">
+              <div className="flex flex-wrap items-end gap-4">
+                <div className="space-y-2">
+                  <p className="text-xs font-medium uppercase tracking-wide text-gray-400">Sources</p>
+                  <div className="flex flex-wrap gap-2">
+                    {SOURCE_OPTIONS.map((source) => {
+                      const selected = sources.includes(source);
+                      return (
+                        <button
+                          key={source}
+                          type="button"
+                          onClick={() => toggleSource(source)}
+                          className={`rounded-full border px-3 py-1 text-sm capitalize transition ${
+                            selected
+                              ? "border-white bg-white text-black"
+                              : "border-gray-700 text-gray-300 hover:border-gray-500"
+                          }`}
+                        >
+                          {source}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
 
-                <div className="space-y-1">
-                  <label className="text-sm font-medium">Sources</label>
-                  <input
-                    className="w-full rounded-lg border px-3 py-2"
-                    value={sources}
-                    onChange={(e) => setSources(e.target.value)}
-                    placeholder="kijiji (later: kijiji,ebay)"
-                  />
-                  <p className="text-xs text-gray-500">Comma-separated</p>
+                <div className="space-y-2">
+                  <label className="block text-xs font-medium uppercase tracking-wide text-gray-400">
+                    Sort
+                  </label>
+                  <select
+                    className="rounded-lg border border-gray-700 bg-black px-3 py-2 text-sm"
+                    value={sortBy}
+                    onChange={(e) => void onChangeSort(e.target.value as SortOption)}
+                  >
+                    {SORT_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value} disabled={option.disabled}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
                 </div>
 
-                <div className="space-y-1">
-                  <label className="text-sm font-medium">Limit</label>
+                <div className="space-y-2">
+                  <label className="block text-xs font-medium uppercase tracking-wide text-gray-400">
+                    Limit
+                  </label>
                   <input
-                    className="w-full rounded-lg border px-3 py-2"
+                    className="w-24 rounded-lg border border-gray-700 bg-black px-3 py-2 text-sm"
                     type="number"
                     value={limit}
                     min={1}
@@ -287,108 +551,119 @@ export default function HomePage() {
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  type="submit"
-                  className="rounded-lg bg-black text-white px-4 py-2 disabled:opacity-60"
-                  disabled={searchLoading || !q.trim()}
-                >
-                  {searchLoading ? "Searching..." : "Search"}
-                </button>
-
-                <button
-                  type="button"
-                  className="rounded-lg border px-4 py-2 disabled:opacity-60"
-                  onClick={onSaveCurrentSearch}
-                  disabled={!q.trim()}
-                >
-                  Save search
-                </button>
-
-                <a
-                  className="text-sm underline text-gray-700"
-                  href={`${API_BASE}/docs`}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Open API docs
-                </a>
-              </div>
-
-              <div className="text-xs text-gray-500 break-all">Request: {requestUrl}</div>
-            </form>
+              {sources.length === 0 ? (
+                <p className="mt-2 text-xs text-red-300">Select at least one source to search.</p>
+              ) : null}
+            </div>
 
             {error && (
-              <div className="rounded-xl border border-red-300 bg-red-50 p-4 text-red-800">
-                {error}
-              </div>
+              <div className="rounded-xl border border-red-700 bg-red-900/30 p-4 text-red-200">{error}</div>
             )}
 
-            {data && (
+            {searchLoading && results.length === 0 && (
               <section className="space-y-3">
-                <div className="flex items-baseline justify-between">
-                  <h2 className="text-xl font-semibold">Results ({data.count})</h2>
-                  <p className="text-xs text-gray-500">Sources: {data.sources.join(", ")}</p>
+                <h2 className="text-xl font-semibold">Results</h2>
+                <ul className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  {Array.from({ length: 4 }).map((_, index) => (
+                    <li
+                      key={`skeleton-${index}`}
+                      className="h-36 animate-pulse rounded-xl border border-gray-800 bg-gray-900/70"
+                    />
+                  ))}
+                </ul>
+              </section>
+            )}
+
+            {hasSearched && !searchLoading && (
+              <section className="space-y-3">
+                <div className="flex items-baseline justify-between gap-3">
+                  <h2 className="text-xl font-semibold">
+                    Results ({total ?? results.length})
+                  </h2>
+                  <p className="text-xs text-gray-500">
+                    Showing {results.length}
+                    {total !== null ? ` of ${total}` : ""}
+                  </p>
                 </div>
 
-                <ul className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {data.results.map((item) => {
-                    const img = item.image_urls?.[0];
-                    return (
-                      <li key={`${item.source}:${item.source_listing_id}`} className="rounded-xl border p-4">
-                        <div className="flex gap-4">
-                          <div className="w-24 h-24 shrink-0 rounded-lg bg-gray-100 overflow-hidden flex items-center justify-center">
-                            {img ? (
-                              // eslint-disable-next-line @next/next/no-img-element
-                              <img src={img} alt="" className="w-full h-full object-cover" />
-                            ) : (
-                              <span className="text-xs text-gray-400">No image</span>
-                            )}
-                          </div>
-
-                          <div className="min-w-0 flex-1 space-y-1">
-                            <a
-                              href={item.url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="font-medium hover:underline line-clamp-2"
-                            >
-                              {item.title}
-                            </a>
-
-                            <div className="text-sm text-gray-700">
-                              <span className="font-semibold">{formatPrice(item.price)}</span>
-                              {item.location ? <span className="text-gray-500"> • {item.location}</span> : null}
+                {results.length === 0 ? (
+                  <div className="rounded-xl border border-gray-800 p-4 text-sm text-gray-400">
+                    No results found.
+                  </div>
+                ) : (
+                  <ul className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                    {results.map((item) => {
+                      const img = item.image_urls?.[0];
+                      const cardKey = `${item.source}:${item.source_listing_id || item.url}`;
+                      return (
+                        <li key={cardKey} className="rounded-xl border border-gray-800 p-4">
+                          <div className="flex gap-4">
+                            <div className="flex h-24 w-24 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-gray-900">
+                              {img ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img src={img} alt="" className="h-full w-full object-cover" />
+                              ) : (
+                                <span className="text-xs text-gray-500">No image</span>
+                              )}
                             </div>
 
-                            <div className="text-xs text-gray-500">
-                              {item.source}
-                              {typeof item.score === "number" ? (
-                                <span> • score {item.score.toFixed(2)}</span>
+                            <div className="min-w-0 flex-1 space-y-2">
+                              <div className="flex items-start justify-between gap-2">
+                                <a
+                                  href={item.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="line-clamp-2 font-medium hover:underline"
+                                >
+                                  {item.title}
+                                </a>
+                                <span className="rounded-full border border-gray-700 px-2 py-0.5 text-[11px] uppercase tracking-wide text-gray-300">
+                                  {formatSourceLabel(item.source)}
+                                </span>
+                              </div>
+
+                              <div className="text-sm text-gray-300">
+                                <span className="font-semibold">{formatPrice(item.price)}</span>
+                                {item.location ? <span className="text-gray-500"> | {item.location}</span> : null}
+                              </div>
+
+                              <div className="text-xs text-gray-500">
+                                {typeof item.score === "number" ? `Score ${item.score.toFixed(2)}` : ""}
+                              </div>
+
+                              {item.snippet ? (
+                                <p className="line-clamp-2 text-sm text-gray-400">{item.snippet}</p>
                               ) : null}
                             </div>
-
-                            {item.snippet ? (
-                              <p className="text-sm text-gray-600 line-clamp-2">{item.snippet}</p>
-                            ) : null}
                           </div>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+
+                <div ref={sentinelRef} className="h-2" />
+
+                {loadingMore ? (
+                  <div className="rounded-lg border border-gray-800 p-3 text-center text-sm text-gray-400">
+                    Loading more...
+                  </div>
+                ) : null}
+
+                {!hasMore && results.length > 0 ? (
+                  <div className="text-center text-xs text-gray-500">No more results.</div>
+                ) : null}
               </section>
             )}
           </section>
 
-          {/* RIGHT: Saved Searches */}
           <aside className="space-y-3">
-            <div className="rounded-xl border p-4 space-y-3">
+            <div className="space-y-3 rounded-xl border border-gray-800 p-4">
               <div className="flex items-center justify-between">
                 <h2 className="text-lg font-semibold">Saved searches</h2>
                 <button
-                  className="text-sm underline text-gray-700"
-                  onClick={fetchSavedSearches}
+                  className="text-sm text-gray-300 underline"
+                  onClick={() => void fetchSavedSearches()}
                   disabled={savedLoading}
                   type="button"
                 >
@@ -397,7 +672,7 @@ export default function HomePage() {
               </div>
 
               {savedError && (
-                <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800">
+                <div className="rounded-lg border border-red-700 bg-red-900/30 p-3 text-sm text-red-200">
                   {savedError}
                 </div>
               )}
@@ -408,23 +683,25 @@ export default function HomePage() {
                 </p>
               ) : (
                 <ul className="space-y-2">
-                  {saved.map((s) => (
-                    <li key={s.id} className="rounded-lg border p-3 space-y-2">
-                      <div className="text-sm font-medium line-clamp-1">{s.query}</div>
-                      <div className="text-xs text-gray-500">{s.sources.join(", ")} • id {s.id}</div>
+                  {saved.map((entry) => (
+                    <li key={entry.id} className="space-y-2 rounded-lg border border-gray-800 p-3">
+                      <div className="line-clamp-1 text-sm font-medium">{entry.query}</div>
+                      <div className="text-xs text-gray-500">
+                        {entry.sources.join(", ")} | id {entry.id}
+                      </div>
 
                       <div className="flex gap-2">
                         <button
-                          className="rounded-md bg-black text-white px-3 py-1 text-sm"
+                          className="rounded-md bg-white px-3 py-1 text-sm text-black"
                           type="button"
-                          onClick={() => onRunSavedSearch(s.id)}
+                          onClick={() => void onRunSavedSearch(entry.id)}
                         >
                           Run
                         </button>
                         <button
-                          className="rounded-md border px-3 py-1 text-sm"
+                          className="rounded-md border border-gray-700 px-3 py-1 text-sm"
                           type="button"
-                          onClick={() => onDeleteSavedSearch(s.id)}
+                          onClick={() => void onDeleteSavedSearch(entry.id)}
                         >
                           Delete
                         </button>

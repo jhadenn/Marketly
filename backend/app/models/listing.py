@@ -3,6 +3,7 @@ from typing import Literal, Optional, List
 
 
 Source = Literal["ebay", "kijiji"]
+SearchSort = Literal["relevance", "price_asc", "price_desc", "newest"]
 
 
 class Money(BaseModel):
@@ -30,3 +31,5 @@ class SearchResponse(BaseModel):
     sources: list[Source]
     count: int
     results: list[Listing]
+    next_offset: Optional[int] = None
+    total: Optional[int] = None
