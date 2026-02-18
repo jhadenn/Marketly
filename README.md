@@ -161,9 +161,9 @@ docker compose up -d
 - [X] Connect database
 - [X] Create basic frontend
 - [X] Add auth
-- [] Add filters and sorting
-- [] Pagination / infinite scroll
-- [] Better loading states
+- [X] Add filters and sorting
+- [X] Pagination / infinite scroll
+- [X] Better loading states
 - [] Edit saved searches
 - [] Notifications
 - [] Polish front end
