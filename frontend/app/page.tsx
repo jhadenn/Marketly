@@ -4,8 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useAuth } from "./providers";
 
-const SOURCE_OPTIONS = ["kijiji", "ebay"] as const;
-const DEFAULT_SOURCES = [...SOURCE_OPTIONS];
+const SOURCE_OPTIONS = ["kijiji", "ebay", "facebook"] as const;
+const DEFAULT_SOURCES: SourceOption[] = ["kijiji", "ebay", "facebook"];
 const SORT_OPTIONS = [
   { value: "relevance", label: "Relevance", disabled: false },
   { value: "price_asc", label: "Price: Low -> High", disabled: false },
@@ -42,6 +42,13 @@ type SearchResponse = {
   results: Listing[];
   next_offset?: number | null;
   total?: number | null;
+  source_errors?: Record<string, SourceErrorEntry> | null;
+};
+
+type SourceErrorEntry = {
+  code: string;
+  message: string;
+  retryable?: boolean;
 };
 
 type SavedSearch = {
@@ -62,14 +69,18 @@ function formatPrice(price?: Money | null) {
 
 function formatSourceLabel(source: string) {
   if (!source) return "";
-  return source.charAt(0).toUpperCase() + source.slice(1);
+  return source
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 export default function HomePage() {
   const { user, loading: authLoading, signOut, accessToken } = useAuth();
   const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
-  const [q, setQ] = useState("iphone");
+  const [q, setQ] = useState("");
   const [sources, setSources] = useState<SourceOption[]>(DEFAULT_SOURCES);
   const [sortBy, setSortBy] = useState<SortOption>("relevance");
   const [limit, setLimit] = useState(20);
@@ -80,6 +91,7 @@ export default function HomePage() {
   const [results, setResults] = useState<Listing[]>([]);
   const [nextOffset, setNextOffset] = useState<number | null>(null);
   const [total, setTotal] = useState<number | null>(null);
+  const [sourceErrors, setSourceErrors] = useState<Record<string, SourceErrorEntry>>({});
   const [hasSearched, setHasSearched] = useState(false);
 
   const [activeQuery, setActiveQuery] = useState("");
@@ -157,6 +169,7 @@ export default function HomePage() {
         setResults([]);
         setNextOffset(null);
         setTotal(null);
+        setSourceErrors({});
         seenKeysRef.current = new Set();
       }
 
@@ -172,6 +185,7 @@ export default function HomePage() {
         let incoming: Listing[] = [];
         let incomingNextOffset: number | null | undefined;
         let incomingTotal: number | null | undefined;
+        let incomingSourceErrors: Record<string, SourceErrorEntry> = {};
 
         if (Array.isArray(json)) {
           incoming = json as Listing[];
@@ -180,6 +194,7 @@ export default function HomePage() {
           incoming = payload.results ?? [];
           incomingNextOffset = payload.next_offset;
           incomingTotal = payload.total ?? null;
+          incomingSourceErrors = payload.source_errors ?? {};
         }
 
         const dedupedIncoming: Listing[] = [];
@@ -192,8 +207,10 @@ export default function HomePage() {
 
         if (append) {
           setResults((prev) => [...prev, ...dedupedIncoming]);
+          setSourceErrors((prev) => ({ ...prev, ...incomingSourceErrors }));
         } else {
           setResults(dedupedIncoming);
+          setSourceErrors(incomingSourceErrors);
           setActiveQuery(query);
           setActiveSources(sourceList);
           setActiveSort(selectedSort);
@@ -423,9 +440,9 @@ export default function HomePage() {
     <main className="min-h-screen p-6 md:p-10">
       <div className="mx-auto max-w-6xl space-y-6">
         <header className="space-y-2">
-          <h1 className="text-3xl font-semibold">Marketly MVP</h1>
+          <h1 className="text-3xl font-semibold">Marketly</h1>
           <p className="text-sm text-gray-400">
-            Unified marketplace search (Kijiji + eBay). Backend: {API_BASE}
+            Unified marketplace search (Kijiji + eBay + Facebook). 
           </p>
         </header>
 
@@ -558,6 +575,23 @@ export default function HomePage() {
 
             {error && (
               <div className="rounded-xl border border-red-700 bg-red-900/30 p-4 text-red-200">{error}</div>
+            )}
+            {Object.keys(sourceErrors).length > 0 && (
+              <div className="rounded-xl border border-amber-700 bg-amber-900/20 p-4 text-amber-100">
+                <p className="text-sm font-medium">One or more sources are unavailable.</p>
+                {sourceErrors.facebook ? (
+                  <p className="mt-1 text-xs text-amber-200">
+                    Facebook source unavailable: {sourceErrors.facebook.message}
+                  </p>
+                ) : null}
+                <ul className="mt-2 space-y-1 text-xs text-amber-200">
+                  {Object.entries(sourceErrors).map(([source, sourceError]) => (
+                    <li key={source}>
+                      {source}: {sourceError.code} - {sourceError.message}
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
 
             {searchLoading && results.length === 0 && (

@@ -1,17 +1,30 @@
+import logging
+
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user_id
 from app.connectors import CONNECTORS
+from app.connectors.facebook_marketplace import (
+    FacebookConnectorError,
+    FacebookConnectorErrorCode,
+    FacebookConnectorErrorPayload,
+    FacebookMarketplaceConnector,
+    FacebookSearchRequest,
+    FacebookSearchResponse,
+)
+from app.core.config import settings
 from app.core.logging import setup_logging
 from app.db import get_db
 from app.models.listing import SearchResponse, SearchSort, Source
 from app.models.saved_search import SavedSearch
 from app.schemas.saved_search import SavedSearchCreate, SavedSearchOut
 from app.services.search_service import unified_search
+from app.services.supabase_ingestion import upsert_facebook_records
 
 setup_logging()
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Marketly API", version="0.1.0")
 print("LOADED MAIN.PY", __file__)
@@ -27,30 +40,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DEFAULT_SOURCES: list[Source] = ["ebay", "kijiji"]
+DEFAULT_SOURCES: list[Source] = ["ebay", "kijiji", "facebook"]
+facebook_connector = FacebookMarketplaceConnector()
 
 
-def parse_sources(raw_sources: list[str] | None) -> list[str]:
+def _normalize_source_name(name: str) -> str:
+    normalized = name.strip().lower()
+    if normalized == "facebook_marketplace":
+        return "facebook"
+    return normalized
+
+
+def parse_sources(raw_sources: list[str] | None, *, include_facebook: bool = False) -> list[str]:
     if not raw_sources:
-        return list(DEFAULT_SOURCES)
+        deduped = list(DEFAULT_SOURCES)
+    else:
+        parsed: list[str] = []
+        for source_value in raw_sources:
+            for token in source_value.split(","):
+                cleaned = _normalize_source_name(token)
+                if cleaned:
+                    parsed.append(cleaned)
 
-    parsed: list[str] = []
-    for source_value in raw_sources:
-        for token in source_value.split(","):
-            cleaned = token.strip()
-            if cleaned:
-                parsed.append(cleaned)
+        if not parsed:
+            raise HTTPException(status_code=400, detail="No sources provided")
 
-    if not parsed:
-        raise HTTPException(status_code=400, detail="No sources provided")
+        deduped = []
+        seen: set[str] = set()
+        for source_name in parsed:
+            if source_name in seen:
+                continue
+            seen.add(source_name)
+            deduped.append(source_name)
 
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for source_name in parsed:
-        if source_name in seen:
-            continue
-        seen.add(source_name)
-        deduped.append(source_name)
+    if include_facebook and "facebook" not in deduped:
+        deduped.append("facebook")
     return deduped
 
 
@@ -74,14 +98,18 @@ async def search(
     limit: int = Query(default=20, ge=1, le=50),
     offset: int = Query(default=0, ge=0),
     sort: SearchSort = Query(default="relevance"),
+    include_facebook: bool = Query(
+        default=False,
+        description="Include facebook source in addition to selected sources",
+    ),
 ):
-    source_list = parse_sources(sources)
+    source_list = parse_sources(sources, include_facebook=include_facebook)
 
     for source_name in source_list:
         if source_name not in CONNECTORS:
             raise HTTPException(status_code=400, detail=f"Unknown source: {source_name}")
 
-    results, total, next_offset = await unified_search(
+    results, total, next_offset, source_errors = await unified_search(
         query=q,
         sources=source_list,
         limit=limit,
@@ -98,6 +126,78 @@ async def search(
         results=results,
         next_offset=next_offset,
         total=total,
+        source_errors=source_errors,
+    )
+
+
+@app.post("/connectors/facebook/search", response_model=FacebookSearchResponse)
+async def facebook_search(payload: FacebookSearchRequest):
+    if not settings.MARKETLY_ENABLE_FACEBOOK:
+        return FacebookSearchResponse(
+            query=payload.query,
+            auth_mode=payload.auth_mode,
+            count=0,
+            records=[],
+            upserted_count=0,
+            error=FacebookConnectorErrorPayload(
+                code=FacebookConnectorErrorCode.disabled,
+                message="Facebook connector is disabled by server configuration.",
+                retryable=False,
+            ),
+        )
+
+    try:
+        records = await facebook_connector.search(payload)
+    except FacebookConnectorError as exc:
+        logger.warning("facebook_search_error code=%s message=%s", exc.code.value, exc.message)
+        return FacebookSearchResponse(
+            query=payload.query,
+            auth_mode=payload.auth_mode,
+            count=0,
+            records=[],
+            upserted_count=0,
+            error=exc.to_payload(),
+        )
+    except Exception as exc:
+        logger.exception("facebook_search_unhandled_error")
+        fallback_error = FacebookConnectorError(
+            FacebookConnectorErrorCode.scrape_failed,
+            "Unexpected connector failure while fetching Facebook listings.",
+            retryable=True,
+            details={"error": str(exc)},
+        )
+        return FacebookSearchResponse(
+            query=payload.query,
+            auth_mode=payload.auth_mode,
+            count=0,
+            records=[],
+            upserted_count=0,
+            error=fallback_error.to_payload(),
+        )
+
+    upserted_count = 0
+    error = None
+
+    if payload.ingest:
+        try:
+            upserted_count = await upsert_facebook_records(records)
+        except Exception as exc:
+            logger.warning("facebook_ingestion_failed error=%s", exc)
+            ingestion_error = FacebookConnectorError(
+                FacebookConnectorErrorCode.ingestion_failed,
+                "Facebook listings were fetched but ingestion failed.",
+                retryable=True,
+                details={"error": str(exc)},
+            )
+            error = ingestion_error.to_payload()
+
+    return FacebookSearchResponse(
+        query=payload.query,
+        auth_mode=payload.auth_mode,
+        count=len(records),
+        records=records,
+        upserted_count=upserted_count,
+        error=error,
     )
 
 
@@ -187,7 +287,7 @@ async def run_saved_search(
         if source_name not in CONNECTORS:
             raise HTTPException(status_code=400, detail=f"Unknown source: {source_name}")
 
-    results, total, next_offset = await unified_search(
+    results, total, next_offset, source_errors = await unified_search(
         query=row.query,
         sources=source_list,
         limit=limit,
@@ -204,4 +304,5 @@ async def run_saved_search(
         results=results,
         next_offset=next_offset,
         total=total,
+        source_errors=source_errors,
     )

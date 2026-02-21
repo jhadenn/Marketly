@@ -61,6 +61,19 @@ class KijijiScrapeConnector(MarketplaceConnector):
         t = (title or "").lower()
         return sum(1 for tok in q_tokens if tok in t)
 
+    def _extract_location_from_listing_url(self, listing_url: str) -> str | None:
+        # Kijiji listing URL pattern usually includes city as the second path segment:
+        # /v-category/{city-slug}/{title-slug}/{id}
+        path = listing_url.replace(BASE, "")
+        parts = [part for part in path.split("/") if part]
+        if len(parts) < 2:
+            return None
+        city_slug = parts[1].strip().lower()
+        if not city_slug:
+            return None
+        city = city_slug.replace("-", " ").title()
+        return city or None
+
     async def search(self, query: str, limit: int = 20) -> list[Listing]:
         url = self._build_search_url(query)
 
@@ -177,7 +190,7 @@ class KijijiScrapeConnector(MarketplaceConnector):
                     price=Money(amount=price_val or 0.0, currency="CAD"),
                     url=listing_url,
                     image_urls=image_urls,
-                    location=None,
+                    location=self._extract_location_from_listing_url(listing_url),
                     condition=None,
                     snippet=None,
                 )

@@ -29,7 +29,7 @@ def test_search_supports_pagination_and_sort(monkeypatch):
         captured["limit"] = limit
         captured["offset"] = offset
         captured["sort"] = sort
-        return ([_sample_listing("ebay", "1"), _sample_listing("kijiji", "2")], 42, 20)
+        return ([_sample_listing("ebay", "1"), _sample_listing("kijiji", "2")], 42, 20, {})
 
     monkeypatch.setattr("app.main.unified_search", fake_unified_search)
 
@@ -52,6 +52,7 @@ def test_search_supports_pagination_and_sort(monkeypatch):
     assert payload["next_offset"] == 20
     assert payload["total"] == 42
     assert payload["sources"] == ["ebay", "kijiji"]
+    assert payload["source_errors"] == {}
     assert {item["source"] for item in payload["results"]} == {"ebay", "kijiji"}
 
     assert captured == {
@@ -68,7 +69,7 @@ def test_search_keeps_comma_separated_sources_compatibility(monkeypatch):
 
     async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance"):
         captured["sources"] = sources
-        return ([_sample_listing("ebay", "1")], 1, None)
+        return ([_sample_listing("ebay", "1")], 1, None, {})
 
     monkeypatch.setattr("app.main.unified_search", fake_unified_search)
 
@@ -78,3 +79,72 @@ def test_search_keeps_comma_separated_sources_compatibility(monkeypatch):
     payload = response.json()
     assert payload["sources"] == ["ebay", "kijiji"]
     assert captured["sources"] == ["ebay", "kijiji"]
+
+
+def test_search_can_include_facebook_and_pass_source_errors(monkeypatch):
+    captured = {}
+
+    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance"):
+        captured["sources"] = sources
+        return (
+            [_sample_listing("ebay", "1")],
+            1,
+            None,
+            {
+                "facebook": {
+                    "code": "DISABLED",
+                    "message": "Facebook source is disabled by server configuration.",
+                    "retryable": False,
+                }
+            },
+        )
+
+    monkeypatch.setattr("app.main.unified_search", fake_unified_search)
+
+    response = client.get(
+        "/search",
+        params={
+            "q": "bike",
+            "sources": "ebay",
+            "include_facebook": "true",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["sources"] == ["ebay", "facebook"]
+    assert payload["source_errors"]["facebook"]["code"] == "DISABLED"
+    assert captured["sources"] == ["ebay", "facebook"]
+
+
+def test_search_facebook_only_keeps_pagination_alive(monkeypatch):
+    captured = {}
+
+    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance"):
+        captured["sources"] = sources
+        return (
+            [_sample_listing("facebook", str(i)) for i in range(limit)],
+            None,
+            offset + limit,
+            {},
+        )
+
+    monkeypatch.setattr("app.main.unified_search", fake_unified_search)
+
+    response = client.get(
+        "/search",
+        params={
+            "q": "badminton racket",
+            "sources": "facebook",
+            "limit": "20",
+            "offset": "0",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["sources"] == ["facebook"]
+    assert payload["count"] == 20
+    assert payload["next_offset"] == 20
+    assert payload["total"] is None
+    assert captured["sources"] == ["facebook"]

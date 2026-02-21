@@ -1,0 +1,502 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import random
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlencode
+
+from app.connectors.facebook_marketplace.errors import (
+    FacebookConnectorError,
+    FacebookConnectorErrorCode,
+)
+from app.connectors.facebook_marketplace.models import (
+    FacebookNormalizedListing,
+    FacebookSearchRequest,
+)
+from app.connectors.facebook_marketplace.normalizer import normalize_marketplace_card
+
+try:
+    from playwright.async_api import (
+        TimeoutError as PlaywrightTimeoutError,
+        async_playwright,
+    )
+except Exception:  # pragma: no cover - import fallback
+    PlaywrightTimeoutError = TimeoutError
+    async_playwright = None
+
+
+logger = logging.getLogger(__name__)
+
+LOGIN_HINTS = (
+    "log in to continue",
+    "you must log in",
+    "see more on facebook",
+    "create new account",
+)
+CHECKPOINT_URL_HINTS = (
+    "/checkpoint/",
+    "/login/device-based/",
+)
+CHECKPOINT_TEXT_HINTS = (
+    "security check",
+    "confirm it is you",
+    "confirm it's you",
+    "suspicious activity",
+    "we need to verify your account",
+    "enter the code from your authentication app",
+)
+BLOCKED_HINTS = (
+    "temporarily blocked",
+    "unusual activity",
+    "unusual traffic",
+    "try again later",
+)
+
+EXTRACTION_SCRIPT = """
+() => {
+  const anchors = Array.from(document.querySelectorAll('a[href*="/marketplace/item/"]'));
+  const seen = new Set();
+  const items = [];
+
+  for (const anchor of anchors) {
+    const rawHref = anchor.getAttribute("href") || "";
+    if (!rawHref || seen.has(rawHref)) continue;
+    seen.add(rawHref);
+
+    let container = anchor;
+    for (let i = 0; i < 6; i++) {
+      if (!container.parentElement) break;
+      container = container.parentElement;
+    }
+
+    const rawText = container.innerText || anchor.innerText || "";
+    const lines = rawText
+      .split(/\\r?\\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const text = rawText.replace(/\\s+/g, " ").trim();
+    const images = Array.from(container.querySelectorAll("img"))
+      .map((img) => img.src || "")
+      .filter(Boolean);
+
+    items.push({
+      href: rawHref,
+      title: (anchor.innerText || anchor.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim(),
+      text,
+      lines,
+      image_urls: images.slice(0, 8),
+    });
+  }
+
+  return items;
+}
+"""
+
+
+class FacebookMarketplaceConnector:
+    source_name = "facebook"
+    base_url = "https://www.facebook.com/marketplace/search/"
+
+    def __init__(
+        self,
+        *,
+        retries: int = 2,
+        timeout_seconds: float = 35.0,
+        idle_scroll_limit: int = 3,
+    ) -> None:
+        self.retries = max(1, retries)
+        self.timeout_ms = int(max(5, timeout_seconds) * 1000)
+        self.idle_scroll_limit = max(1, idle_scroll_limit)
+
+    async def search(self, request: FacebookSearchRequest) -> list[FacebookNormalizedListing]:
+        if async_playwright is None:
+            raise FacebookConnectorError(
+                FacebookConnectorErrorCode.playwright_unavailable,
+                "Playwright is not installed. Install it and run `playwright install chromium`.",
+                retryable=False,
+            )
+
+        last_error: Exception | None = None
+        for attempt in range(1, self.retries + 1):
+            try:
+                return await self._search_once(request)
+            except FacebookConnectorError as exc:
+                last_error = exc
+                if not exc.retryable or attempt >= self.retries:
+                    raise
+                self._log(
+                    "retryable_connector_error",
+                    attempt=attempt,
+                    code=exc.code.value,
+                    message=exc.message,
+                )
+                await asyncio.sleep(self._retry_delay(attempt))
+            except PlaywrightTimeoutError as exc:
+                last_error = exc
+                if attempt >= self.retries:
+                    raise FacebookConnectorError(
+                        FacebookConnectorErrorCode.timeout,
+                        "Facebook Marketplace request timed out.",
+                        retryable=True,
+                        details={"attempts": attempt},
+                    ) from exc
+                await asyncio.sleep(self._retry_delay(attempt))
+            except Exception as exc:  # pragma: no cover - network/runtime variability
+                last_error = exc
+                if attempt >= self.retries:
+                    raise self._classify_unexpected_error(exc) from exc
+                await asyncio.sleep(self._retry_delay(attempt))
+
+        if isinstance(last_error, FacebookConnectorError):
+            raise last_error
+        raise FacebookConnectorError(
+            FacebookConnectorErrorCode.scrape_failed,
+            "Failed to scrape Facebook Marketplace.",
+            retryable=True,
+            details={"error": str(last_error) if last_error else "unknown"},
+        )
+
+    def _classify_unexpected_error(self, exc: Exception) -> FacebookConnectorError:
+        message = str(exc)
+        lowered = message.lower()
+
+        if "executable doesn't exist" in lowered or "playwright install" in lowered:
+            return FacebookConnectorError(
+                FacebookConnectorErrorCode.playwright_unavailable,
+                "Playwright browser binary is missing in the API runtime. Run `python -m playwright install chromium` inside the running environment.",
+                retryable=False,
+                details={"error": message},
+            )
+
+        if "net::err_name_not_resolved" in lowered or "net::err_internet_disconnected" in lowered:
+            return FacebookConnectorError(
+                FacebookConnectorErrorCode.scrape_failed,
+                "Network error while connecting to Facebook Marketplace.",
+                retryable=True,
+                details={"error": message},
+            )
+
+        if "target page, context or browser has been closed" in lowered:
+            return FacebookConnectorError(
+                FacebookConnectorErrorCode.scrape_failed,
+                "Browser context closed unexpectedly during scrape.",
+                retryable=True,
+                details={"error": message},
+            )
+
+        return FacebookConnectorError(
+            FacebookConnectorErrorCode.scrape_failed,
+            "Failed to scrape Facebook Marketplace.",
+            retryable=True,
+            details={"error": message},
+        )
+
+    async def _search_once(self, request: FacebookSearchRequest) -> list[FacebookNormalizedListing]:
+        search_url = self._build_search_url(request)
+        self._log(
+            "facebook_search_start",
+            auth_mode=request.auth_mode,
+            limit=request.limit,
+            query=request.query,
+            url=search_url,
+        )
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/122.0.0.0 Safari/537.36"
+                ),
+                locale="en-CA",
+            )
+            context.set_default_timeout(self.timeout_ms)
+
+            try:
+                if request.auth_mode == "cookie":
+                    await self._load_cookies(context, request.cookie_path)
+
+                page = await context.new_page()
+                # Session bootstrap helps Facebook attach cookies before marketplace navigation.
+                await page.goto("https://www.facebook.com/", wait_until="domcontentloaded")
+                await self._jitter_sleep()
+                await page.goto(search_url, wait_until="domcontentloaded")
+                await self._jitter_sleep()
+
+                raw_cards = await self._scroll_and_extract(page=page, target_limit=request.limit)
+                normalized = self._normalize_cards(
+                    raw_cards,
+                    limit=request.limit,
+                    fallback_latitude=request.latitude,
+                    fallback_longitude=request.longitude,
+                )
+
+                if not normalized:
+                    await self._raise_if_blocked(page, extracted_cards=len(raw_cards))
+                    raise FacebookConnectorError(
+                        FacebookConnectorErrorCode.empty_results,
+                        "No listings were extracted from Facebook Marketplace.",
+                        retryable=False,
+                    )
+
+                self._log(
+                    "facebook_search_complete",
+                    extracted=len(raw_cards),
+                    normalized=len(normalized),
+                    query=request.query,
+                )
+                return normalized
+            finally:
+                await context.close()
+                await browser.close()
+
+    def _build_search_url(self, request: FacebookSearchRequest) -> str:
+        params: dict[str, Any] = {
+            "query": request.query,
+        }
+        if request.location_text:
+            params["location"] = request.location_text
+        if request.latitude is not None and request.longitude is not None:
+            params["latitude"] = request.latitude
+            params["longitude"] = request.longitude
+        if request.radius_km is not None:
+            params["radiusKM"] = request.radius_km
+        if request.min_price is not None:
+            params["minPrice"] = int(request.min_price)
+        if request.max_price is not None:
+            params["maxPrice"] = int(request.max_price)
+        if request.condition:
+            params["itemCondition"] = request.condition.lower()
+        sort_map = {
+            "newest": "creation_time_descend",
+            "price_low_to_high": "price_ascend",
+            "price_high_to_low": "price_descend",
+        }
+        if request.sort in sort_map:
+            params["sortBy"] = sort_map[request.sort]
+        return f"{self.base_url}?{urlencode(params)}"
+
+    async def _load_cookies(self, context, cookie_path: str) -> None:
+        cookie_file = Path(cookie_path)
+        if not cookie_file.exists():
+            raise FacebookConnectorError(
+                FacebookConnectorErrorCode.cookies_missing,
+                f"Cookie file not found: {cookie_path}",
+                retryable=False,
+            )
+
+        try:
+            payload = json.loads(cookie_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise FacebookConnectorError(
+                FacebookConnectorErrorCode.cookies_invalid,
+                f"Cookie file is not valid JSON: {cookie_path}",
+                retryable=False,
+                details={"error": str(exc)},
+            ) from exc
+
+        cookies = payload.get("cookies") if isinstance(payload, dict) else payload
+        if not isinstance(cookies, list) or not cookies:
+            raise FacebookConnectorError(
+                FacebookConnectorErrorCode.cookies_invalid,
+                "Cookie JSON must contain a non-empty cookie list.",
+                retryable=False,
+            )
+
+        sanitized: list[dict[str, Any]] = []
+        cookie_names: list[str] = []
+        for cookie in cookies:
+            if not isinstance(cookie, dict):
+                continue
+            item = dict(cookie)
+            name = str(item.get("name") or "").strip()
+            if name:
+                cookie_names.append(name)
+            # EditThisCookie uses expirationDate; Playwright expects expires.
+            if "expires" not in item and "expirationDate" in item:
+                try:
+                    item["expires"] = int(float(item["expirationDate"]))
+                except (TypeError, ValueError):
+                    item.pop("expirationDate", None)
+            item.pop("expirationDate", None)
+            # Remove extension/browser-only fields.
+            item.pop("id", None)
+            item.pop("storeId", None)
+            item.pop("hostOnly", None)
+            item.pop("session", None)
+            # Normalize sameSite values from common extensions.
+            same_site = item.get("sameSite")
+            if isinstance(same_site, str):
+                normalized_same_site = {
+                    "no_restriction": "None",
+                    "unspecified": "Lax",
+                    "strict": "Strict",
+                    "lax": "Lax",
+                    "none": "None",
+                }.get(same_site.strip().lower())
+                if normalized_same_site:
+                    item["sameSite"] = normalized_same_site
+            if "sameSite" in item and item["sameSite"] not in {"Strict", "Lax", "None"}:
+                item.pop("sameSite", None)
+            if "domain" not in item and "url" not in item:
+                item["domain"] = ".facebook.com"
+                item["path"] = "/"
+            if "domain" in item and isinstance(item["domain"], str):
+                domain = item["domain"].strip()
+                if domain and not domain.startswith(".") and "facebook.com" in domain:
+                    item["domain"] = f".{domain}"
+            sanitized.append(item)
+
+        if not sanitized:
+            raise FacebookConnectorError(
+                FacebookConnectorErrorCode.cookies_invalid,
+                "Cookie JSON did not include valid cookie objects.",
+                retryable=False,
+            )
+
+        await context.add_cookies(sanitized)
+        self._log(
+            "cookies_loaded",
+            count=len(sanitized),
+            cookie_path=cookie_path,
+            names=sorted(set(cookie_names)),
+        )
+
+    async def _scroll_and_extract(self, *, page, target_limit: int) -> list[dict[str, Any]]:
+        max_scrolls = max(8, min(40, target_limit * 2))
+        idle_scrolls = 0
+        seen_urls: set[str] = set()
+        merged: list[dict[str, Any]] = []
+
+        for scroll_index in range(max_scrolls):
+            await self._jitter_sleep()
+            cards = await page.evaluate(EXTRACTION_SCRIPT)
+
+            new_count = 0
+            for card in cards or []:
+                href = str(card.get("href") or "").strip()
+                if not href or href in seen_urls:
+                    continue
+                seen_urls.add(href)
+                merged.append(card)
+                new_count += 1
+
+            self._log(
+                "scroll_iteration",
+                iteration=scroll_index + 1,
+                new_cards=new_count,
+                total_cards=len(merged),
+            )
+
+            if len(merged) >= target_limit:
+                break
+
+            if new_count == 0:
+                idle_scrolls += 1
+            else:
+                idle_scrolls = 0
+            if idle_scrolls >= self.idle_scroll_limit:
+                break
+
+            await page.mouse.wheel(0, random.randint(1000, 1700))
+
+        return merged
+
+    def _normalize_cards(
+        self,
+        cards: list[dict[str, Any]],
+        *,
+        limit: int,
+        fallback_latitude: float | None = None,
+        fallback_longitude: float | None = None,
+    ) -> list[FacebookNormalizedListing]:
+        dedupe: set[str] = set()
+        records: list[FacebookNormalizedListing] = []
+        skipped = 0
+
+        for card in cards:
+            if fallback_latitude is not None and "latitude" not in card:
+                card["latitude"] = fallback_latitude
+            if fallback_longitude is not None and "longitude" not in card:
+                card["longitude"] = fallback_longitude
+            listing = normalize_marketplace_card(card)
+            if listing is None:
+                skipped += 1
+                continue
+            dedup_key = listing.external_id or listing.dedup_key
+            if dedup_key in dedupe:
+                continue
+            dedupe.add(dedup_key)
+            records.append(listing)
+            if len(records) >= limit:
+                break
+
+        if skipped:
+            self._log("normalize_skipped_cards", skipped=skipped, total=len(cards))
+
+        return records
+
+    async def _raise_if_blocked(self, page, *, extracted_cards: int = 0) -> None:
+        url = (page.url or "").lower()
+        try:
+            body_text = (await page.evaluate("() => (document.body ? document.body.innerText : '')")).lower()
+        except Exception:
+            body_text = ""
+
+        # If cards are extracted and URL is not an explicit checkpoint path, do not false-positive.
+        if extracted_cards > 0 and not any(hint in url for hint in CHECKPOINT_URL_HINTS):
+            return
+
+        if any(hint in url for hint in CHECKPOINT_URL_HINTS) or any(
+            hint in body_text for hint in CHECKPOINT_TEXT_HINTS
+        ):
+            self._log(
+                "blocked_checkpoint",
+                url=url,
+                extracted_cards=extracted_cards,
+            )
+            raise FacebookConnectorError(
+                FacebookConnectorErrorCode.checkpoint,
+                "Facebook checkpoint detected; authentication verification is required.",
+                retryable=False,
+            )
+
+        if any(hint in body_text for hint in LOGIN_HINTS):
+            self._log(
+                "blocked_login_wall",
+                url=url,
+                extracted_cards=extracted_cards,
+            )
+            raise FacebookConnectorError(
+                FacebookConnectorErrorCode.login_wall,
+                "Facebook login wall detected. Try cookie mode with valid session cookies.",
+                retryable=False,
+            )
+
+        if any(hint in body_text for hint in BLOCKED_HINTS):
+            self._log(
+                "blocked_rate_limit",
+                url=url,
+                extracted_cards=extracted_cards,
+            )
+            raise FacebookConnectorError(
+                FacebookConnectorErrorCode.blocked,
+                "Facebook temporarily blocked this scraping session.",
+                retryable=True,
+            )
+
+    @staticmethod
+    def _retry_delay(attempt: int) -> float:
+        base = min(1.5 * attempt, 6.0)
+        return base + random.uniform(0.15, 0.75)
+
+    @staticmethod
+    async def _jitter_sleep() -> None:
+        await asyncio.sleep(random.uniform(0.2, 0.9))
+
+    def _log(self, event: str, **payload: Any) -> None:
+        logger.info(json.dumps({"event": event, **payload}))

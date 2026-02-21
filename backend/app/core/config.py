@@ -1,10 +1,16 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class Settings(BaseSettings):
     DATABASE_URL: str
     SUPABASE_JWT_SECRET: str | None = None
     SUPABASE_URL: str | None = None
     SUPABASE_ANON_KEY: str | None = None
+    SUPABASE_SERVICE_ROLE_KEY: str | None = None
+    SUPABASE_LISTINGS_TABLE: str = "listings"
+    MARKETLY_ENABLE_FACEBOOK: bool = False
+    MARKETLY_FACEBOOK_AUTH_MODE: str = "guest"
+    MARKETLY_FACEBOOK_COOKIE_PATH: str = "secrets/fb_cookies.json"
     EBAY_ENV: str = "production"
     EBAY_CLIENT_ID: str | None = None
     EBAY_CLIENT_SECRET: str | None = None
@@ -15,10 +21,11 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        extra="allow",   # ✅ allow unrelated env vars
+        extra="allow",
     )
 
     ENV: str = "dev"
     CACHE_TTL_SECONDS: int = 60
+
 
 settings = Settings()

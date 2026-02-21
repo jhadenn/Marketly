@@ -1,2 +1,4 @@
 .env
 .env.local
+secrets/*.json
+backend/secrets/*.json

@@ -1,8 +1,9 @@
-from pydantic import BaseModel, HttpUrl, Field
-from typing import Literal, Optional, List
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel, Field
 
 
-Source = Literal["ebay", "kijiji"]
+Source = Literal["ebay", "kijiji", "facebook"]
 SearchSort = Literal["relevance", "price_asc", "price_desc", "newest"]
 
 
@@ -22,9 +23,16 @@ class Listing(BaseModel):
     condition: Optional[str] = None
     snippet: Optional[str] = None
 
-    # NEW: ranking metadata
+    # Ranking metadata
     score: float = Field(default=0.0, description="Relevance score (higher is better)")
     score_reason: Optional[str] = Field(default=None, description="Debug string explaining score")
+
+
+class SourceError(BaseModel):
+    code: str
+    message: str
+    retryable: bool = False
+
 
 class SearchResponse(BaseModel):
     query: str
@@ -33,3 +41,4 @@ class SearchResponse(BaseModel):
     results: list[Listing]
     next_offset: Optional[int] = None
     total: Optional[int] = None
+    source_errors: dict[str, SourceError] = Field(default_factory=dict)
