@@ -7,6 +7,11 @@ class SavedSearchCreate(BaseModel):
     sources: list[Source] = Field(min_length=1)
 
 
+class SavedSearchUpdate(BaseModel):
+    query: str = Field(min_length=1, max_length=200)
+    sources: list[Source] = Field(min_length=1)
+
+
 class SavedSearchOut(BaseModel):
     id: int
     query: str

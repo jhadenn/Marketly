@@ -2,6 +2,7 @@ import logging
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user_id
@@ -19,7 +20,7 @@ from app.core.logging import setup_logging
 from app.db import get_db
 from app.models.listing import SearchResponse, SearchSort, Source
 from app.models.saved_search import SavedSearch
-from app.schemas.saved_search import SavedSearchCreate, SavedSearchOut
+from app.schemas.saved_search import SavedSearchCreate, SavedSearchOut, SavedSearchUpdate
 from app.services.search_service import unified_search
 from app.services.supabase_ingestion import upsert_facebook_records
 
@@ -263,6 +264,42 @@ def delete_saved_search(
     db.delete(row)
     db.commit()
     return {"deleted": True, "id": search_id}
+
+
+@app.patch("/saved-searches/{search_id}", response_model=SavedSearchOut)
+def update_saved_search(
+    search_id: int,
+    payload: SavedSearchUpdate,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    row = (
+        db.query(SavedSearch)
+        .filter(SavedSearch.id == search_id, SavedSearch.user_id == user_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Saved search not found")
+
+    row.query = payload.query
+    row.sources = ",".join(payload.sources)
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Saved search already exists with the same query and sources.",
+        )
+
+    db.refresh(row)
+    return SavedSearchOut(
+        id=row.id,
+        query=row.query,
+        sources=[s.strip() for s in row.sources.split(",") if s.strip()],
+        created_at=str(row.created_at),
+    )
 
 
 @app.get("/saved-searches/{search_id}/run", response_model=SearchResponse)

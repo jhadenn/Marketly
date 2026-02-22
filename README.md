@@ -165,7 +165,7 @@ docker compose up -d
 - [X] Pagination / infinite scroll
 - [X] Better loading states
 - [X] Develop API support for Facebook Marketplace
-- [] Edit saved searches
+- [X] Edit saved searches
 - [] Notifications
 - [] Polish front end
 - [] Rate limiting, caching

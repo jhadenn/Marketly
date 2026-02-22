@@ -102,6 +102,13 @@ export default function HomePage() {
   const [saved, setSaved] = useState<SavedSearch[]>([]);
   const [savedLoading, setSavedLoading] = useState(false);
   const [savedError, setSavedError] = useState<string | null>(null);
+  const [activeSavedSearchId, setActiveSavedSearchId] = useState<number | null>(null);
+
+  const [editing, setEditing] = useState<SavedSearch | null>(null);
+  const [editQuery, setEditQuery] = useState("");
+  const [editSources, setEditSources] = useState<SourceOption[]>([]);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [editSaving, setEditSaving] = useState(false);
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const seenKeysRef = useRef<Set<string>>(new Set());
@@ -330,6 +337,7 @@ export default function HomePage() {
     const query = q.trim();
     if (!query || sources.length === 0) return;
 
+    setActiveSavedSearchId(null);
     await runSearch({
       query,
       sourceList: sources,
@@ -388,6 +396,9 @@ export default function HomePage() {
         throw new Error(`DELETE /saved-searches/${id} failed (${res.status}): ${text}`);
       }
 
+      if (activeSavedSearchId === id) {
+        setActiveSavedSearchId(null);
+      }
       await fetchSavedSearches();
     } catch (err: unknown) {
       setSavedError(err instanceof Error ? err.message : "Failed to delete saved search");
@@ -404,6 +415,7 @@ export default function HomePage() {
 
       setQ(savedSearch.query);
       setSources(normalizedSources);
+      setActiveSavedSearchId(id);
 
       await runSearch({
         query: savedSearch.query,
@@ -434,6 +446,100 @@ export default function HomePage() {
 
   function toggleSource(source: SourceOption) {
     setSources((prev) => (prev.includes(source) ? prev.filter((s) => s !== source) : [...prev, source]));
+  }
+
+  function openEdit(entry: SavedSearch) {
+    setEditing(entry);
+    setEditQuery(entry.query);
+    setEditSources(entry.sources.filter(isSourceOption));
+    setEditError(null);
+  }
+
+  function closeEdit() {
+    setEditing(null);
+    setEditError(null);
+    setEditSaving(false);
+  }
+
+  function toggleEditSource(source: SourceOption) {
+    setEditSources((prev) =>
+      prev.includes(source) ? prev.filter((s) => s !== source) : [...prev, source],
+    );
+  }
+
+  async function onSaveEdit() {
+    if (!editing) return;
+    setEditError(null);
+
+    if (!accessToken) {
+      setEditError("Please log in again");
+      return;
+    }
+
+    const trimmedQuery = editQuery.trim();
+    if (!trimmedQuery) {
+      setEditError("Query cannot be empty.");
+      return;
+    }
+
+    if (editSources.length === 0) {
+      setEditError("Select at least one source.");
+      return;
+    }
+
+    setEditSaving(true);
+    try {
+      const res = await fetch(`${API_BASE}/saved-searches/${editing.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          query: trimmedQuery,
+          sources: editSources,
+        }),
+      });
+
+      if (!res.ok) {
+        if (res.status === 401) {
+          throw new Error("Please log in again");
+        }
+        if (res.status === 409) {
+          throw new Error("That saved search already exists");
+        }
+        throw new Error("Failed to update saved search");
+      }
+
+      const updated = (await res.json()) as SavedSearch;
+      setSaved((prev) => prev.map((entry) => (entry.id === updated.id ? updated : entry)));
+
+      if (activeSavedSearchId === updated.id) {
+        const normalizedSources = updated.sources.filter(isSourceOption);
+        setQ(updated.query);
+        setSources(normalizedSources);
+
+        if (hasSearched) {
+          void runSearch({
+            query: updated.query,
+            sourceList: normalizedSources,
+            selectedSort: sortBy,
+            selectedLimit: limit,
+            offset: 0,
+            append: false,
+          });
+        } else {
+          setActiveQuery(updated.query);
+          setActiveSources(normalizedSources);
+        }
+      }
+
+      closeEdit();
+    } catch (err: unknown) {
+      setEditError(err instanceof Error ? err.message : "Failed to update saved search");
+    } finally {
+      setEditSaving(false);
+    }
   }
 
   return (
@@ -735,6 +841,13 @@ export default function HomePage() {
                         <button
                           className="rounded-md border border-gray-700 px-3 py-1 text-sm"
                           type="button"
+                          onClick={() => openEdit(entry)}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          className="rounded-md border border-gray-700 px-3 py-1 text-sm"
+                          type="button"
                           onClick={() => void onDeleteSavedSearch(entry.id)}
                         >
                           Delete
@@ -748,6 +861,88 @@ export default function HomePage() {
           </aside>
         </div>
       </div>
+
+      {editing ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-lg space-y-4 rounded-xl border border-gray-800 bg-black p-5 shadow-xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-semibold">Edit saved search</h3>
+                <p className="text-xs text-gray-500">Update the query and sources.</p>
+              </div>
+              <button
+                type="button"
+                className="text-xs text-gray-400"
+                onClick={closeEdit}
+                disabled={editSaving}
+              >
+                Close
+              </button>
+            </div>
+
+            {editError && (
+              <div className="rounded-lg border border-red-700 bg-red-900/30 p-3 text-sm text-red-200">
+                {editError}
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Query</label>
+              <input
+                className="w-full rounded-lg border border-gray-700 bg-transparent px-3 py-2"
+                value={editQuery}
+                onChange={(e) => setEditQuery(e.target.value)}
+                placeholder="e.g., iphone, macbook, snowboard"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-xs font-medium uppercase tracking-wide text-gray-400">Sources</p>
+              <div className="flex flex-wrap gap-2">
+                {SOURCE_OPTIONS.map((source) => {
+                  const selected = editSources.includes(source);
+                  return (
+                    <button
+                      key={`edit-source-${source}`}
+                      type="button"
+                      onClick={() => toggleEditSource(source)}
+                      className={`rounded-full border px-3 py-1 text-sm capitalize transition ${
+                        selected
+                          ? "border-white bg-white text-black"
+                          : "border-gray-700 text-gray-300 hover:border-gray-500"
+                      }`}
+                    >
+                      {source}
+                    </button>
+                  );
+                })}
+              </div>
+              {editSources.length === 0 ? (
+                <p className="text-xs text-red-300">Select at least one source.</p>
+              ) : null}
+            </div>
+
+            <div className="flex items-center justify-end gap-2">
+              <button
+                className="rounded-md border border-gray-700 px-3 py-1 text-sm"
+                type="button"
+                onClick={closeEdit}
+                disabled={editSaving}
+              >
+                Cancel
+              </button>
+              <button
+                className="rounded-md bg-white px-3 py-1 text-sm text-black disabled:opacity-60"
+                type="button"
+                onClick={() => void onSaveEdit()}
+                disabled={editSaving || !editQuery.trim() || editSources.length === 0}
+              >
+                {editSaving ? "Saving..." : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
