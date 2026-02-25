@@ -11,9 +11,9 @@ import { transitionVariants } from "@/lib/utils";
 export default function HeroSection() {
     return (
         <main className="overflow-x-hidden">
-            <section className="min-h-[70svh] lg:min-h-[86svh]">
+            <section className="min-h-[58svh] lg:min-h-[68svh]">
                 <div
-                    className="pb-14 pt-12 md:pb-18 lg:pb-24 lg:pt-44">
+                    className="pb-4 pt-12 md:pb-6 lg:pb-8 lg:pt-40">
                     <div className="relative mx-auto flex max-full flex-col px-6 lg:block">
                         <div className="mx-auto w-full text-center">
                              <div className='mt-8 lg:mt-16'>
@@ -79,7 +79,7 @@ export default function HeroSection() {
                     </div>
                 </div>
             </section>
-            <section className="bg-background pt-4 pb-28 md:pt-6 md:pb-44">
+            <section className="bg-background pt-2 pb-28 md:pt-3 md:pb-44">
                 <AnimatedGroup
                     variants={{
                         container: {
@@ -97,7 +97,7 @@ export default function HeroSection() {
 
                     <div className="flex flex-col items-center md:flex-row">
                         <div className="md:max-w-44 md:border-r md:pr-6">
-                            <p className="text-end text-sm font-mono uppercase">Search From</p>
+                            <p className="text-end text-xl font-mono uppercase">Search From</p>
                         </div>
                         <div className="relative py-6 md:w-[calc(100%-11rem)]">
                             <InfiniteSlider
@@ -117,9 +117,9 @@ export default function HeroSection() {
                                     <Image
                                         src="/marketplaces/EBay_logo.svg"
                                         alt="eBay"
-                                        width={120}
-                                        height={36}
-                                        className="h-9 w-auto opacity-90"
+                                        width={150}
+                                        height={44}
+                                        className="h-11 w-auto opacity-90"
                                     />
                                 </div>
                                 <div className="flex items-center">
