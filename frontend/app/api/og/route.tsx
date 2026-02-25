@@ -56,7 +56,7 @@ export async function GET(request: Request) {
       // Event details - you can edit these
       const EVENT_CITY = "guadalajara";
       const EVENT_DATE = "jueves 5 de febrero";
-      const TITLE = 'Doomscrolling, all in one place';
+      const TITLE = 'All Marketplaces. One Search.';
 
     const { searchParams } = new URL(request.url);
     const encrypted = searchParams.get("u");

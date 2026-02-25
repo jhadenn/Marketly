@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import LanyardPage from "@/components/lanyard-page";
+import { redirect } from "next/navigation";
 
 // Event details - you can edit these
 const EVENT_CITY = "New York City";
@@ -101,5 +101,5 @@ export async function generateMetadata({ searchParams }: PageProps): Promise<Met
 }
 
 export default function Page() {
-  return <LanyardPage />;
+  redirect("/");
 }
