@@ -16,7 +16,7 @@ export default function Features() {
                         speedSegment={0.3}
                         as="h2"
                         className="text-balance text-4xl font-semibold lg:text-5xl">
-                        Join us for NYC's first official v0 IRL event
+                        3 Core Features:
                     </TextEffect>
                 </div>
                 <AnimatedGroup
@@ -44,12 +44,11 @@ export default function Features() {
                                     />
                                 </CardDecorator>
 
-                                <h3 className="mt-6 font-medium text-xl">Free v0 Credits</h3>
+                                <h3 className="mt-6 font-medium text-xl">Unified Results</h3>
                             </CardHeader>
 
                             <CardContent>
-                                <p className="text-sm text-muted-foreground">Credits to use towards building with
-                                    v0.</p>
+                                <p className="text-sm text-muted-foreground">Search Kijiji, eBay, and Facebook from one unified interface.</p>
                             </CardContent>
                         </div>
 
@@ -62,12 +61,11 @@ export default function Features() {
                                     />
                                 </CardDecorator>
 
-                                <h3 className="mt-6 font-medium text-xl">Global Gallery</h3>
+                                <h3 className="mt-6 font-medium text-xl">Live Results</h3>
                             </CardHeader>
 
                             <CardContent>
-                                <p className="mt-3 text-sm text-muted-foreground">Every project showcased in a worldwide
-                                    exhibition</p>
+                                <p className="mt-3 text-sm text-muted-foreground">Fresh results pulled live every time you search. </p>
                             </CardContent>
                         </div>
 
@@ -80,13 +78,11 @@ export default function Features() {
                                     />
                                 </CardDecorator>
 
-                                <h3 className="mt-6 font-medium text-xl">Community Voting</h3>
+                                <h3 className="mt-6 font-medium text-xl">Saved Searches</h3>
                             </CardHeader>
 
                             <CardContent>
-                                <p className="mt-3 text-sm text-muted-foreground">Builders vote for favorites, winners
-                                    get
-                                    prizes</p>
+                                <p className="mt-3 text-sm text-muted-foreground">Save queries and re-run them instantly.</p>
                             </CardContent>
                         </div>
                     </Card>

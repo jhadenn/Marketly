@@ -15,7 +15,7 @@ export default function CallToAction() {
                         speedSegment={0.3}
                         as="h2"
                         className="text-balance text-4xl font-semibold lg:text-5xl">
-                        Don't miss a spot!
+                        Search the Entire Market.
                     </TextEffect>
                     <TextEffect
                         triggerOnView
@@ -24,7 +24,7 @@ export default function CallToAction() {
                         delay={0.3}
                         as="p"
                         className="mt-4 text-muted-foreground">
-                        We have limited availability, register now in the link below.
+                        Start saving time and try Marketly today to see every listing in one place.
                     </TextEffect>
                     <AnimatedGroup
                         triggerOnView
@@ -44,19 +44,11 @@ export default function CallToAction() {
                         <Button
                             asChild
                             size="lg">
-                            <Link href="#">
+                            <Link href="/login">
                                 <span>Register</span>
                             </Link>
                         </Button>
 
-                        <Button
-                            asChild
-                            size="lg"
-                            variant="outline">
-                            <Link href="#">
-                                <span>Contact the Host</span>
-                            </Link>
-                        </Button>
                     </AnimatedGroup>
                 </div>
             </div>

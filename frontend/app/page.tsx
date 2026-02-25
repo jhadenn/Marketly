@@ -10,7 +10,7 @@ import { HeroHeader } from "@/components/header";
 export default function Home() {
   return (
     <div className="dark font-sans antialiased">
-      <div className="absolute w-full h-dvh max-h-155 sm:max-h-115 md:max-h-125 lg:max-h-190 xl:max-h-195">
+      <div className="pointer-events-none absolute inset-x-0 top-0 w-full h-[96svh] min-h-[42rem] sm:h-[104svh] sm:min-h-[48rem] md:h-[112svh] md:min-h-[54rem] lg:h-[122svh] lg:min-h-[68rem] xl:h-[126svh] xl:min-h-[74rem]">
         <Dither
           waveColor={[0.30980392156862746, 0.30980392156862746, 0.30980392156862746]}
           disableAnimation={false}
@@ -25,10 +25,12 @@ export default function Home() {
       </div>
       <HeroHeader />
       <HeroSection />
-      <Features />
-      <Agenda />
-      <CallToAction />
-      <FooterSection />
+      <div className="relative z-10 bg-background">
+        <Features />
+        <Agenda />
+        <CallToAction />
+        <FooterSection />
+      </div>
       <Analytics />
     </div>
   );

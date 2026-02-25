@@ -15,7 +15,7 @@ export default function Agenda() {
                             speedSegment={0.3}
                             as="h2"
                             className="mb-4 text-3xl font-semibold md:text-4xl">
-                            Agenda
+                            How It Works
                         </TextEffect>
                     </div>
 
@@ -36,32 +36,31 @@ export default function Agenda() {
                     >
                         <div className="pb-6">
                             <div className="font-medium space-x-2">
-                                <span className='text-muted-foreground font-mono '>11:00</span>
-                                <span>Welcome Video</span>
+                                <span className='text-muted-foreground font-mono '>1.</span>
+                                <span>Enter Your Search</span>
                             </div>
-                            <p className="text-muted-foreground mt-4">A special welcome from the v0 Team</p>
+                            <p className="text-muted-foreground mt-4">Type what you're looking for and choose your sources.</p>
                         </div>
                         <div className="py-6">
                             <div className="font-medium space-x-2">
-                                <span className='text-muted-foreground font-mono '>11:30</span>
-                                <span>Build Time!</span>
+                                <span className='text-muted-foreground font-mono '>2.</span>
+                                <span>Aggregate Results</span>
                             </div>
-                            <p className="text-muted-foreground mt-4">Hands on to build your project with v0.</p>
+                            <p className="text-muted-foreground mt-4">Marketly pulls live listings from your selected sources.</p>
                         </div>
                         <div className="py-6">
                             <div className="font-medium space-x-2">
-                                <span className='text-muted-foreground font-mono '>13:00</span>
-                                <span>Showcase Sprint</span>
+                                <span className='text-muted-foreground font-mono '>3.</span>
+                                <span>Compare Instantly</span>
                             </div>
-                            <p className="text-muted-foreground mt-4">Show a quick presentation of what you built.</p>
+                            <p className="text-muted-foreground mt-4">View normalized results side-by-side</p>
                         </div>
                         <div className="py-6">
                             <div className="font-medium space-x-2">
-                                <span className='text-muted-foreground font-mono '>13:30</span>
-                                <span>Networking and Event Close</span>
+                                <span className='text-muted-foreground font-mono '>4.</span>
+                                <span>Save and Monitor</span>
                             </div>
-                            <p className="text-muted-foreground mt-4">Take some time to interact with other and share
-                                ideas.</p>
+                            <p className="text-muted-foreground mt-4">Save searches and track new listings over time.</p>
                         </div>
                     </AnimatedGroup>
                 </div>

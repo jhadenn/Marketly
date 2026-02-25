@@ -1,27 +1,24 @@
-import React from 'react'
+import Image from 'next/image'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { InfiniteSlider } from '@/components/ui/infinite-slider'
 import { ProgressiveBlur } from '@/components/ui/progressive-blur'
 import { TextEffect } from "@/components/motion-primitives/text-effect";
 import { AnimatedGroup } from "@/components/motion-primitives/animated-group";
-import V0Icon from "@/components/icons/v0-icon";
-import VercelWordmarkIcon from "@/components/icons/vercel-wordmark-icon";
-import GlobantLogoIcon from "@/components/icons/globant-logo-icon";
 import DecryptedText from "@/components/DecryptedText";
 import { transitionVariants } from "@/lib/utils";
 
 export default function HeroSection() {
     return (
         <main className="overflow-x-hidden">
-            <section className='lg:h-screen'>
+            <section className="min-h-[70svh] lg:min-h-[86svh]">
                 <div
-                    className="pb-24 pt-12 md:pb-32 lg:pb-56 lg:pt-44">
-                    <div className="relative mx-auto flex max-w-xl flex-col px-6 lg:block">
-                        <div className="mx-auto max-w-2xl text-center lg:ml-0 lg:text-left">
-                            <div className='mt-8 lg:mt-16'>
+                    className="pb-14 pt-12 md:pb-18 lg:pb-24 lg:pt-44">
+                    <div className="relative mx-auto flex max-full flex-col px-6 lg:block">
+                        <div className="mx-auto w-full text-center">
+                             <div className='mt-8 lg:mt-16'>
                                 <DecryptedText
-                                    text="Thursday February 5th, 2026 - New York City"
+                                    text="The fastest way to search the entire market."
                                     animateOn="view"
                                     revealDirection="start"
                                     sequential
@@ -34,14 +31,14 @@ export default function HeroSection() {
                                 preset="fade-in-blur"
                                 speedSegment={0.3}
                                 as="h1"
-                                className="max-w-2xl text-balance text-6xl font-semibold md:text-7xl xl:text-8xl">
+                                className="mx-auto max-w-4xl text-balance text-6xl font-semibold sm:text-7xl md:text-8xl xl:text-9xl">
                                 All Marketplaces.
                             </TextEffect>
                             <TextEffect
                                 preset="fade-in-blur"
                                 speedSegment={0.3}
                                 as="h1"
-                                className="max-w-2xl text-balance text-6xl font-semibold md:text-7xl xl:text-8xl">
+                                className="mx-auto max-w-4xl text-balance text-6xl font-semibold sm:text-7xl md:text-8xl xl:text-9xl">
                                 One Search.
                             </TextEffect>
                             <TextEffect
@@ -50,9 +47,9 @@ export default function HeroSection() {
                                 speedSegment={0.3}
                                 delay={0.5}
                                 as="p"
-                                className="mt-8 max-w-2xl text-pretty text-lg text-muted-foreground bg-black p-1 rounded-md">
-                                v0 is getting ready to launch its biggest product update yet. We're celebrating with
-                                v0 IRLs around the world.
+                                className="mx-auto mt-10 max-w-3xl text-pretty text-xl leading-relaxed text-muted-foreground bg-black p-3 rounded-md sm:text-2xl">
+                                Search across Kijiji, eBay, and Facebook Marketplace - all in one place.
+                                Compare listings instantly.
                             </TextEffect>
                             <AnimatedGroup
                                 variants={{
@@ -66,32 +63,23 @@ export default function HeroSection() {
                                     },
                                     ...transitionVariants,
                                 }}
-                                className="mt-12 flex flex-col items-center justify-center gap-2 sm:flex-row lg:justify-start"
+                                className="mt-14 flex flex-col items-center justify-center gap-2 sm:flex-row lg:justify-center"
                             >
                                 <Button
                                     asChild
                                     size="lg"
-                                    className="px-5 text-base">
-                                    <Link href="#link">
-                                        <span className="text-nowrap">Register Now</span>
+                                    className="h-12 px-8 text-lg">
+                                    <Link href="/search">
+                                        <span className="text-nowrap">Try It Out</span>
                                     </Link>
                                 </Button>
-                                <Button
-                                    key={2}
-                                    asChild
-                                    size="lg"
-                                    variant="ghost"
-                                    className="px-5 text-base bg-black/30 backdrop-blur-sm hover:bg-black/40">
-                                    <Link href="#link">
-                                        <span className="text-nowrap">Contact Host</span>
-                                    </Link>
-                                </Button>
+                            
                             </AnimatedGroup>
                         </div>
                     </div>
                 </div>
             </section>
-            <section className="bg-background pb-16 md:pb-32">
+            <section className="bg-background pt-4 pb-28 md:pt-6 md:pb-44">
                 <AnimatedGroup
                     variants={{
                         container: {
@@ -109,7 +97,7 @@ export default function HeroSection() {
 
                     <div className="flex flex-col items-center md:flex-row">
                         <div className="md:max-w-44 md:border-r md:pr-6">
-                            <p className="text-end text-sm font-mono uppercase">Supported by</p>
+                            <p className="text-end text-sm font-mono uppercase">Search From</p>
                         </div>
                         <div className="relative py-6 md:w-[calc(100%-11rem)]">
                             <InfiniteSlider
@@ -117,15 +105,31 @@ export default function HeroSection() {
                                 speed={40}
                                 gap={112}>
                                 <div className="flex items-center">
-                                    <V0Icon size={35} aria-label="v0 Logo" className='text-foreground mx-auto' />
+                                    <Image
+                                        src="/marketplaces/facebook_logo.svg"
+                                        alt="Facebook Marketplace"
+                                        width={190}
+                                        height={36}
+                                        className="h-9 w-auto opacity-90"
+                                    />
                                 </div>
                                 <div className="flex items-center">
-                                    <VercelWordmarkIcon size={20} aria-label="Vercel Logo"
-                                        className='text-foreground mx-auto' />
+                                    <Image
+                                        src="/marketplaces/EBay_logo.svg"
+                                        alt="eBay"
+                                        width={120}
+                                        height={36}
+                                        className="h-9 w-auto opacity-90"
+                                    />
                                 </div>
                                 <div className="flex items-center">
-                                    <GlobantLogoIcon size={20} aria-label="Globant Logo"
-                                        className='text-foreground mx-auto' />
+                                    <Image
+                                        src="/marketplaces/kijiji_logo.svg"
+                                        alt="Kijiji"
+                                        width={360}
+                                        height={120}
+                                        className="h-16 w-auto opacity-100"
+                                    />
                                 </div>
                             </InfiniteSlider>
                             <div

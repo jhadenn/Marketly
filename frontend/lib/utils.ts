@@ -1,5 +1,6 @@
 import {type ClassValue, clsx} from 'clsx'
 import {twMerge} from 'tailwind-merge'
+import type { Variants } from 'motion/react'
 
 export function cn(...inputs: ClassValue[]) {
     return twMerge(clsx(inputs))
@@ -84,4 +85,6 @@ export const transitionVariants = {
             },
         },
     },
+} satisfies {
+    item: Variants
 }
