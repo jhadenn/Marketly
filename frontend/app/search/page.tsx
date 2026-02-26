@@ -76,6 +76,19 @@ type SavedSearch = {
   created_at: string;
 };
 
+type SavedBatchPaginationEntry = {
+  id: number;
+  query: string;
+  sources: SourceOption[];
+  nextOffset: number | null;
+};
+
+type SavedBatchPaginationState = {
+  selectedSort: SortOption;
+  selectedLimit: number;
+  entries: SavedBatchPaginationEntry[];
+};
+
 type ResultMode = "single" | "saved_batch";
 type Coordinates = { latitude: number; longitude: number };
 
@@ -1238,6 +1251,7 @@ export default function HomePage() {
   const [activeSources, setActiveSources] = useState<SourceOption[]>(DEFAULT_SOURCES);
   const [activeSort, setActiveSort] = useState<SortOption>("relevance");
   const [activeLimit, setActiveLimit] = useState(DEFAULT_PAGE_SIZE);
+  const [savedBatchPagination, setSavedBatchPagination] = useState<SavedBatchPaginationState | null>(null);
 
   const [saved, setSaved] = useState<SavedSearch[]>([]);
   const [savedLoading, setSavedLoading] = useState(false);
@@ -1261,7 +1275,13 @@ export default function HomePage() {
   const fetchInFlightRef = useRef(false);
   const autoLoadedSavedForUserRef = useRef<string | null>(null);
 
-  const hasMore = hasSearched && nextOffset !== null;
+  const savedBatchHasMore =
+    resultMode === "saved_batch" &&
+    savedBatchPagination !== null &&
+    savedBatchPagination.entries.some((entry) => entry.nextOffset !== null);
+  const hasMore =
+    hasSearched &&
+    (resultMode === "saved_batch" ? savedBatchHasMore : nextOffset !== null);
   const normalizedLocationFilterText = locationFilterText.trim().toLowerCase();
   const parsedTravelRangeMiles = Number(travelRangeMilesInput);
   const travelRangeMiles =
@@ -1358,6 +1378,7 @@ export default function HomePage() {
         setNextOffset(null);
         setTotal(null);
         setSourceErrors({});
+        setSavedBatchPagination(null);
         seenKeysRef.current = new Set();
       }
 
@@ -1431,50 +1452,6 @@ export default function HomePage() {
     [buildSearchUrl],
   );
 
-  const loadMore = useCallback(async () => {
-    if (!hasMore || nextOffset === null || searchLoading || loadingMore || fetchInFlightRef.current) {
-      return;
-    }
-
-    await runSearch({
-      query: activeQuery,
-      sourceList: activeSources,
-      selectedSort: activeSort,
-      selectedLimit: activeLimit,
-      offset: nextOffset,
-      append: true,
-    });
-  }, [
-    activeLimit,
-    activeQuery,
-    activeSort,
-    activeSources,
-    hasMore,
-    loadingMore,
-    nextOffset,
-    runSearch,
-    searchLoading,
-  ]);
-
-  useEffect(() => {
-    if (!hasMore || searchLoading || loadingMore) return;
-    const node = sentinelRef.current;
-    if (!node) return;
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const first = entries[0];
-        if (first?.isIntersecting) {
-          void loadMore();
-        }
-      },
-      { rootMargin: "300px 0px" },
-    );
-
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [hasMore, loadMore, loadingMore, searchLoading]);
-
   function onUseMyLocation() {
     if (typeof navigator === "undefined" || !navigator.geolocation) {
       setLocationFilterError("Browser location is not available.");
@@ -1540,6 +1517,192 @@ export default function HomePage() {
     }
   }
 
+  const fetchSavedSearchPage = useCallback(async (
+    entry: SavedSearch | SavedBatchPaginationEntry,
+    {
+      selectedSort,
+      selectedLimit,
+      offset,
+    }: {
+      selectedSort: SortOption;
+      selectedLimit: number;
+      offset: number;
+    },
+  ): Promise<SearchResponse> => {
+    if (!accessToken) throw new Error("Please log in again.");
+
+    const params = new URLSearchParams();
+    params.set("sort", selectedSort);
+    params.set("limit", String(selectedLimit));
+    params.set("offset", String(offset));
+
+    const res = await fetch(`${API_BASE}/saved-searches/${entry.id}/run?${params.toString()}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`${entry.query} (${res.status}): ${text}`);
+    }
+
+    return (await res.json()) as SearchResponse;
+  }, [API_BASE, accessToken]);
+
+  const loadMoreSavedBatch = useCallback(async () => {
+    if (
+      !accessToken ||
+      resultMode !== "saved_batch" ||
+      !savedBatchPagination ||
+      searchLoading ||
+      loadingMore ||
+      fetchInFlightRef.current
+    ) {
+      return;
+    }
+
+    const pendingEntries = savedBatchPagination.entries.filter((entry) => entry.nextOffset !== null);
+    if (pendingEntries.length === 0) return;
+
+    fetchInFlightRef.current = true;
+    setLoadingMore(true);
+
+    try {
+      const requests = pendingEntries.map(async (entry) => ({
+        entryId: entry.id,
+        payload: await fetchSavedSearchPage(entry, {
+          selectedSort: savedBatchPagination.selectedSort,
+          selectedLimit: savedBatchPagination.selectedLimit,
+          offset: entry.nextOffset ?? 0,
+        }),
+      }));
+
+      const settled = await Promise.allSettled(requests);
+      const failures: string[] = [];
+      const mergedSourceErrors: Record<string, SourceErrorEntry> = {};
+      const nextOffsetsById = new Map<number, number | null>();
+      const dedupedIncoming: Listing[] = [];
+
+      for (const outcome of settled) {
+        if (outcome.status === "rejected") {
+          failures.push(outcome.reason instanceof Error ? outcome.reason.message : "Unknown error");
+          continue;
+        }
+
+        const { entryId, payload } = outcome.value;
+        nextOffsetsById.set(entryId, payload.next_offset ?? null);
+        Object.assign(mergedSourceErrors, payload.source_errors ?? {});
+
+        for (const item of payload.results ?? []) {
+          const listingKey = `${item.source}:${item.source_listing_id || item.url}`;
+          if (seenKeysRef.current.has(listingKey)) continue;
+          seenKeysRef.current.add(listingKey);
+          dedupedIncoming.push(item);
+        }
+      }
+
+      if (settled.length > 0 && failures.length === settled.length) {
+        throw new Error(`Failed to load more saved-search results: ${failures[0]}`);
+      }
+
+      if (dedupedIncoming.length > 0) {
+        setResults((prev) => [...prev, ...dedupedIncoming]);
+      }
+
+      if (Object.keys(mergedSourceErrors).length > 0) {
+        setSourceErrors((prev) => ({ ...prev, ...mergedSourceErrors }));
+      }
+
+      const updatedPagination: SavedBatchPaginationState = {
+        ...savedBatchPagination,
+        entries: savedBatchPagination.entries.map((entry) => {
+          if (!nextOffsetsById.has(entry.id)) {
+            return entry;
+          }
+          return {
+            ...entry,
+            nextOffset: nextOffsetsById.get(entry.id) ?? null,
+          };
+        }),
+      };
+
+      setSavedBatchPagination(updatedPagination);
+      const batchHasMore = updatedPagination.entries.some((entry) => entry.nextOffset !== null);
+      setTotal(batchHasMore ? null : results.length + dedupedIncoming.length);
+
+      if (failures.length > 0) {
+        setError(`Some saved searches failed to load more (${failures.length}/${settled.length}).`);
+      } else {
+        setError(null);
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load more saved-search results");
+    } finally {
+      setLoadingMore(false);
+      fetchInFlightRef.current = false;
+    }
+  }, [
+    accessToken,
+    fetchSavedSearchPage,
+    loadingMore,
+    resultMode,
+    results.length,
+    savedBatchPagination,
+    searchLoading,
+  ]);
+
+  const loadMore = useCallback(async () => {
+    if (resultMode === "saved_batch") {
+      if (!hasMore || searchLoading || loadingMore || fetchInFlightRef.current) return;
+      await loadMoreSavedBatch();
+      return;
+    }
+
+    if (!hasMore || nextOffset === null || searchLoading || loadingMore || fetchInFlightRef.current) {
+      return;
+    }
+
+    await runSearch({
+      query: activeQuery,
+      sourceList: activeSources,
+      selectedSort: activeSort,
+      selectedLimit: activeLimit,
+      offset: nextOffset,
+      append: true,
+    });
+  }, [
+    activeLimit,
+    activeQuery,
+    activeSort,
+    activeSources,
+    hasMore,
+    loadMoreSavedBatch,
+    loadingMore,
+    nextOffset,
+    resultMode,
+    runSearch,
+    searchLoading,
+  ]);
+
+  useEffect(() => {
+    if (!hasMore || searchLoading || loadingMore) return;
+    const node = sentinelRef.current;
+    if (!node) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const first = entries[0];
+        if (first?.isIntersecting) {
+          void loadMore();
+        }
+      },
+      { rootMargin: "300px 0px" },
+    );
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [hasMore, loadMore, loadingMore, searchLoading]);
+
   async function runAllSavedSearches(
     savedSearches: SavedSearch[],
     {
@@ -1560,35 +1723,27 @@ export default function HomePage() {
     setNextOffset(null);
     setTotal(null);
     setSourceErrors({});
+    setSavedBatchPagination(null);
     setHasSearched(false);
     setActiveSavedSearchId(null);
     seenKeysRef.current = new Set();
 
     try {
-      const requests = savedSearches.map(async (entry) => {
-        const params = new URLSearchParams();
-        params.set("sort", selectedSort);
-        params.set("limit", String(selectedLimit));
-        params.set("offset", "0");
-
-        const res = await fetch(`${API_BASE}/saved-searches/${entry.id}/run?${params.toString()}`, {
-          headers: { Authorization: `Bearer ${accessToken}` },
-          cache: "no-store",
-        });
-
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(`${entry.query} (${res.status}): ${text}`);
-        }
-
-        return (await res.json()) as SearchResponse;
-      });
+      const requests = savedSearches.map(async (entry) => ({
+        entry,
+        payload: await fetchSavedSearchPage(entry, {
+          selectedSort,
+          selectedLimit,
+          offset: 0,
+        }),
+      }));
 
       const settled = await Promise.allSettled(requests);
       const dedupedResults: Listing[] = [];
       const mergedSourceErrors: Record<string, SourceErrorEntry> = {};
       const seenKeys = new Set<string>();
       const failures: string[] = [];
+      const paginationEntries: SavedBatchPaginationEntry[] = [];
 
       for (const outcome of settled) {
         if (outcome.status === "rejected") {
@@ -1596,7 +1751,15 @@ export default function HomePage() {
           continue;
         }
 
-        const payload = outcome.value;
+        const { entry, payload } = outcome.value;
+        const normalizedSources = entry.sources.filter(isSourceOption);
+        paginationEntries.push({
+          id: entry.id,
+          query: entry.query,
+          sources: normalizedSources,
+          nextOffset: payload.next_offset ?? null,
+        });
+
         for (const item of payload.results ?? []) {
           const listingKey = `${item.source}:${item.source_listing_id || item.url}`;
           if (seenKeys.has(listingKey)) continue;
@@ -1618,7 +1781,14 @@ export default function HomePage() {
       seenKeysRef.current = seenKeys;
       setResults(dedupedResults);
       setSourceErrors(mergedSourceErrors);
-      setTotal(dedupedResults.length);
+      const nextSavedBatchPagination: SavedBatchPaginationState = {
+        selectedSort,
+        selectedLimit,
+        entries: paginationEntries,
+      };
+      const batchHasMore = nextSavedBatchPagination.entries.some((entry) => entry.nextOffset !== null);
+      setSavedBatchPagination(nextSavedBatchPagination);
+      setTotal(batchHasMore ? null : dedupedResults.length);
       setNextOffset(null);
       setActiveQuery("Saved searches");
       setActiveSources(
