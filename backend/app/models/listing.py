@@ -20,6 +20,8 @@ class Listing(BaseModel):
     url: str
     image_urls: List[str] = []
     location: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     condition: Optional[str] = None
     snippet: Optional[str] = None
 

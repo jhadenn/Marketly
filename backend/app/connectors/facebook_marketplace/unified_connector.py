@@ -44,6 +44,8 @@ def _to_listing(item: FacebookNormalizedListing) -> Listing:
         url=item.listing_url,
         image_urls=item.image_urls,
         location=item.location_text,
+        latitude=item.latitude,
+        longitude=item.longitude,
         condition=None,
         snippet=snippet,
     )
@@ -131,6 +133,11 @@ class FacebookUnifiedConnector(MarketplaceConnector):
         return len(cookies), names
 
     async def search(self, query: str, limit: int = 20) -> list[Listing]:
+        requested_limit = max(1, int(limit))
+        # Facebook often injects sponsored/junk cards that are filtered out after normalization.
+        # Overfetch so the post-filter result can still fill the requested page size.
+        scrape_limit = min(100, requested_limit + max(12, requested_limit // 2))
+
         auth_mode = (settings.MARKETLY_FACEBOOK_AUTH_MODE or "guest").strip().lower()
         if auth_mode not in {"guest", "cookie"}:
             auth_mode = "guest"
@@ -160,7 +167,7 @@ class FacebookUnifiedConnector(MarketplaceConnector):
                 )
         request = FacebookSearchRequest(
             query=query,
-            limit=limit,
+            limit=scrape_limit,
             auth_mode=auth_mode,
             cookie_path=cookie_path,
             ingest=False,
@@ -168,7 +175,7 @@ class FacebookUnifiedConnector(MarketplaceConnector):
         try:
             records = await self._connector.search(request)
             filtered = [item for item in records if not _looks_like_noise_item(item, query)]
-            return [_to_listing(item) for item in filtered]
+            return [_to_listing(item) for item in filtered[:requested_limit]]
         except FacebookConnectorError as exc:
             # If guest mode is blocked, auto-retry once with cookies if a cookie file exists.
             if (
@@ -179,7 +186,7 @@ class FacebookUnifiedConnector(MarketplaceConnector):
                 fallback_request = request.model_copy(update={"auth_mode": "cookie"})
                 records = await self._connector.search(fallback_request)
                 filtered = [item for item in records if not _looks_like_noise_item(item, query)]
-                return [_to_listing(item) for item in filtered]
+                return [_to_listing(item) for item in filtered[:requested_limit]]
 
             if auth_mode == "guest" and exc.code in {
                 FacebookConnectorErrorCode.login_wall,
