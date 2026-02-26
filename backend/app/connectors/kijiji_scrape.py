@@ -185,7 +185,7 @@ class KijijiScrapeConnector(MarketplaceConnector):
             results.append(
                 Listing(
                     source="kijiji",
-                    source_listing_id=listing_url,  # MVP: use URL as id
+                    source_listing_id=listing_url,  
                     title=title,
                     price=Money(amount=price_val or 0.0, currency="CAD"),
                     url=listing_url,

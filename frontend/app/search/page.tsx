@@ -15,7 +15,6 @@ import {
   Sparkles,
 } from "lucide-react";
 import Dither from "@/components/Dither";
-import V0Icon from "@/components/icons/v0-icon";
 import { cn } from "@/lib/utils";
 import { useAuth } from "../providers";
 
@@ -300,7 +299,6 @@ function SearchPageView(props: SearchPageViewProps) {
               href="/"
               className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 transition hover:border-white/20 hover:bg-white/[0.04]"
             >
-              <V0Icon size={18} className="text-white" />
               <span className="font-mono text-sm text-zinc-100">Marketly</span>
             </Link>
             <span className="hidden items-center gap-2 rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-zinc-300 md:inline-flex">
@@ -690,7 +688,7 @@ function SavedSearchRail(props: SavedSearchRailProps) {
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <p className="line-clamp-1 text-sm font-medium text-zinc-100">{entry.query}</p>
-                  <p className="mt-1 text-[11px] text-zinc-500">Saved #{entry.id}</p>
+                  <p className="mt-1 text-[11px] text-zinc-500">Saved</p>
                 </div>
                 {props.activeSavedSearchId === entry.id ? (
                   <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-zinc-300">
@@ -801,17 +799,11 @@ function ResultsPanel({
             <div>
               <p className="font-mono text-xs uppercase tracking-[0.18em] text-zinc-500">Preview</p>
               <h3 className="mt-2 text-xl font-semibold tracking-tight text-white">
-                Facebook Marketplace-style cards, but cross-platform
+                Start your search to see live results from all marketplaces in one feed.
               </h3>
               <p className="mt-2 max-w-xl text-sm leading-relaxed text-zinc-400">
-                Listings will appear here as image-first tiles with price, title, source, and location
-                prioritized for fast scanning. Filters stay visible in the left rail while you browse.
+                Listings will appear here. Use the search box and filters to find exactly what you want across Kijiji, eBay, and Facebook Marketplace. Save searches you want to check again later, and run them with one click from the sidebar.
               </p>
-              <div className="mt-4 flex flex-wrap gap-2">
-                {SOURCE_OPTIONS.map((source) => (
-                  <SourceChip key={`preview-${source}`} source={source} compact />
-                ))}
-              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-3">

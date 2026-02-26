@@ -19,7 +19,6 @@ export const HeroHeader = () => {
                                 href="/"
                                 aria-label="home"
                                 className="flex items-center space-x-2">
-                                <V0Icon size={30} className='text-foreground'/>
                                 <span className='font-mono'>Marketly</span>
                             </Link>
 
