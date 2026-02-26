@@ -81,11 +81,11 @@ export default function Agenda() {
                                     as="h2"
                                     className="mt-4 text-balance text-3xl font-semibold tracking-tight md:text-4xl"
                                 >
-                                    How Marketly fits a startup-speed buying loop.
+                                    From search to decision — faster.
                                 </TextEffect>
 
                                 <p className="mt-4 text-sm leading-relaxed text-zinc-400">
-                                    The product is built to cut friction from discovery: one search surface, faster comparisons, repeatable checks.
+                                    Built for people who don’t want to search twice. One interface. Live data. No tab switching.
                                 </p>
 
                                 <div className="mt-6 space-y-2">
