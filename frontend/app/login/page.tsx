@@ -14,7 +14,6 @@ import {
   Sparkles,
 } from "lucide-react";
 import Dither from "@/components/Dither";
-import V0Icon from "@/components/icons/v0-icon";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabaseClient";
 import { useAuth } from "../providers";
@@ -211,13 +210,13 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="dark relative min-h-screen overflow-x-hidden bg-black text-white antialiased">
-      <div className="pointer-events-none fixed inset-0 -z-20 opacity-20">
+    <main className="dark relative min-h-screen overflow-x-hidden bg-black text-white font-sans antialiased">
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-0 h-[96svh] min-h-[42rem] w-full sm:h-[104svh] sm:min-h-[48rem] md:h-[112svh] md:min-h-[54rem] lg:h-[122svh] lg:min-h-[68rem] xl:h-[126svh] xl:min-h-[74rem]">
         <Dither
           waveColor={[0.30980392156862746, 0.30980392156862746, 0.30980392156862746]}
           disableAnimation={false}
           enableMouseInteraction
-          mouseRadius={0.28}
+          mouseRadius={0.3}
           colorNum={4}
           pixelSize={2}
           waveAmplitude={0.3}
@@ -225,8 +224,8 @@ export default function LoginPage() {
           waveSpeed={0.05}
         />
       </div>
-      <div className="pointer-events-none fixed inset-0 -z-10 bg-[radial-gradient(circle_at_15%_10%,rgba(255,255,255,0.07),transparent_38%),radial-gradient(circle_at_80%_0%,rgba(99,102,241,0.08),transparent_30%),radial-gradient(circle_at_50%_90%,rgba(255,255,255,0.05),transparent_42%)]" />
-      <div className="pointer-events-none fixed inset-0 -z-10 opacity-[0.06] [background-image:linear-gradient(rgba(255,255,255,0.9)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.9)_1px,transparent_1px)] [background-size:24px_24px]" />
+      <div className="pointer-events-none fixed inset-0 z-[1] bg-[radial-gradient(circle_at_15%_10%,rgba(255,255,255,0.07),transparent_38%),radial-gradient(circle_at_80%_0%,rgba(99,102,241,0.08),transparent_30%),radial-gradient(circle_at_50%_90%,rgba(255,255,255,0.05),transparent_42%)]" />
+      <div className="pointer-events-none fixed inset-0 z-[1] opacity-[0.06] [background-image:linear-gradient(rgba(255,255,255,0.9)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.9)_1px,transparent_1px)] [background-size:24px_24px]" />
 
       <header className="sticky top-0 z-40 border-b border-white/10 bg-black/70 backdrop-blur-2xl">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3 sm:px-6 lg:px-8">
@@ -252,7 +251,7 @@ export default function LoginPage() {
             </Link>
             {authLoading ? (
               <span className="rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-zinc-400">
-                Loading auth...
+                Checking account...
               </span>
             ) : user ? (
               <span className="hidden rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-zinc-300 md:inline">
@@ -267,9 +266,9 @@ export default function LoginPage() {
         </div>
       </header>
 
-      <div className="mx-auto max-w-6xl px-4 pb-12 pt-6 sm:px-6 lg:px-8">
-        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_440px]">
-          <GlassPanel className="relative overflow-hidden p-6 sm:p-8">
+      <div className="relative z-10 mx-auto flex max-w-6xl items-start px-4 py-6 sm:px-6 lg:min-h-[calc(100svh-64px)] lg:items-center lg:px-8 lg:py-10">
+        <div className="grid w-full items-start gap-6 lg:grid-cols-[minmax(0,1fr)_440px]">
+          <GlassPanel className="relative self-start overflow-hidden p-6 sm:p-8">
             <div className="pointer-events-none absolute inset-0">
               <div className="absolute -left-20 top-0 h-48 w-48 rounded-full bg-white/5 blur-3xl" />
               <div className="absolute right-0 top-8 h-56 w-56 rounded-full bg-blue-400/10 blur-3xl" />
@@ -282,54 +281,26 @@ export default function LoginPage() {
               </p>
 
               <h1 className="mt-4 text-balance text-3xl font-semibold tracking-tight text-white sm:text-4xl lg:text-5xl">
-                Search faster when your account remembers the work.
+                Smarter search starts here.
               </h1>
 
               <p className="mt-4 max-w-2xl text-sm leading-relaxed text-zinc-400 sm:text-base">
-                Match the same Marketly experience from the landing and search pages with a clean auth flow, saved searches,
-                and a Google sign-in option that becomes a two-click signup path once OAuth is enabled in Supabase.
+                Save searches, set up alerts, and get back to the listings you care about faster with an account.
               </p>
 
               <div className="mt-6 grid gap-3 sm:grid-cols-2">
                 <FeatureRow
                   icon={<ShieldCheck className="size-4" />}
-                  title="Supabase-backed auth"
-                  description="Email/password today, social login next. Backend JWT usage stays the same."
+                  title="Safely save searches"
+                  description="Your queries stay saved and ready to run again - no need for bookmarks or copy-pasting."
                 />
                 <FeatureRow
                   icon={<Sparkles className="size-4" />}
-                  title="Two-click signup path"
-                  description="Open login, click Google. New users are provisioned automatically through Supabase Auth."
-                />
-                <FeatureRow
-                  icon={<Mail className="size-4" />}
-                  title="Email fallback"
-                  description="Keep password auth for users who prefer a traditional sign-in flow."
-                />
-                <FeatureRow
-                  icon={<KeyRound className="size-4" />}
-                  title="Safe redirect handling"
-                  description="Supports internal `next=` redirects after auth without open-redirect behavior."
+                  title="Smart Monitoring"
+                  description="Set up alerts for your saved searches and never miss out on a great deal again."
                 />
               </div>
 
-              <div className="mt-6 grid grid-cols-3 gap-2">
-                <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-3">
-                  <p className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Step 1</p>
-                  <p className="mt-2 text-sm font-medium text-white">Open login</p>
-                  <p className="mt-1 text-xs text-zinc-400">Landing or Search CTA</p>
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-3">
-                  <p className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Step 2</p>
-                  <p className="mt-2 text-sm font-medium text-white">Continue with Google</p>
-                  <p className="mt-1 text-xs text-zinc-400">OAuth redirect flow</p>
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-3">
-                  <p className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Result</p>
-                  <p className="mt-2 text-sm font-medium text-white">Go to search</p>
-                  <p className="mt-1 text-xs text-zinc-400">Session is ready</p>
-                </div>
-              </div>
             </div>
           </GlassPanel>
 
@@ -490,17 +461,6 @@ export default function LoginPage() {
                   </form>
 
                   <StatusBanner feedback={feedback} />
-
-                  <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4">
-                    <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-zinc-400">
-                      Google OAuth setup checklist
-                    </p>
-                    <ul className="mt-2 space-y-1.5 text-xs leading-relaxed text-zinc-400">
-                      <li>Enable Google in Supabase Auth Providers.</li>
-                      <li>Add your app URLs to Supabase redirect allow-list (localhost + production).</li>
-                      <li>Add Google OAuth client credentials in Supabase and verify callback settings.</li>
-                    </ul>
-                  </div>
                 </>
               )}
             </div>
@@ -510,5 +470,3 @@ export default function LoginPage() {
     </main>
   );
 }
-
-

@@ -23,6 +23,7 @@ export default function Home() {
           waveSpeed={0.05}
         />
       </div>
+      <div className="pointer-events-none absolute inset-x-0 top-0 w-full h-[96svh] min-h-[42rem] opacity-[0.06] sm:h-[104svh] sm:min-h-[48rem] md:h-[112svh] md:min-h-[54rem] lg:h-[122svh] lg:min-h-[68rem] xl:h-[126svh] xl:min-h-[74rem] [background-image:linear-gradient(rgba(255,255,255,0.9)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.9)_1px,transparent_1px)] [background-size:24px_24px]" />
       <HeroHeader />
       <HeroSection />
       <div className="relative z-10 bg-background">
