@@ -3,7 +3,7 @@ __pycache__/
 .venv/
 .env
 secrets/*.json
-!secrets/.gitkeep
-!secrets/fb_cookies.json
+secrets/.gitkeep
+secrets/fb_cookies.json
 .pytest_cache/
 .ruff_cache/
