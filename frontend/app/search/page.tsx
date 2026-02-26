@@ -58,6 +58,8 @@ type SavedSearch = {
   created_at: string;
 };
 
+type ResultMode = "single" | "saved_batch";
+
 function isSourceOption(value: string): value is SourceOption {
   return SOURCE_OPTIONS.includes(value as SourceOption);
 }
@@ -93,6 +95,7 @@ export default function HomePage() {
   const [total, setTotal] = useState<number | null>(null);
   const [sourceErrors, setSourceErrors] = useState<Record<string, SourceErrorEntry>>({});
   const [hasSearched, setHasSearched] = useState(false);
+  const [resultMode, setResultMode] = useState<ResultMode | null>(null);
 
   const [activeQuery, setActiveQuery] = useState("");
   const [activeSources, setActiveSources] = useState<SourceOption[]>(DEFAULT_SOURCES);
@@ -113,6 +116,7 @@ export default function HomePage() {
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const seenKeysRef = useRef<Set<string>>(new Set());
   const fetchInFlightRef = useRef(false);
+  const autoLoadedSavedForUserRef = useRef<string | null>(null);
 
   const requestUrl = useMemo(() => {
     const params = new URLSearchParams();
@@ -294,14 +298,14 @@ export default function HomePage() {
     return () => observer.disconnect();
   }, [hasMore, loadMore, loadingMore, searchLoading]);
 
-  async function fetchSavedSearches() {
+  async function fetchSavedSearches(): Promise<SavedSearch[] | null> {
     setSavedLoading(true);
     setSavedError(null);
 
     try {
       if (!accessToken) {
         setSaved([]);
-        return;
+        return [];
       }
 
       const res = await fetch(`${API_BASE}/saved-searches`, {
@@ -316,17 +320,128 @@ export default function HomePage() {
 
       const json = (await res.json()) as SavedSearch[];
       setSaved(json);
+      return json;
     } catch (err: unknown) {
       setSavedError(err instanceof Error ? err.message : "Failed to load saved searches");
+      return null;
     } finally {
       setSavedLoading(false);
     }
   }
 
+  async function runAllSavedSearches(
+    savedSearches: SavedSearch[],
+    {
+      selectedSort = sortBy,
+      selectedLimit = limit,
+    }: {
+      selectedSort?: SortOption;
+      selectedLimit?: number;
+    } = {},
+  ) {
+    if (!accessToken || savedSearches.length === 0 || fetchInFlightRef.current) return;
+
+    fetchInFlightRef.current = true;
+    setSearchLoading(true);
+    setLoadingMore(false);
+    setError(null);
+    setResults([]);
+    setNextOffset(null);
+    setTotal(null);
+    setSourceErrors({});
+    setHasSearched(false);
+    setActiveSavedSearchId(null);
+    seenKeysRef.current = new Set();
+
+    try {
+      const requests = savedSearches.map(async (entry) => {
+        const params = new URLSearchParams();
+        params.set("sort", selectedSort);
+        params.set("limit", String(selectedLimit));
+        params.set("offset", "0");
+
+        const res = await fetch(`${API_BASE}/saved-searches/${entry.id}/run?${params.toString()}`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          cache: "no-store",
+        });
+
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`${entry.query} (${res.status}): ${text}`);
+        }
+
+        return (await res.json()) as SearchResponse;
+      });
+
+      const settled = await Promise.allSettled(requests);
+      const dedupedResults: Listing[] = [];
+      const mergedSourceErrors: Record<string, SourceErrorEntry> = {};
+      const seenKeys = new Set<string>();
+      const failures: string[] = [];
+
+      for (const outcome of settled) {
+        if (outcome.status === "rejected") {
+          failures.push(outcome.reason instanceof Error ? outcome.reason.message : "Unknown error");
+          continue;
+        }
+
+        const payload = outcome.value;
+        for (const item of payload.results ?? []) {
+          const listingKey = `${item.source}:${item.source_listing_id || item.url}`;
+          if (seenKeys.has(listingKey)) continue;
+          seenKeys.add(listingKey);
+          dedupedResults.push(item);
+        }
+
+        Object.assign(mergedSourceErrors, payload.source_errors ?? {});
+      }
+
+      if (settled.length > 0 && failures.length === settled.length) {
+        throw new Error(`Failed to auto-load saved searches: ${failures[0]}`);
+      }
+
+      if (failures.length > 0) {
+        setError(`Some saved searches failed to load (${failures.length}/${settled.length}).`);
+      }
+
+      seenKeysRef.current = seenKeys;
+      setResults(dedupedResults);
+      setSourceErrors(mergedSourceErrors);
+      setTotal(dedupedResults.length);
+      setNextOffset(null);
+      setActiveQuery("Saved searches");
+      setActiveSources(
+        Array.from(
+          new Set(savedSearches.flatMap((entry) => entry.sources.filter(isSourceOption))),
+        ) as SourceOption[],
+      );
+      setActiveSort(selectedSort);
+      setActiveLimit(selectedLimit);
+      setResultMode("saved_batch");
+      setHasSearched(true);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to auto-load saved searches");
+    } finally {
+      setSearchLoading(false);
+      fetchInFlightRef.current = false;
+    }
+  }
+
   useEffect(() => {
     if (user) {
-      void fetchSavedSearches();
+      void (async () => {
+        const fetched = await fetchSavedSearches();
+        if (!fetched) return;
+
+        if (autoLoadedSavedForUserRef.current === user.id) return;
+        autoLoadedSavedForUserRef.current = user.id;
+
+        if (fetched.length > 0) {
+          await runAllSavedSearches(fetched);
+        }
+      })();
     } else {
+      autoLoadedSavedForUserRef.current = null;
       setSaved([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -338,6 +453,7 @@ export default function HomePage() {
     if (!query || sources.length === 0) return;
 
     setActiveSavedSearchId(null);
+    setResultMode("single");
     await runSearch({
       query,
       sourceList: sources,
@@ -416,6 +532,7 @@ export default function HomePage() {
       setQ(savedSearch.query);
       setSources(normalizedSources);
       setActiveSavedSearchId(id);
+      setResultMode("single");
 
       await runSearch({
         query: savedSearch.query,
@@ -433,6 +550,14 @@ export default function HomePage() {
   async function onChangeSort(nextSort: SortOption) {
     setSortBy(nextSort);
     if (!hasSearched) return;
+
+    if (resultMode === "saved_batch") {
+      await runAllSavedSearches(saved, {
+        selectedSort: nextSort,
+        selectedLimit: limit,
+      });
+      return;
+    }
 
     await runSearch({
       query: activeQuery,
@@ -714,12 +839,33 @@ export default function HomePage() {
               </section>
             )}
 
+            {!searchLoading && !hasSearched && (
+              <section className="space-y-3">
+                <h2 className="text-xl font-semibold">Results</h2>
+                <div className="rounded-xl border border-dashed border-gray-800 bg-gray-900/20 p-5">
+                  <p className="text-sm text-gray-200">
+                    {authLoading
+                      ? "Checking your account..."
+                      : user
+                        ? "Search and select the sources to start, or save searches to auto-load them next time."
+                        : "Search and select the sources to start. Log in to auto-load your saved searches."}
+                  </p>
+                  <p className="mt-2 text-xs text-gray-500">
+                    Pick one or more sources, enter a query, and run a search to see listings here.
+                  </p>
+                </div>
+              </section>
+            )}
+
             {hasSearched && !searchLoading && (
               <section className="space-y-3">
                 <div className="flex items-baseline justify-between gap-3">
-                  <h2 className="text-xl font-semibold">
-                    Results ({total ?? results.length})
-                  </h2>
+                  <div>
+                    <h2 className="text-xl font-semibold">Results ({total ?? results.length})</h2>
+                    {resultMode === "saved_batch" ? (
+                      <p className="text-xs text-gray-500">Auto-loaded from your saved searches.</p>
+                    ) : null}
+                  </div>
                   <p className="text-xs text-gray-500">
                     Showing {results.length}
                     {total !== null ? ` of ${total}` : ""}
