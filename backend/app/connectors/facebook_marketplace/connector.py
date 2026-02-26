@@ -7,6 +7,7 @@ import random
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
+from urllib.parse import urlparse
 
 from app.connectors.facebook_marketplace.errors import (
     FacebookConnectorError,
@@ -94,6 +95,87 @@ EXTRACTION_SCRIPT = """
   return items;
 }
 """
+
+
+def _is_facebook_cookie_domain(domain: str) -> bool:
+    normalized = (domain or "").strip().lower().lstrip(".")
+    return normalized == "facebook.com" or normalized.endswith(".facebook.com")
+
+
+def _is_facebook_cookie_url(url: str) -> bool:
+    try:
+        hostname = (urlparse(str(url)).hostname or "").strip().lower()
+    except Exception:
+        return False
+    return _is_facebook_cookie_domain(hostname)
+
+
+def sanitize_cookie_payload(payload: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    cookies = payload.get("cookies") if isinstance(payload, dict) else payload
+    if not isinstance(cookies, list) or not cookies:
+        raise FacebookConnectorError(
+            FacebookConnectorErrorCode.cookies_invalid,
+            "Cookie JSON must contain a non-empty cookie list.",
+            retryable=False,
+        )
+
+    sanitized: list[dict[str, Any]] = []
+    cookie_names: list[str] = []
+    for cookie in cookies:
+        if not isinstance(cookie, dict):
+            continue
+        item = dict(cookie)
+        if "expires" not in item and "expirationDate" in item:
+            try:
+                item["expires"] = int(float(item["expirationDate"]))
+            except (TypeError, ValueError):
+                item.pop("expirationDate", None)
+        item.pop("expirationDate", None)
+        item.pop("id", None)
+        item.pop("storeId", None)
+        item.pop("hostOnly", None)
+        item.pop("session", None)
+        same_site = item.get("sameSite")
+        if isinstance(same_site, str):
+            normalized_same_site = {
+                "no_restriction": "None",
+                "unspecified": "Lax",
+                "strict": "Strict",
+                "lax": "Lax",
+                "none": "None",
+            }.get(same_site.strip().lower())
+            if normalized_same_site:
+                item["sameSite"] = normalized_same_site
+        if "sameSite" in item and item["sameSite"] not in {"Strict", "Lax", "None"}:
+            item.pop("sameSite", None)
+        domain = item.get("domain")
+        url = item.get("url")
+        if "domain" not in item and "url" not in item:
+            item["domain"] = ".facebook.com"
+            item["path"] = "/"
+        elif isinstance(domain, str):
+            domain_value = domain.strip()
+            if not _is_facebook_cookie_domain(domain_value):
+                continue
+            if domain_value and not domain_value.startswith("."):
+                item["domain"] = f".{domain_value}"
+        elif "domain" in item:
+            continue
+        elif not isinstance(url, str) or not _is_facebook_cookie_url(url):
+            continue
+
+        name = str(item.get("name") or "").strip()
+        if name:
+            cookie_names.append(name)
+        sanitized.append(item)
+
+    if not sanitized:
+        raise FacebookConnectorError(
+            FacebookConnectorErrorCode.cookies_invalid,
+            "Cookie JSON did not include valid facebook.com cookie objects.",
+            retryable=False,
+        )
+    return sanitized, cookie_names
 
 
 class FacebookMarketplaceConnector:
@@ -218,7 +300,10 @@ class FacebookMarketplaceConnector:
 
             try:
                 if request.auth_mode == "cookie":
-                    await self._load_cookies(context, request.cookie_path)
+                    if request.cookie_payload is not None:
+                        await self._load_cookie_payload(context, request.cookie_payload)
+                    else:
+                        await self._load_cookies(context, request.cookie_path)
 
                 page = await context.new_page()
                 # Session bootstrap helps Facebook attach cookies before marketplace navigation.
@@ -298,71 +383,15 @@ class FacebookMarketplaceConnector:
                 retryable=False,
                 details={"error": str(exc)},
             ) from exc
+        await self._load_cookie_payload(context, payload, cookie_label=cookie_path)
 
-        cookies = payload.get("cookies") if isinstance(payload, dict) else payload
-        if not isinstance(cookies, list) or not cookies:
-            raise FacebookConnectorError(
-                FacebookConnectorErrorCode.cookies_invalid,
-                "Cookie JSON must contain a non-empty cookie list.",
-                retryable=False,
-            )
-
-        sanitized: list[dict[str, Any]] = []
-        cookie_names: list[str] = []
-        for cookie in cookies:
-            if not isinstance(cookie, dict):
-                continue
-            item = dict(cookie)
-            name = str(item.get("name") or "").strip()
-            if name:
-                cookie_names.append(name)
-            # EditThisCookie uses expirationDate; Playwright expects expires.
-            if "expires" not in item and "expirationDate" in item:
-                try:
-                    item["expires"] = int(float(item["expirationDate"]))
-                except (TypeError, ValueError):
-                    item.pop("expirationDate", None)
-            item.pop("expirationDate", None)
-            # Remove extension/browser-only fields.
-            item.pop("id", None)
-            item.pop("storeId", None)
-            item.pop("hostOnly", None)
-            item.pop("session", None)
-            # Normalize sameSite values from common extensions.
-            same_site = item.get("sameSite")
-            if isinstance(same_site, str):
-                normalized_same_site = {
-                    "no_restriction": "None",
-                    "unspecified": "Lax",
-                    "strict": "Strict",
-                    "lax": "Lax",
-                    "none": "None",
-                }.get(same_site.strip().lower())
-                if normalized_same_site:
-                    item["sameSite"] = normalized_same_site
-            if "sameSite" in item and item["sameSite"] not in {"Strict", "Lax", "None"}:
-                item.pop("sameSite", None)
-            if "domain" not in item and "url" not in item:
-                item["domain"] = ".facebook.com"
-                item["path"] = "/"
-            if "domain" in item and isinstance(item["domain"], str):
-                domain = item["domain"].strip()
-                if domain and not domain.startswith(".") and "facebook.com" in domain:
-                    item["domain"] = f".{domain}"
-            sanitized.append(item)
-
-        if not sanitized:
-            raise FacebookConnectorError(
-                FacebookConnectorErrorCode.cookies_invalid,
-                "Cookie JSON did not include valid cookie objects.",
-                retryable=False,
-            )
-
+    async def _load_cookie_payload(self, context, payload: Any, *, cookie_label: str = "__in_memory__") -> None:
+        sanitized, cookie_names = sanitize_cookie_payload(payload)
         await context.add_cookies(sanitized)
         self._log(
             "cookies_loaded",
             count=len(sanitized),
-            cookie_path=cookie_path,
+            cookie_path=cookie_label,
             names=sorted(set(cookie_names)),
         )
 

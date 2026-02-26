@@ -1,8 +1,18 @@
 import logging
 
-import jwt
 from fastapi import Header, HTTPException
-from jwt import PyJWKClient
+
+try:
+    import jwt
+    from jwt import PyJWKClient
+
+    PyJWTError = jwt.PyJWTError
+except Exception:  # pragma: no cover - local dev env may be partially provisioned
+    jwt = None
+    PyJWKClient = None
+
+    class PyJWTError(Exception):
+        pass
 
 from app.core.config import settings
 
@@ -10,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 
 def _decode_hs(token: str, alg: str) -> dict:
+    if jwt is None:
+        raise HTTPException(status_code=500, detail="Server auth dependency missing (PyJWT)")
     secret = settings.SUPABASE_JWT_SECRET
     if not secret:
         raise HTTPException(status_code=500, detail="Server auth not configured")
@@ -22,6 +34,8 @@ def _decode_hs(token: str, alg: str) -> dict:
 
 
 def _decode_jwks(token: str, alg: str | None) -> dict:
+    if jwt is None or PyJWKClient is None:
+        raise HTTPException(status_code=500, detail="Server auth dependency missing (PyJWT)")
     if not settings.SUPABASE_URL:
         raise HTTPException(status_code=500, detail="Server auth not configured")
     base = settings.SUPABASE_URL.rstrip("/")
@@ -55,19 +69,21 @@ def _decode_jwks(token: str, alg: str | None) -> dict:
     raise HTTPException(status_code=401, detail="Invalid token") from last_err
 
 
-def get_current_user_id(authorization: str | None = Header(default=None)) -> str:
+def get_current_user_id_from_authorization(authorization: str | None) -> str:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
 
     token = authorization.split(" ", 1)[1].strip()
     try:
+        if jwt is None:
+            raise HTTPException(status_code=500, detail="Server auth dependency missing (PyJWT)")
         header = jwt.get_unverified_header(token)
         alg = header.get("alg")
         if alg and alg.startswith("HS"):
             payload = _decode_hs(token, alg)
         else:
             payload = _decode_jwks(token, alg)
-    except jwt.PyJWTError as exc:
+    except PyJWTError as exc:
         logger.warning("JWT verification failed: %s", exc)
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -76,3 +92,16 @@ def get_current_user_id(authorization: str | None = Header(default=None)) -> str
         raise HTTPException(status_code=401, detail="Invalid token")
 
     return user_id
+
+
+def try_get_current_user_id_from_authorization(authorization: str | None) -> str | None:
+    if not authorization:
+        return None
+    try:
+        return get_current_user_id_from_authorization(authorization)
+    except HTTPException:
+        return None
+
+
+def get_current_user_id(authorization: str | None = Header(default=None)) -> str:
+    return get_current_user_id_from_authorization(authorization)

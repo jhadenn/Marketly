@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     MARKETLY_ENABLE_FACEBOOK: bool = False
     MARKETLY_FACEBOOK_AUTH_MODE: str = "guest"
     MARKETLY_FACEBOOK_COOKIE_PATH: str = "secrets/fb_cookies.json"
+    MARKETLY_CREDENTIALS_ENCRYPTION_KEY: str | None = None
     EBAY_ENV: str = "production"
     EBAY_CLIENT_ID: str | None = None
     EBAY_CLIENT_SECRET: str | None = None

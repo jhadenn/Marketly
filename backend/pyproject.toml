@@ -14,6 +14,7 @@ dependencies = [
   "sqlalchemy>=2.0",
   "alembic>=1.13",
   "psycopg2-binary>=2.9",
+  "cryptography>=42.0",
   "beautifulsoup4>=4.12.3",
   "lxml>=5.1.0",
   "requests>=2.31.0",

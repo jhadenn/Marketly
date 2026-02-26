@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+from dataclasses import dataclass
 
 from app.connectors import CONNECTORS
 from app.connectors.facebook_marketplace import FacebookConnectorError, FacebookConnectorErrorCode
@@ -14,18 +15,64 @@ _pagination_cache = TTLCache()
 logger = logging.getLogger(__name__)
 
 
-def _cache_key(query: str, sources: list[str], fetch_limit: int) -> str:
+@dataclass
+class FacebookRuntimeContext:
+    user_id: str | None = None
+    cookie_payload: object | None = None
+    credential_fingerprint_sha256: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    radius_km: int | None = None
+
+
+def _rounded_coord(value: float | None) -> str:
+    if value is None:
+        return ""
+    return f"{value:.3f}"
+
+
+def _facebook_cache_fragment(
+    sources: list[str],
+    facebook_runtime_context: FacebookRuntimeContext | None,
+) -> str:
+    if "facebook" not in sources:
+        return ""
+
+    ctx = facebook_runtime_context or FacebookRuntimeContext()
+    return (
+        f"|fb_user={ctx.user_id or 'anon'}"
+        f"|fb_fp={ctx.credential_fingerprint_sha256 or ''}"
+        f"|fb_lat={_rounded_coord(ctx.latitude)}"
+        f"|fb_lon={_rounded_coord(ctx.longitude)}"
+        f"|fb_rkm={ctx.radius_km if ctx.radius_km is not None else ''}"
+    )
+
+
+def _cache_key(
+    query: str,
+    sources: list[str],
+    fetch_limit: int,
+    facebook_runtime_context: FacebookRuntimeContext | None = None,
+) -> str:
     raw = (
         f"{query}|{','.join(sorted(sources))}|{fetch_limit}|"
         f"facebook_enabled={settings.MARKETLY_ENABLE_FACEBOOK}"
+        f"{_facebook_cache_fragment(sources, facebook_runtime_context)}"
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _pagination_key(query: str, sources: list[str], sort: SearchSort, limit: int) -> str:
+def _pagination_key(
+    query: str,
+    sources: list[str],
+    sort: SearchSort,
+    limit: int,
+    facebook_runtime_context: FacebookRuntimeContext | None = None,
+) -> str:
     raw = (
         f"{query}|{','.join(sorted(sources))}|sort={sort}|limit={limit}|"
         f"facebook_enabled={settings.MARKETLY_ENABLE_FACEBOOK}"
+        f"{_facebook_cache_fragment(sources, facebook_runtime_context)}"
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -111,6 +158,7 @@ async def _fetch_source(
     src: str,
     query: str,
     fetch_limit: int,
+    facebook_runtime_context: FacebookRuntimeContext | None = None,
 ) -> tuple[str, list[Listing], SourceError | None]:
     if src == "facebook" and not settings.MARKETLY_ENABLE_FACEBOOK:
         return (
@@ -122,6 +170,27 @@ async def _fetch_source(
                 retryable=False,
             ),
         )
+    if src == "facebook":
+        if facebook_runtime_context is None or not facebook_runtime_context.user_id:
+            return (
+                src,
+                [],
+                SourceError(
+                    code="AUTH_REQUIRED",
+                    message="Log in and configure Facebook cookies to use the Facebook source.",
+                    retryable=False,
+                ),
+            )
+        if facebook_runtime_context.cookie_payload is None:
+            return (
+                src,
+                [],
+                SourceError(
+                    code="BYOC_REQUIRED",
+                    message="Upload your Facebook cookies in Facebook Setup to use the Facebook source.",
+                    retryable=False,
+                ),
+            )
 
     connector = CONNECTORS.get(src)
     if not connector:
@@ -136,7 +205,18 @@ async def _fetch_source(
         )
 
     try:
-        listings = await connector.search(query=query, limit=fetch_limit)
+        if src == "facebook":
+            listings = await connector.search(
+                query=query,
+                limit=fetch_limit,
+                auth_mode="cookie",
+                cookie_payload=facebook_runtime_context.cookie_payload if facebook_runtime_context else None,
+                latitude=facebook_runtime_context.latitude if facebook_runtime_context else None,
+                longitude=facebook_runtime_context.longitude if facebook_runtime_context else None,
+                radius_km=facebook_runtime_context.radius_km if facebook_runtime_context else None,
+            )
+        else:
+            listings = await connector.search(query=query, limit=fetch_limit)
         return src, listings, None
     except FacebookConnectorError as exc:
         logger.warning(
@@ -163,8 +243,9 @@ async def _fetch_and_score(
     query: str,
     sources: list[str],
     fetch_limit: int,
+    facebook_runtime_context: FacebookRuntimeContext | None = None,
 ) -> tuple[list[Listing], dict[str, SourceError], dict[str, int]]:
-    key = _cache_key(query, sources, fetch_limit)
+    key = _cache_key(query, sources, fetch_limit, facebook_runtime_context)
     cached = _cache.get(key)
     if cached is not None:
         # Backward-compatible with old cache entries that only stored 2 fields.
@@ -174,7 +255,12 @@ async def _fetch_and_score(
         return cached
 
     tasks = [
-        _fetch_source(src=src, query=query, fetch_limit=fetch_limit)
+        _fetch_source(
+            src=src,
+            query=query,
+            fetch_limit=fetch_limit,
+            facebook_runtime_context=facebook_runtime_context,
+        )
         for src in sources
     ]
     fetched = await asyncio.gather(*tasks)
@@ -213,22 +299,31 @@ async def unified_search(
     limit: int = 20,
     offset: int = 0,
     sort: SearchSort = "relevance",
+    facebook_runtime_context: FacebookRuntimeContext | None = None,
 ) -> tuple[list[Listing], int, int | None, dict[str, SourceError]]:
     safe_offset = max(0, offset)
     facebook_only = len(sources) == 1 and sources[0] == "facebook"
     multi_source = len(sources) > 1
 
     if multi_source:
-        pagination_key = _pagination_key(query, sources, sort, limit)
+        pagination_key = _pagination_key(query, sources, sort, limit, facebook_runtime_context)
         pagination_state = None if safe_offset == 0 else _pagination_cache.get(pagination_key)
 
         if pagination_state is None:
             fetch_limit = limit
-            scored, source_errors, source_counts = await _fetch_and_score(
-                query=query,
-                sources=sources,
-                fetch_limit=fetch_limit,
-            )
+            if facebook_runtime_context is None:
+                scored, source_errors, source_counts = await _fetch_and_score(
+                    query=query,
+                    sources=sources,
+                    fetch_limit=fetch_limit,
+                )
+            else:
+                scored, source_errors, source_counts = await _fetch_and_score(
+                    query=query,
+                    sources=sources,
+                    fetch_limit=fetch_limit,
+                    facebook_runtime_context=facebook_runtime_context,
+                )
             ordered = _sort_results(scored, sort=sort)
             pagination_state = {
                 "fetch_limit": fetch_limit,
@@ -260,11 +355,19 @@ async def unified_search(
             and expansions < max_expansions
         ):
             next_fetch_limit = int(pagination_state["fetch_limit"]) + limit
-            scored, incoming_source_errors, source_counts = await _fetch_and_score(
-                query=query,
-                sources=sources,
-                fetch_limit=next_fetch_limit,
-            )
+            if facebook_runtime_context is None:
+                scored, incoming_source_errors, source_counts = await _fetch_and_score(
+                    query=query,
+                    sources=sources,
+                    fetch_limit=next_fetch_limit,
+                )
+            else:
+                scored, incoming_source_errors, source_counts = await _fetch_and_score(
+                    query=query,
+                    sources=sources,
+                    fetch_limit=next_fetch_limit,
+                    facebook_runtime_context=facebook_runtime_context,
+                )
             expanded_ordered = _sort_results(scored, sort=sort)
 
             seen = {_listing_key(item) for item in pagination_state["ordered"]}
@@ -315,11 +418,19 @@ async def unified_search(
 
     fetch_limit = max(limit + safe_offset, limit)
 
-    scored, source_errors, _ = await _fetch_and_score(
-        query=query,
-        sources=sources,
-        fetch_limit=fetch_limit,
-    )
+    if facebook_runtime_context is None:
+        scored, source_errors, _ = await _fetch_and_score(
+            query=query,
+            sources=sources,
+            fetch_limit=fetch_limit,
+        )
+    else:
+        scored, source_errors, _ = await _fetch_and_score(
+            query=query,
+            sources=sources,
+            fetch_limit=fetch_limit,
+            facebook_runtime_context=facebook_runtime_context,
+        )
     ordered = _sort_results(scored, sort=sort)
 
     total = len(ordered)

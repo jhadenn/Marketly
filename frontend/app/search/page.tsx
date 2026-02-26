@@ -5,6 +5,7 @@ import Image from "next/image";
 import Link from "next/link";
 import {
   Bookmark,
+  ChevronDown,
   Loader2,
   LocateFixed,
   LogOut,
@@ -66,6 +67,25 @@ type SourceErrorEntry = {
   code: string;
   message: string;
   retryable?: boolean;
+};
+
+type FacebookConnectorStatus = {
+  configured: boolean;
+  feature_enabled: boolean;
+  status?: string | null;
+  cookie_count?: number | null;
+  last_error_code?: string | null;
+  last_error_message?: string | null;
+  last_validated_at?: string | null;
+  last_used_at?: string | null;
+  updated_at?: string | null;
+};
+
+type FacebookVerifyResponse = {
+  ok: boolean;
+  status: FacebookConnectorStatus;
+  error_code?: string | null;
+  error_message?: string | null;
 };
 
 type SavedSearch = {
@@ -185,6 +205,18 @@ type SearchPageViewProps = {
   editSources: SourceOption[];
   toggleEditSource: (source: SourceOption) => void;
   onSaveEdit: () => Promise<void>;
+  facebookConfigStatus: FacebookConnectorStatus | null;
+  facebookConfigLoading: boolean;
+  facebookConfigError: string | null;
+  facebookUploadBusy: boolean;
+  facebookVerifyBusy: boolean;
+  facebookDeleteBusy: boolean;
+  facebookCookieJsonText: string;
+  setFacebookCookieJsonText: React.Dispatch<React.SetStateAction<string>>;
+  onSaveFacebookCookieJson: () => Promise<void>;
+  onVerifyFacebookCookies: () => Promise<void>;
+  onDeleteFacebookCookies: () => Promise<void>;
+  onFacebookCookieFileSelected: (e: React.ChangeEvent<HTMLInputElement>) => void;
 };
 
 function GlassPanel({
@@ -231,6 +263,20 @@ type SearchControlsRailProps = Pick<
   | "setHideUnknownDistance"
   | "distanceFilterPendingLocation"
   | "distanceFilterActive"
+  | "authLoading"
+  | "user"
+  | "facebookConfigStatus"
+  | "facebookConfigLoading"
+  | "facebookConfigError"
+  | "facebookUploadBusy"
+  | "facebookVerifyBusy"
+  | "facebookDeleteBusy"
+  | "facebookCookieJsonText"
+  | "setFacebookCookieJsonText"
+  | "onSaveFacebookCookieJson"
+  | "onVerifyFacebookCookies"
+  | "onDeleteFacebookCookies"
+  | "onFacebookCookieFileSelected"
 >;
 
 type SavedSearchRailProps = Pick<
@@ -320,19 +366,31 @@ function SearchPageView(props: SearchPageViewProps) {
                 Loading auth...
               </span>
             ) : props.user ? (
-              <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.02] p-1 pl-3">
-                <span className="hidden max-w-[220px] truncate text-xs text-zinc-300 sm:inline">
-                  {props.user.email ?? "Signed in"}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => void props.signOut()}
-                  className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.05] px-3 py-1.5 text-xs text-zinc-100 transition hover:border-white/20 hover:bg-white/[0.08]"
-                >
-                  <LogOut className="size-3.5" />
-                  Logout
-                </button>
-              </div>
+              <details className="relative">
+                <summary className="flex cursor-pointer list-none items-center gap-2 rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.04] [&::-webkit-details-marker]:hidden">
+                  <span className="hidden max-w-[220px] truncate sm:inline">
+                    {props.user.email ?? "Signed in"}
+                  </span>
+                  <span className="sm:hidden">Account</span>
+                  <ChevronDown className="size-3.5 text-zinc-400" />
+                </summary>
+                <div className="absolute right-0 z-50 mt-2 w-56 overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/95 p-1 shadow-2xl backdrop-blur-xl">
+                  <Link
+                    href="/facebook-configuration"
+                    className="block rounded-xl px-3 py-2 text-sm text-zinc-200 transition hover:bg-white/[0.05]"
+                  >
+                    Facebook configuration
+                  </Link>
+                  <button
+                    type="button"
+                    onClick={() => void props.signOut()}
+                    className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm text-zinc-200 transition hover:bg-white/[0.05]"
+                  >
+                    <LogOut className="size-4 text-zinc-400" />
+                    Logout
+                  </button>
+                </div>
+              </details>
             ) : (
               <Link
                 href="/login"
@@ -617,6 +675,7 @@ function SearchControlsRail(props: SearchControlsRailProps) {
           ) : null}
         </div>
       </GlassPanel>
+
     </>
   );
 }
@@ -763,6 +822,12 @@ function ResultsPanel({
           {sourceErrors.facebook ? (
             <p className="mt-1 text-xs text-amber-100/90">
               Facebook source unavailable: {sourceErrors.facebook.message}
+              {sourceErrors.facebook.code === "AUTH_REQUIRED"
+                ? " Log in and open Facebook configuration from the account menu."
+                : null}
+              {sourceErrors.facebook.code === "BYOC_REQUIRED"
+                ? " Open Facebook configuration from the account menu and upload your cookie JSON."
+                : null}
             </p>
           ) : null}
           <ul className="mt-2 space-y-1 text-xs text-amber-100/80">
@@ -1261,6 +1326,13 @@ export default function HomePage() {
   const [editSources, setEditSources] = useState<SourceOption[]>([]);
   const [editError, setEditError] = useState<string | null>(null);
   const [editSaving, setEditSaving] = useState(false);
+  const [facebookConfigStatus, setFacebookConfigStatus] = useState<FacebookConnectorStatus | null>(null);
+  const [facebookConfigLoading, setFacebookConfigLoading] = useState(false);
+  const [facebookConfigError, setFacebookConfigError] = useState<string | null>(null);
+  const [facebookUploadBusy, setFacebookUploadBusy] = useState(false);
+  const [facebookVerifyBusy, setFacebookVerifyBusy] = useState(false);
+  const [facebookDeleteBusy, setFacebookDeleteBusy] = useState(false);
+  const [facebookCookieJsonText, setFacebookCookieJsonText] = useState("");
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const seenKeysRef = useRef<Set<string>>(new Set());
@@ -1337,9 +1409,16 @@ export default function HomePage() {
       params.set("sort", selectedSort);
       params.set("limit", String(selectedLimit));
       params.set("offset", String(offset));
+      if (deviceCoords) {
+        params.set("latitude", String(deviceCoords.latitude));
+        params.set("longitude", String(deviceCoords.longitude));
+      }
+      if (travelRangeMiles !== null) {
+        params.set("radius_km", String(Math.max(1, Math.round(travelRangeMiles * 1.60934))));
+      }
       return `${API_BASE}/search?${params.toString()}`;
     },
-    [API_BASE],
+    [API_BASE, deviceCoords, travelRangeMiles],
   );
 
   const runSearch = useCallback(
@@ -1376,7 +1455,10 @@ export default function HomePage() {
 
       try {
         const url = buildSearchUrl(query, sourceList, selectedSort, selectedLimit, offset);
-        const res = await fetch(url, { cache: "no-store" });
+        const res = await fetch(url, {
+          cache: "no-store",
+          headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
+        });
         if (!res.ok) {
           const text = await res.text();
           throw new Error(`API error ${res.status}: ${text}`);
@@ -1441,7 +1523,7 @@ export default function HomePage() {
         fetchInFlightRef.current = false;
       }
     },
-    [buildSearchUrl],
+    [accessToken, buildSearchUrl],
   );
 
   function onUseMyLocation() {
@@ -1476,6 +1558,168 @@ export default function HomePage() {
   function onClearMyLocation() {
     setDeviceCoords(null);
     setLocationFilterError(null);
+  }
+
+  const parseApiError = useCallback(async (res: Response, fallback: string) => {
+    const text = await res.text();
+    if (!text) return fallback;
+    try {
+      const parsed = JSON.parse(text) as
+        | { detail?: string | { message?: string } | { error_message?: string } }
+        | undefined;
+      const detail = parsed?.detail as
+        | string
+        | { message?: string; error_message?: string }
+        | undefined;
+      if (typeof detail === "string" && detail.trim()) return detail;
+      if (detail && typeof detail === "object") {
+        if (typeof detail.message === "string" && detail.message.trim()) return detail.message;
+        if (typeof detail.error_message === "string" && detail.error_message.trim()) {
+          return detail.error_message;
+        }
+      }
+    } catch {
+      return text;
+    }
+    return fallback;
+  }, []);
+
+  const fetchFacebookConfigStatus = useCallback(async (): Promise<FacebookConnectorStatus | null> => {
+    if (!accessToken) {
+      setFacebookConfigStatus(null);
+      return null;
+    }
+
+    setFacebookConfigLoading(true);
+    setFacebookConfigError(null);
+    try {
+      const res = await fetch(`${API_BASE}/me/connectors/facebook`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        throw new Error(await parseApiError(res, "Failed to load Facebook setup status."));
+      }
+      const json = (await res.json()) as FacebookConnectorStatus;
+      setFacebookConfigStatus(json);
+      return json;
+    } catch (err: unknown) {
+      setFacebookConfigError(err instanceof Error ? err.message : "Failed to load Facebook setup status.");
+      return null;
+    } finally {
+      setFacebookConfigLoading(false);
+    }
+  }, [API_BASE, accessToken, parseApiError]);
+
+  const uploadFacebookCookiePayload = useCallback(async (cookiePayload: unknown) => {
+    if (!accessToken) {
+      setFacebookConfigError("Please log in to configure Facebook cookies.");
+      return;
+    }
+    setFacebookUploadBusy(true);
+    setFacebookConfigError(null);
+    try {
+      const res = await fetch(`${API_BASE}/me/connectors/facebook/cookies`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ cookies_json: cookiePayload }),
+      });
+      if (!res.ok) {
+        throw new Error(await parseApiError(res, "Failed to save Facebook cookies."));
+      }
+      const json = (await res.json()) as FacebookConnectorStatus;
+      setFacebookConfigStatus(json);
+      setFacebookCookieJsonText("");
+    } catch (err: unknown) {
+      setFacebookConfigError(err instanceof Error ? err.message : "Failed to save Facebook cookies.");
+    } finally {
+      setFacebookUploadBusy(false);
+    }
+  }, [API_BASE, accessToken, parseApiError]);
+
+  async function onSaveFacebookCookieJson() {
+    if (!facebookCookieJsonText.trim()) {
+      setFacebookConfigError("Paste your Facebook cookie JSON first.");
+      return;
+    }
+    try {
+      const parsed = JSON.parse(facebookCookieJsonText);
+      await uploadFacebookCookiePayload(parsed);
+    } catch {
+      setFacebookConfigError("Cookie JSON is not valid JSON.");
+    }
+  }
+
+  async function onVerifyFacebookCookies() {
+    if (!accessToken) {
+      setFacebookConfigError("Please log in to verify Facebook cookies.");
+      return;
+    }
+    setFacebookVerifyBusy(true);
+    setFacebookConfigError(null);
+    try {
+      const res = await fetch(`${API_BASE}/me/connectors/facebook/verify`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!res.ok) {
+        throw new Error(await parseApiError(res, "Failed to verify Facebook cookies."));
+      }
+      const json = (await res.json()) as FacebookVerifyResponse;
+      setFacebookConfigStatus(json.status);
+      if (!json.ok) {
+        setFacebookConfigError(json.error_message || "Facebook cookie verification failed.");
+      }
+    } catch (err: unknown) {
+      setFacebookConfigError(err instanceof Error ? err.message : "Failed to verify Facebook cookies.");
+    } finally {
+      setFacebookVerifyBusy(false);
+    }
+  }
+
+  async function onDeleteFacebookCookies() {
+    if (!accessToken) {
+      setFacebookConfigError("Please log in to delete Facebook cookies.");
+      return;
+    }
+    setFacebookDeleteBusy(true);
+    setFacebookConfigError(null);
+    try {
+      const res = await fetch(`${API_BASE}/me/connectors/facebook`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!res.ok) {
+        throw new Error(await parseApiError(res, "Failed to delete Facebook cookies."));
+      }
+      setFacebookConfigStatus({
+        configured: false,
+        feature_enabled: facebookConfigStatus?.feature_enabled ?? true,
+      });
+    } catch (err: unknown) {
+      setFacebookConfigError(err instanceof Error ? err.message : "Failed to delete Facebook cookies.");
+    } finally {
+      setFacebookDeleteBusy(false);
+    }
+  }
+
+  function onFacebookCookieFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.currentTarget.value = "";
+    if (!file) return;
+    void (async () => {
+      setFacebookConfigError(null);
+      try {
+        const text = await file.text();
+        const parsed = JSON.parse(text);
+        await uploadFacebookCookiePayload(parsed);
+      } catch {
+        setFacebookConfigError("Failed to read or parse the selected cookie JSON file.");
+      }
+    })();
   }
 
   async function fetchSavedSearches(): Promise<SavedSearch[] | null> {
@@ -1527,6 +1771,13 @@ export default function HomePage() {
     params.set("sort", selectedSort);
     params.set("limit", String(selectedLimit));
     params.set("offset", String(offset));
+    if (deviceCoords) {
+      params.set("latitude", String(deviceCoords.latitude));
+      params.set("longitude", String(deviceCoords.longitude));
+    }
+    if (travelRangeMiles !== null) {
+      params.set("radius_km", String(Math.max(1, Math.round(travelRangeMiles * 1.60934))));
+    }
 
     const res = await fetch(`${API_BASE}/saved-searches/${entry.id}/run?${params.toString()}`, {
       headers: { Authorization: `Bearer ${accessToken}` },
@@ -1539,7 +1790,7 @@ export default function HomePage() {
     }
 
     return (await res.json()) as SearchResponse;
-  }, [API_BASE, accessToken]);
+  }, [API_BASE, accessToken, deviceCoords, travelRangeMiles]);
 
   const loadMoreSavedBatch = useCallback(async () => {
     if (
@@ -2105,6 +2356,18 @@ export default function HomePage() {
       editSources={editSources}
       toggleEditSource={toggleEditSource}
       onSaveEdit={onSaveEdit}
+      facebookConfigStatus={facebookConfigStatus}
+      facebookConfigLoading={facebookConfigLoading}
+      facebookConfigError={facebookConfigError}
+      facebookUploadBusy={facebookUploadBusy}
+      facebookVerifyBusy={facebookVerifyBusy}
+      facebookDeleteBusy={facebookDeleteBusy}
+      facebookCookieJsonText={facebookCookieJsonText}
+      setFacebookCookieJsonText={setFacebookCookieJsonText}
+      onSaveFacebookCookieJson={onSaveFacebookCookieJson}
+      onVerifyFacebookCookies={onVerifyFacebookCookies}
+      onDeleteFacebookCookies={onDeleteFacebookCookies}
+      onFacebookCookieFileSelected={onFacebookCookieFileSelected}
     />
   );
 }

@@ -5,7 +5,10 @@ import re
 from pathlib import Path
 
 from app.connectors.base import MarketplaceConnector
-from app.connectors.facebook_marketplace.connector import FacebookMarketplaceConnector
+from app.connectors.facebook_marketplace.connector import (
+    FacebookMarketplaceConnector,
+    sanitize_cookie_payload,
+)
 from app.connectors.facebook_marketplace.errors import (
     FacebookConnectorError,
     FacebookConnectorErrorCode,
@@ -132,18 +135,41 @@ class FacebookUnifiedConnector(MarketplaceConnector):
                 names.add(name)
         return len(cookies), names
 
-    async def search(self, query: str, limit: int = 20) -> list[Listing]:
+    @staticmethod
+    def _read_cookie_metadata_from_payload(cookie_payload: object) -> tuple[int, set[str]]:
+        try:
+            sanitized, cookie_names = sanitize_cookie_payload(cookie_payload)
+        except FacebookConnectorError:
+            return 0, set()
+        return len(sanitized), set(cookie_names)
+
+    async def search(
+        self,
+        query: str,
+        limit: int = 20,
+        *,
+        auth_mode: str | None = None,
+        cookie_payload: object | None = None,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        radius_km: int | None = None,
+    ) -> list[Listing]:
         requested_limit = max(1, int(limit))
         # Facebook often injects sponsored/junk cards that are filtered out after normalization.
         # Overfetch so the post-filter result can still fill the requested page size.
         scrape_limit = min(100, requested_limit + max(12, requested_limit // 2))
 
-        auth_mode = (settings.MARKETLY_FACEBOOK_AUTH_MODE or "guest").strip().lower()
-        if auth_mode not in {"guest", "cookie"}:
-            auth_mode = "guest"
+        effective_auth_mode = (auth_mode or settings.MARKETLY_FACEBOOK_AUTH_MODE or "guest").strip().lower()
+        if cookie_payload is not None:
+            effective_auth_mode = "cookie"
+        if effective_auth_mode not in {"guest", "cookie"}:
+            effective_auth_mode = "guest"
         cookie_path = self._resolve_cookie_path(settings.MARKETLY_FACEBOOK_COOKIE_PATH)
-        cookie_count, cookie_names = self._read_cookie_metadata(cookie_path)
-        if auth_mode == "cookie":
+        if cookie_payload is not None:
+            cookie_count, cookie_names = self._read_cookie_metadata_from_payload(cookie_payload)
+        else:
+            cookie_count, cookie_names = self._read_cookie_metadata(cookie_path)
+        if effective_auth_mode == "cookie":
             missing_required = {"c_user", "xs"} - cookie_names
             if missing_required:
                 raise FacebookConnectorError(
@@ -168,8 +194,12 @@ class FacebookUnifiedConnector(MarketplaceConnector):
         request = FacebookSearchRequest(
             query=query,
             limit=scrape_limit,
-            auth_mode=auth_mode,
+            auth_mode=effective_auth_mode,
             cookie_path=cookie_path,
+            cookie_payload=cookie_payload,
+            latitude=latitude,
+            longitude=longitude,
+            radius_km=radius_km,
             ingest=False,
         )
         try:
@@ -179,8 +209,9 @@ class FacebookUnifiedConnector(MarketplaceConnector):
         except FacebookConnectorError as exc:
             # If guest mode is blocked, auto-retry once with cookies if a cookie file exists.
             if (
-                auth_mode == "guest"
+                effective_auth_mode == "guest"
                 and exc.code in {FacebookConnectorErrorCode.login_wall, FacebookConnectorErrorCode.checkpoint}
+                and cookie_payload is None
                 and Path(cookie_path).exists()
             ):
                 fallback_request = request.model_copy(update={"auth_mode": "cookie"})
@@ -188,7 +219,7 @@ class FacebookUnifiedConnector(MarketplaceConnector):
                 filtered = [item for item in records if not _looks_like_noise_item(item, query)]
                 return [_to_listing(item) for item in filtered[:requested_limit]]
 
-            if auth_mode == "guest" and exc.code in {
+            if effective_auth_mode == "guest" and exc.code in {
                 FacebookConnectorErrorCode.login_wall,
                 FacebookConnectorErrorCode.checkpoint,
             }:
@@ -202,7 +233,7 @@ class FacebookUnifiedConnector(MarketplaceConnector):
                     details=exc.details,
                 ) from exc
 
-            if auth_mode == "cookie" and exc.code in {
+            if effective_auth_mode == "cookie" and exc.code in {
                 FacebookConnectorErrorCode.login_wall,
                 FacebookConnectorErrorCode.checkpoint,
             }:

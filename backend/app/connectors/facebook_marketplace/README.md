@@ -14,6 +14,7 @@ This connector uses Playwright to attempt dynamic extraction from Facebook Marke
   - `limit`
   - `auth_mode` (`guest` or `cookie`)
   - `cookie_path`
+  - `cookie_payload` (server-side BYOC flow uses in-memory payload instead of a file path)
 - Output: normalized `facebook_marketplace` records with derived features (`price_bucket`, `title_keywords`, `has_images`, `location_quality`, `age_hint`, `dedup_key`).
 
 ## Local setup
@@ -108,9 +109,19 @@ Copy-Item .\secrets\fb_cookies.example.json .\secrets\fb_cookies.json
 ## Unified Search Integration
 
 - Main search endpoint: `GET /search`.
+- When `facebook` is requested via unified search, Marketly now requires:
+  - a logged-in user (`Authorization: Bearer ...`)
+  - that user to upload their own Facebook cookie JSON (`/me/connectors/facebook/...`)
+- Unified search can pass optional location hints to Facebook:
+  - `latitude`, `longitude`, `radius_km`
 - Request must include Facebook by either:
   - adding `facebook` to `sources`, or
   - setting `include_facebook=true`.
 - Facebook runs only when env flag is on:
   - `MARKETLY_ENABLE_FACEBOOK=true`
 - If requested while disabled or unavailable, `source_errors.facebook` is populated and other sources still return.
+- BYOC management endpoints:
+  - `GET /me/connectors/facebook`
+  - `PUT /me/connectors/facebook/cookies`
+  - `POST /me/connectors/facebook/verify`
+  - `DELETE /me/connectors/facebook`

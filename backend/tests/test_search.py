@@ -23,12 +23,13 @@ def _sample_listing(source: str, listing_id: str) -> Listing:
 def test_search_supports_pagination_and_sort(monkeypatch):
     captured = {}
 
-    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance"):
+    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance", **kwargs):
         captured["query"] = query
         captured["sources"] = sources
         captured["limit"] = limit
         captured["offset"] = offset
         captured["sort"] = sort
+        captured["kwargs"] = kwargs
         return ([_sample_listing("ebay", "1"), _sample_listing("kijiji", "2")], 42, 20, {})
 
     monkeypatch.setattr("app.main.unified_search", fake_unified_search)
@@ -61,13 +62,14 @@ def test_search_supports_pagination_and_sort(monkeypatch):
         "limit": 20,
         "offset": 0,
         "sort": "price_asc",
+        "kwargs": {},
     }
 
 
 def test_search_keeps_comma_separated_sources_compatibility(monkeypatch):
     captured = {}
 
-    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance"):
+    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance", **kwargs):
         captured["sources"] = sources
         return ([_sample_listing("ebay", "1")], 1, None, {})
 
@@ -84,8 +86,9 @@ def test_search_keeps_comma_separated_sources_compatibility(monkeypatch):
 def test_search_can_include_facebook_and_pass_source_errors(monkeypatch):
     captured = {}
 
-    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance"):
+    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance", **kwargs):
         captured["sources"] = sources
+        captured["kwargs"] = kwargs
         return (
             [_sample_listing("ebay", "1")],
             1,
@@ -115,12 +118,13 @@ def test_search_can_include_facebook_and_pass_source_errors(monkeypatch):
     assert payload["sources"] == ["ebay", "facebook"]
     assert payload["source_errors"]["facebook"]["code"] == "DISABLED"
     assert captured["sources"] == ["ebay", "facebook"]
+    assert "facebook_runtime_context" in captured["kwargs"]
 
 
 def test_search_facebook_only_keeps_pagination_alive(monkeypatch):
     captured = {}
 
-    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance"):
+    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance", **kwargs):
         captured["sources"] = sources
         return (
             [_sample_listing("facebook", str(i)) for i in range(limit)],
@@ -148,3 +152,45 @@ def test_search_facebook_only_keeps_pagination_alive(monkeypatch):
     assert payload["next_offset"] == 20
     assert payload["total"] is None
     assert captured["sources"] == ["facebook"]
+
+
+def test_search_passes_facebook_runtime_context_and_location(monkeypatch):
+    captured = {}
+
+    class FakeContext:
+        def __init__(self):
+            self.user_id = "user-123"
+            self.cookie_payload = [{"name": "c_user"}]
+            self.credential_fingerprint_sha256 = "abc"
+            self.latitude = 43.6532
+            self.longitude = -79.3832
+            self.radius_km = 25
+
+    def fake_build_context(**kwargs):
+        captured["context_build_kwargs"] = kwargs
+        return FakeContext()
+
+    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance", **kwargs):
+        captured["unified_kwargs"] = kwargs
+        return ([_sample_listing("facebook", "1")], None, None, {})
+
+    monkeypatch.setattr("app.main._build_facebook_runtime_context", fake_build_context)
+    monkeypatch.setattr("app.main.unified_search", fake_unified_search)
+
+    response = client.get(
+        "/search",
+        params={
+            "q": "chair",
+            "sources": "facebook",
+            "latitude": "43.6532",
+            "longitude": "-79.3832",
+            "radius_km": "25",
+        },
+        headers={"Authorization": "Bearer invalid"},
+    )
+
+    assert response.status_code == 200
+    assert "facebook_runtime_context" in captured["unified_kwargs"]
+    assert captured["context_build_kwargs"]["latitude"] == 43.6532
+    assert captured["context_build_kwargs"]["longitude"] == -79.3832
+    assert captured["context_build_kwargs"]["radius_km"] == 25

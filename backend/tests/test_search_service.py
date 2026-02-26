@@ -116,3 +116,64 @@ def test_unified_search_single_source_still_expands_fetch_window(monkeypatch):
     )
 
     assert fetch_limits == [48]
+
+
+def test_fetch_source_facebook_requires_auth(monkeypatch):
+    monkeypatch.setattr(search_service.settings, "MARKETLY_ENABLE_FACEBOOK", True)
+
+    src, listings, source_error = asyncio.run(
+        search_service._fetch_source(
+            src="facebook",
+            query="bike",
+            fetch_limit=10,
+            facebook_runtime_context=search_service.FacebookRuntimeContext(user_id=None),
+        )
+    )
+
+    assert src == "facebook"
+    assert listings == []
+    assert source_error is not None
+    assert source_error.code == "AUTH_REQUIRED"
+
+
+def test_fetch_source_facebook_requires_byoc(monkeypatch):
+    monkeypatch.setattr(search_service.settings, "MARKETLY_ENABLE_FACEBOOK", True)
+
+    src, listings, source_error = asyncio.run(
+        search_service._fetch_source(
+            src="facebook",
+            query="bike",
+            fetch_limit=10,
+            facebook_runtime_context=search_service.FacebookRuntimeContext(user_id="user-1"),
+        )
+    )
+
+    assert src == "facebook"
+    assert listings == []
+    assert source_error is not None
+    assert source_error.code == "BYOC_REQUIRED"
+
+
+def test_cache_keys_vary_by_facebook_user_cookie_and_location():
+    ctx_a = search_service.FacebookRuntimeContext(
+        user_id="user-a",
+        credential_fingerprint_sha256="fp-a",
+        latitude=43.65321,
+        longitude=-79.38318,
+        radius_km=25,
+    )
+    ctx_b = search_service.FacebookRuntimeContext(
+        user_id="user-b",
+        credential_fingerprint_sha256="fp-b",
+        latitude=45.42153,
+        longitude=-75.69719,
+        radius_km=25,
+    )
+
+    key_a = search_service._cache_key("bike", ["facebook"], 24, ctx_a)
+    key_b = search_service._cache_key("bike", ["facebook"], 24, ctx_b)
+    pag_a = search_service._pagination_key("bike", ["facebook"], "relevance", 24, ctx_a)
+    pag_b = search_service._pagination_key("bike", ["facebook"], "relevance", 24, ctx_b)
+
+    assert key_a != key_b
+    assert pag_a != pag_b
