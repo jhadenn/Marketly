@@ -1,193 +1,235 @@
-<!-- Improved compatibility of back to top link: See: https://github.com/othneildrew/Best-README-Template/pull/73 -->
-<a id="readme-top"></a>
-<!--
-*** Thanks for checking out the Best-README-Template. If you have a suggestion
-*** that would make this better, please fork the repo and create a pull request
-*** or simply open an issue with the tag "enhancement".
-*** Don't forget to give the project a star!
-*** Thanks again! Now go create something AMAZING! :D
--->
-
-
-
-<!-- PROJECT SHIELDS -->
-<!--
-*** I'm using markdown "reference style" links for readability.
-*** Reference links are enclosed in brackets [ ] instead of parentheses ( ).
-*** See the bottom of this document for the declaration of the reference variables
-*** for contributors-url, forks-url, etc. This is an optional, concise syntax you may use.
-*** https://www.markdownguide.org/basic-syntax/#reference-style-links
--->
-![Contributors][contributors-shield]
-![Issues][issues-shield]
-
-
-<!-- PROJECT LOGO -->
-<br />
 <div align="center">
-  <a href="">
-    <img src="frontend/app/favicon.ico" alt="Marketly Logo" width="150" height="150">
-  </a>
-</div>
+  <img src="frontend/app/favicon.ico" alt="Marketly Logo" width="140" height="140" />
 
-<!-- PROJECT HEADER SECTION (Links need to be added later down the line) -->
+  <h1>Marketly</h1>
 
-<h3 align="center">
-  <a>Marketly</a>
-</h3>
+  <p><strong>Unified marketplace search across Kijiji, eBay, and Facebook Marketplace.</strong></p>
 
+  <p>
+    <a href="https://github.com/jhadenn/Marketly">Repo</a> |
+    <a href="https://github.com/jhadenn/Marketly/issues">Report Bug</a> |
+    <a href="https://github.com/jhadenn/Marketly/issues">Request Feature</a>
+  </p>
 
-  <p align="center">
-    Modular marketplace tracking platform that aggregates and normalizes listings from multiple online marketplaces into a single, unified system.
-    <br />
-    <a href=""><strong>Explore the docs (Coming Soon)»</strong></a>
-    <br />
-    <br />
-    <a href="">View Demo</a>
-    &middot;
-    <a href="">Report Bug</a>
-    &middot;
-    <a href="">Request Feature</a>
+  <p>
+    <img alt="Next.js" src="https://img.shields.io/badge/Next.js-16-black?style=for-the-badge&logo=nextdotjs&logoColor=white" />
+    <img alt="React" src="https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=white" />
+    <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5-3178C6?style=for-the-badge&logo=typescript&logoColor=white" />
+    <img alt="TailwindCSS" src="https://img.shields.io/badge/TailwindCSS-4-06B6D4?style=for-the-badge&logo=tailwindcss&logoColor=white" />
+    <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.110-009688?style=for-the-badge&logo=fastapi&logoColor=white" />
+    <img alt="License" src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" />
   </p>
 </div>
 
+---
 
-<!-- TABLE OF CONTENTS -->
-<details>
-  <summary>Table of Contents</summary>
-  <ol>
-    <li>
-      <a href="#about-the-project">About The Project</a>
-      <ul>
-        <li><a href="#built-with">Built With</a></li>
-      </ul>
-    </li>
-    <li>
-      <a href="#getting-started">Getting Started</a>
-      <ul>
-        <li><a href="#prerequisites">Prerequisites</a></li>
-        <li><a href="#installation">Installation</a></li>
-      </ul>
-    </li>
-    <li><a href="#roadmap">Roadmap</a></li>
-  </ol>
-</details>
+## Overview
 
+Marketly aggregates and normalizes listings from multiple online marketplaces into a single, unified interface. Instead of manually browsing Kijiji, eBay, and Facebook Marketplace separately, you can search across supported platforms simultaneously and compare results in one feed.
 
-
-<!-- ABOUT THE PROJECT -->
-## About The Project
-<div align="center">
-<img src="imgs/marketly_mvp_ss.png" alt="Screenshot of project" width="600" >
+Why Marketly:
+- Multi-source search, one workflow
+- Image-first unified grid for fast scanning
+- Per-user saved searches with re-run plus batch run
+- Filters, sorting, and infinite scroll loading
+<div align="center" style="margin: 32px 0;">
+  <img src="imgs/Marketly-landing.png" alt="Marketly screenshot" width="900" />
+  <p><em>Landing page</em></p>
+</div>
+<div align="center" style="margin: 32px 0;">
+  <img src="imgs/Marketly-v1.png" alt="Marketly screenshot" width="900" />
+  <p><em>Unified results grid with filters and saved searches</em></p>
 </div>
 
-Marketly is a unified marketplace search platform that aggregates listings from multiple sources into a single, streamlined interface. Instead of manually browsing Kijiji, eBay, and other marketplaces separately, users can search across supported platforms simultaneously and compare results in real time. The application features secure user authentication, per-user saved searches, and live result fetching to ensure listings are always up to date. Marketly’s backend integrates directly with official APIs and custom scrapers, normalizing data into a consistent format for a seamless browsing experience. The system is designed with modular marketplace connectors, making it easy to expand and support additional platforms. Marketly aims to simplify online buying by centralizing fragmented marketplace ecosystems into one powerful search tool.
+---
 
-### Key Features:
-* Multi-Source Search
-* Real-Time Results
-* Secure Authentication
-* Per-User Saved Searches
-* Normalized Listings
-* Modular Connector Architecture
+## Features
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+| Feature | Description |
+|---|---|
+| Multi-source search | Query Kijiji, eBay, and Facebook Marketplace in one request. |
+| Normalized results | Consistent listing cards (title, price, images, location) across sources. |
+| Saved searches | Save queries per user and re-run instantly (single or batch). |
+| Client-side filters | Location filtering, distance helpers, and sort controls in the search UI. |
+| Supabase authentication | Sign-in via Supabase Auth; backend verifies Supabase JWT for API access. |
 
-### Built With
-**Frontend** 
-* ![Next.js][Next.js]
-* ![React][React]
-* ![Typescript][Typescript]
-* ![TailwindCSS][TailwindCSS]
+---
 
+## Tech Stack
 
-**Backend** 
-* ![Python][Python]
-* ![FastAPI][FastAPI]
-* ![SQLAlchemy][SQLAlchemy]
+<div align="center">
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+### Frontend
+<img alt="Next.js" src="https://img.shields.io/badge/Next.js-16-black?style=for-the-badge&logo=nextdotjs&logoColor=white" />
+<img alt="React" src="https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=white" />
+<img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5-3178C6?style=for-the-badge&logo=typescript&logoColor=white" />
+<img alt="TailwindCSS" src="https://img.shields.io/badge/TailwindCSS-4-06B6D4?style=for-the-badge&logo=tailwindcss&logoColor=white" />
 
+### Backend
+<img alt="Python" src="https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" />
+<img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.110-009688?style=for-the-badge&logo=fastapi&logoColor=white" />
+<img alt="SQLAlchemy" src="https://img.shields.io/badge/SQLAlchemy-2.0-D71F00?style=for-the-badge&logo=sqlalchemy&logoColor=white" />
+
+### Data / Auth
+<img alt="Postgres" src="https://img.shields.io/badge/Postgres-16-4169E1?style=for-the-badge&logo=postgresql&logoColor=white" />
+<img alt="Supabase" src="https://img.shields.io/badge/Supabase-Auth-3ECF8E?style=for-the-badge&logo=supabase&logoColor=white" />
+
+</div>
+
+---
 
 ## Getting Started
 
-To get a local copy up and running follow these steps.
-
 ### Prerequisites
 
-* Node.js 18+ (or current LTS)
-* Python 3.10+
-* Docker Desktop
-* Environment Variables (please contact)
+- Node.js 18+ (or current LTS)
+- Python 3.10+
+- (Optional) Docker Desktop (for local Postgres)
 
-### Installation
+### 1) Clone
 
-1. Clone the repo
-```powershell
-git clone https://github.com/jhadenn/Marketly
+```bash
+git clone https://github.com/jhadenn/Marketly.git
+cd Marketly
 ```
-2. Backend (local)
-```powershell
+
+### 2) Backend (FastAPI)
+
+Create `backend/.env` (see Environment Variables below), then:
+
+```bash
 cd backend
 python -m venv .venv
+```
+
+Windows:
+
+```powershell
 .venv\Scripts\activate
 pip install -e ".[dev]"
-uvicorn app.main:app --reload
+python -m playwright install chromium
+uvicorn app.main:app --reload --port 8000
 ```
-3. Frontend (local)
-```powershell
-cd frontend
+
+### 3) Frontend (Next.js)
+
+Create `frontend/.env.local` (see Environment Variables below), then:
+
+```bash
+cd ../frontend
 npm install
 npm run dev
 ```
-4. Database (Docker)
-```powershell
-cd backend
-docker compose up -d
+
+Open `http://localhost:3000`.
+
+---
+
+## Environment Variables
+
+### Backend (`backend/.env`)
+
+Required:
+
+```bash
+DATABASE_URL=postgresql+psycopg2://USER:PASSWORD@HOST:5432/DBNAME
 ```
 
+Auth verification (pick one approach):
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+```bash
+# Option A (HS JWT): provide the Supabase JWT secret
+SUPABASE_JWT_SECRET=YOUR_SUPABASE_JWT_SECRET
 
+# Option B (JWKS): provide project URL (and optionally anon key) for key discovery
+SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+SUPABASE_ANON_KEY=YOUR_SUPABASE_ANON_KEY
+```
 
-<!-- ROADMAP -->
+Optional:
+
+```bash
+MARKETLY_ENABLE_FACEBOOK=false
+MARKETLY_FACEBOOK_AUTH_MODE=guest
+MARKETLY_FACEBOOK_COOKIE_PATH=secrets/fb_cookies.json
+```
+
+### Frontend (`frontend/.env.local`)
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=YOUR_SUPABASE_ANON_KEY
+NEXT_PUBLIC_API_BASE=http://127.0.0.1:8000
+```
+
+---
+
+## Local Database (Optional)
+
+This repo includes a Postgres service in `backend/docker-compose.yml`, but it is currently commented out. If you want a local database:
+
+1) Uncomment the `db` service in `backend/docker-compose.yml`.
+
+2) Start Postgres:
+
+```bash
+cd backend
+docker compose up -d db
+```
+
+3) Set:
+
+```bash
+DATABASE_URL=postgresql+psycopg2://marketly:marketly@localhost:5432/marketly
+```
+
+---
+
+## Project Structure
+
+```text
+Marketly/
+  backend/                   # FastAPI + connectors + DB models
+    app/
+      connectors/
+      core/
+      models/
+      schemas/
+      services/
+    alembic/
+    docker-compose.yml
+    pyproject.toml
+  frontend/                  # Next.js App Router UI
+    app/
+    components/
+    lib/
+    styles/
+  imgs/                      # Screenshots
+  scripts/                   # Smoke scripts
+```
+
+---
+
 ## Roadmap
 
+- [x] Multi-source search (Kijiji, eBay, Facebook)
+- [x] Saved searches (per user)
+- [x] Filters, sorting, infinite scroll
+- [x] Edit saved searches
+- [ ] Deploy
+- [ ] Rate limiting and caching
+- [ ] Notifications
 
-- [X] Aggregate listings from Kijiji
-- [X] Add normalization for search results
-- [X] Develop API support for Kijiji
-- [X] Develop API support for eBay
-- [X] Connect database
-- [X] Create basic frontend
-- [X] Add auth
-- [X] Add filters and sorting
-- [X] Pagination / infinite scroll
-- [X] Better loading states
-- [X] Develop API support for Facebook Marketplace
-- [X] Edit saved searches
-- [] Notifications
-- [] Polish front end
-- [] Rate limiting, caching
-- [] Deploy
+See `https://github.com/jhadenn/Marketly/issues` for open items.
 
-See the [open issues](https://github.com/jhadenn/Marketly) for a full list of proposed features (and known issues).
+---
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+## License
 
-<!-- Shield Links -->
+MIT - see `LICENSE`.
 
-<!-- Github Related -->
-[contributors-shield]: https://img.shields.io/github/contributors/jhadenn/Marketly.svg?style=for-the-badge
-[issues-shield]: https://img.shields.io/github/issues/jhadenn/Marketly.svg?style=for-the-badge
+---
 
-<!-- Frontend -->
-[Next.js]: https://img.shields.io/badge/Next.js-000000?style=for-the-badge&logo=nextdotjs&logoColor=white
-[React]:https://img.shields.io/badge/-ReactJs-61DAFB?logo=react&logoColor=white&style=for-the-badge
-[TypeScript]: https://img.shields.io/badge/Typescript-3178C6?logo=typescript&logoColor=white&style=for-the-badge
-[TailwindCSS]:https://img.shields.io/badge/TailwindCSS-06B6D4?logo=tailwind-css&logoColor=white&style=for-the-badge
+## Contact
 
-<!-- Backend -->
-[Python]: https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white
-[FastAPI]: https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white
-[SQLAlchemy]: https://img.shields.io/badge/SQLAlchemy-D71F00?style=for-the-badge&logo=sqlalchemy&logoColor=white
+Built by Jhaden Goy.
