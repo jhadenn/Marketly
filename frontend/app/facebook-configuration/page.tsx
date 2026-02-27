@@ -485,7 +485,7 @@ export default function FacebookConfigurationPage() {
               )}
 
               <p className="text-[11px] leading-relaxed text-zinc-500">
-                Cookies act like session credentials. Marketly stores them encrypted in Stage 1. Consider
+                Cookies act like session credentials. Marketly stores them encrypted locally. Consider
                 using a dedicated Facebook account and rotate cookies if needed.
               </p>
             </div>
@@ -535,10 +535,6 @@ export default function FacebookConfigurationPage() {
               />
             </div>
 
-            <div className="mt-4 rounded-xl border border-amber-300/20 bg-amber-300/10 p-3 text-xs leading-relaxed text-amber-100">
-              If you upload screenshots later, I can swap these placeholders for real images and tighten the
-              instructions around your preferred export method (extension vs manual copy).
-            </div>
           </GlassPanel>
         </div>
       </div>

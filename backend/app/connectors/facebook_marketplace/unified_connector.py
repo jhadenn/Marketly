@@ -93,11 +93,6 @@ class FacebookUnifiedConnector(MarketplaceConnector):
 
     @staticmethod
     def _resolve_cookie_path(cookie_path: str) -> str:
-        """
-        Docker runs the backend with /app as the working directory (backend root).
-        People often set MARKETLY_FACEBOOK_COOKIE_PATH to "backend/secrets/..."
-        from the repo root. This normalizes to an existing path if possible.
-        """
         raw = (cookie_path or "").strip()
         if not raw:
             return raw

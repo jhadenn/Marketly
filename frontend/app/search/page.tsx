@@ -452,7 +452,7 @@ function SearchPageView(props: SearchPageViewProps) {
                 value={String(props.filteredResults.length)}
                 sub={props.hasActiveClientFilters ? `${props.filteredOutCount} filtered out` : "No client filters"}
               />
-              <StatTile label="Sources" value={String((props.summarySources.length > 0 ? props.summarySources : props.sources).length)} sub="Kijiji, eBay, Facebook" />
+              <StatTile label="Sources" value={String((props.summarySources.length > 0 ? props.summarySources : props.sources).length)} sub="Selected" />
             </div>
           </div>
         </GlassPanel>
