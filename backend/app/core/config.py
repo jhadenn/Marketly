@@ -3,6 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     DATABASE_URL: str
+    CORS_ORIGINS: str | None = None
     SUPABASE_JWT_SECRET: str | None = None
     SUPABASE_URL: str | None = None
     SUPABASE_ANON_KEY: str | None = None

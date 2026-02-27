@@ -45,12 +45,20 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Marketly API", version="0.1.0")
 print("LOADED MAIN.PY", __file__)
 
+default_cors_origins = {
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+}
+configured_cors_origins = (settings.CORS_ORIGINS or "").strip()
+if configured_cors_origins:
+    for raw_origin in configured_cors_origins.split(","):
+        normalized_origin = raw_origin.strip()
+        if normalized_origin:
+            default_cors_origins.add(normalized_origin)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000", # change for vercel
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=sorted(default_cors_origins),
     allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],

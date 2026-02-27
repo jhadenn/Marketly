@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { Suspense, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowRight,
@@ -99,7 +99,7 @@ function GoogleMark() {
   );
 }
 
-export default function LoginPage() {
+function LoginPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { user, loading: authLoading, signOut: authSignOut } = useAuth();
@@ -468,5 +468,21 @@ export default function LoginPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="dark flex min-h-screen items-center justify-center bg-black font-sans antialiased text-white">
+          <div className="rounded-xl border border-white/10 bg-white/[0.02] px-4 py-3 text-sm text-zinc-300">
+            Loading login...
+          </div>
+        </main>
+      }
+    >
+      <LoginPageContent />
+    </Suspense>
   );
 }

@@ -123,14 +123,8 @@ function AnimatedGroup({
     const containerVariants = variants?.container || selectedVariants.container;
     const itemVariants = variants?.item || selectedVariants.item;
 
-    const MotionComponent = React.useMemo(
-        () => motion.create(as as keyof JSX.IntrinsicElements),
-        [as]
-    );
-    const MotionChild = React.useMemo(
-        () => motion.create(asChild as keyof JSX.IntrinsicElements),
-        [asChild]
-    );
+    const MotionComponent = motion.create(as as string | React.ComponentType<any>) as React.ComponentType<any>;
+    const MotionChild = motion.create(asChild as string | React.ComponentType<any>) as React.ComponentType<any>;
 
     const animationProps = triggerOnView
         ? {
