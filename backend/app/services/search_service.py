@@ -10,8 +10,8 @@ from app.core.config import settings
 from app.models.listing import Listing, SearchSort, SourceError
 from app.services.scoring import score_listing
 
-_cache = TTLCache()
-_pagination_cache = TTLCache()
+_cache = TTLCache(max_items=int(settings.MARKETLY_SEARCH_FETCH_CACHE_MAX_ITEMS))
+_pagination_cache = TTLCache(max_items=int(settings.MARKETLY_SEARCH_PAGINATION_CACHE_MAX_ITEMS))
 logger = logging.getLogger(__name__)
 
 
@@ -105,6 +105,56 @@ def _dedupe_listings(items: list[Listing]) -> list[Listing]:
     return deduped
 
 
+def _source_timeout_seconds(src: str, *, is_multi_source: bool) -> float | None:
+    if src == "facebook":
+        if is_multi_source:
+            timeout_seconds = float(settings.MARKETLY_FACEBOOK_SOURCE_TIMEOUT_SECONDS)
+        else:
+            timeout_seconds = float(
+                settings.MARKETLY_FACEBOOK_SOURCE_TIMEOUT_SECONDS_SINGLE_SOURCE
+            )
+    else:
+        timeout_seconds = float(settings.MARKETLY_SOURCE_TIMEOUT_SECONDS)
+    if timeout_seconds <= 0:
+        return None
+    return timeout_seconds
+
+
+async def _run_with_timeout(awaitable, timeout_seconds: float | None):
+    if timeout_seconds is None:
+        return await awaitable
+    return await asyncio.wait_for(awaitable, timeout=timeout_seconds)
+
+
+def _interleave_by_source(items: list[Listing], sources: list[str]) -> list[Listing]:
+    if not items:
+        return items
+
+    buckets: dict[str, list[Listing]] = {}
+    for item in items:
+        buckets.setdefault(item.source, []).append(item)
+
+    source_order = [src for src in sources if src in buckets]
+    source_order.extend(sorted(src for src in buckets if src not in source_order))
+    positions = {src: 0 for src in source_order}
+
+    merged: list[Listing] = []
+    while len(merged) < len(items):
+        appended = False
+        for src in source_order:
+            idx = positions[src]
+            bucket = buckets[src]
+            if idx >= len(bucket):
+                continue
+            merged.append(bucket[idx])
+            positions[src] = idx + 1
+            appended = True
+        if not appended:
+            break
+
+    return merged
+
+
 def _sort_results(items: list[Listing], sort: SearchSort) -> list[Listing]:
     if sort == "price_asc":
         return sorted(
@@ -159,6 +209,7 @@ async def _fetch_source(
     query: str,
     fetch_limit: int,
     facebook_runtime_context: FacebookRuntimeContext | None = None,
+    is_multi_source: bool = False,
 ) -> tuple[str, list[Listing], SourceError | None]:
     if src == "facebook" and not settings.MARKETLY_ENABLE_FACEBOOK:
         return (
@@ -205,19 +256,48 @@ async def _fetch_source(
         )
 
     try:
+        timeout_seconds = _source_timeout_seconds(src, is_multi_source=is_multi_source)
         if src == "facebook":
-            listings = await connector.search(
-                query=query,
-                limit=fetch_limit,
-                auth_mode="cookie",
-                cookie_payload=facebook_runtime_context.cookie_payload if facebook_runtime_context else None,
-                latitude=facebook_runtime_context.latitude if facebook_runtime_context else None,
-                longitude=facebook_runtime_context.longitude if facebook_runtime_context else None,
-                radius_km=facebook_runtime_context.radius_km if facebook_runtime_context else None,
+            facebook_fetch_limit = max(1, int(fetch_limit))
+            if is_multi_source:
+                # Keep multi-source Facebook fetches bounded for low-memory hosts,
+                # but allow deeper pagination than the first-page soft cap.
+                hard_multi_source_cap = max(
+                    int(settings.MARKETLY_FACEBOOK_MAX_FETCH_LIMIT),
+                    int(settings.MARKETLY_FACEBOOK_MAX_SCRAPE_LIMIT),
+                )
+                facebook_fetch_limit = min(
+                    facebook_fetch_limit,
+                    max(1, hard_multi_source_cap),
+                )
+            listings = await _run_with_timeout(
+                connector.search(
+                    query=query,
+                    limit=facebook_fetch_limit,
+                    auth_mode="cookie",
+                    cookie_payload=facebook_runtime_context.cookie_payload if facebook_runtime_context else None,
+                    latitude=facebook_runtime_context.latitude if facebook_runtime_context else None,
+                    longitude=facebook_runtime_context.longitude if facebook_runtime_context else None,
+                    radius_km=facebook_runtime_context.radius_km if facebook_runtime_context else None,
+                    multi_source=is_multi_source,
+                ),
+                timeout_seconds,
             )
         else:
-            listings = await connector.search(query=query, limit=fetch_limit)
+            listings = await _run_with_timeout(
+                connector.search(query=query, limit=fetch_limit), timeout_seconds
+            )
         return src, listings, None
+    except asyncio.TimeoutError:
+        return (
+            src,
+            [],
+            SourceError(
+                code="TIMEOUT",
+                message=f"{src} source timed out.",
+                retryable=True,
+            ),
+        )
     except FacebookConnectorError as exc:
         logger.warning(
             "facebook search failed code=%s message=%s details=%s",
@@ -260,6 +340,7 @@ async def _fetch_and_score(
             query=query,
             fetch_limit=fetch_limit,
             facebook_runtime_context=facebook_runtime_context,
+            is_multi_source=len(sources) > 1,
         )
         for src in sources
     ]
@@ -306,6 +387,49 @@ async def unified_search(
     multi_source = len(sources) > 1
 
     if multi_source:
+        max_expansions = max(0, int(settings.MARKETLY_MULTI_SOURCE_MAX_EXPANSIONS))
+        if "facebook" in sources and settings.MARKETLY_DISABLE_FACEBOOK_MULTI_SOURCE_EXPANSION:
+            max_expansions = 0
+
+        # When multi-source expansion is disabled (low-memory mode), don't rely on cached
+        # first-page state. Recompute with an offset-sized fetch window so infinite scroll
+        # still advances.
+        if max_expansions == 0:
+            fetch_limit = max(limit + safe_offset, limit)
+            if facebook_runtime_context is None:
+                scored, source_errors, source_counts = await _fetch_and_score(
+                    query=query,
+                    sources=sources,
+                    fetch_limit=fetch_limit,
+                )
+            else:
+                scored, source_errors, source_counts = await _fetch_and_score(
+                    query=query,
+                    sources=sources,
+                    fetch_limit=fetch_limit,
+                    facebook_runtime_context=facebook_runtime_context,
+                )
+            ordered = _sort_results(scored, sort=sort)
+            if sort == "relevance" and settings.MARKETLY_BALANCE_MULTI_SOURCE_RESULTS:
+                ordered = _interleave_by_source(ordered, sources)
+            page = ordered[safe_offset : safe_offset + limit]
+            page_end = safe_offset + len(page)
+            can_expand = _multi_source_can_expand(
+                sources=sources,
+                source_counts=source_counts,
+                fetch_limit=fetch_limit,
+            )
+
+            total = None if can_expand else len(ordered)
+            if page_end < len(ordered):
+                next_offset = page_end
+            elif page_end > safe_offset and can_expand:
+                next_offset = page_end
+            else:
+                next_offset = None
+
+            return page, total, next_offset, source_errors
+
         pagination_key = _pagination_key(query, sources, sort, limit, facebook_runtime_context)
         pagination_state = None if safe_offset == 0 else _pagination_cache.get(pagination_key)
 
@@ -325,6 +449,8 @@ async def unified_search(
                     facebook_runtime_context=facebook_runtime_context,
                 )
             ordered = _sort_results(scored, sort=sort)
+            if sort == "relevance" and settings.MARKETLY_BALANCE_MULTI_SOURCE_RESULTS:
+                ordered = _interleave_by_source(ordered, sources)
             pagination_state = {
                 "fetch_limit": fetch_limit,
                 "ordered": ordered,
@@ -347,7 +473,6 @@ async def unified_search(
                 "can_expand": can_expand,
             }
 
-        max_expansions = 4
         expansions = 0
         while (
             safe_offset + limit > len(pagination_state["ordered"])
@@ -369,6 +494,8 @@ async def unified_search(
                     facebook_runtime_context=facebook_runtime_context,
                 )
             expanded_ordered = _sort_results(scored, sort=sort)
+            if sort == "relevance" and settings.MARKETLY_BALANCE_MULTI_SOURCE_RESULTS:
+                expanded_ordered = _interleave_by_source(expanded_ordered, sources)
 
             seen = {_listing_key(item) for item in pagination_state["ordered"]}
             appended = 0
@@ -436,6 +563,12 @@ async def unified_search(
     total = len(ordered)
     page = ordered[safe_offset : safe_offset + limit]
     next_offset = safe_offset + limit if safe_offset + limit < total else None
+
+    # For single-source connectors, we often don't know global total upfront.
+    # If the current fetch window is fully filled, keep pagination alive.
+    if len(page) == limit and total == fetch_limit:
+        total = None
+        next_offset = safe_offset + limit
 
     # Facebook scraping does not expose a stable total count in advance.
     # For facebook-only queries, keep pagination alive while each page is full.

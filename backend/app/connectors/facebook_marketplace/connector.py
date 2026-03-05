@@ -18,6 +18,7 @@ from app.connectors.facebook_marketplace.models import (
     FacebookSearchRequest,
 )
 from app.connectors.facebook_marketplace.normalizer import normalize_marketplace_card
+from app.core.config import settings
 
 try:
     from playwright.async_api import (
@@ -88,7 +89,7 @@ EXTRACTION_SCRIPT = """
       title: (anchor.innerText || anchor.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim(),
       text,
       lines,
-      image_urls: images.slice(0, 8),
+      image_urls: images.slice(0, 4),
     });
   }
 
@@ -185,13 +186,41 @@ class FacebookMarketplaceConnector:
     def __init__(
         self,
         *,
-        retries: int = 2,
-        timeout_seconds: float = 35.0,
-        idle_scroll_limit: int = 3,
+        retries: int | None = None,
+        timeout_seconds: float | None = None,
+        idle_scroll_limit: int | None = None,
+        max_scrolls: int | None = None,
+        max_concurrency: int | None = None,
     ) -> None:
-        self.retries = max(1, retries)
-        self.timeout_ms = int(max(5, timeout_seconds) * 1000)
-        self.idle_scroll_limit = max(1, idle_scroll_limit)
+        configured_retries = (
+            int(settings.MARKETLY_FACEBOOK_RETRIES) if retries is None else int(retries)
+        )
+        configured_timeout = (
+            float(settings.MARKETLY_FACEBOOK_TIMEOUT_SECONDS)
+            if timeout_seconds is None
+            else float(timeout_seconds)
+        )
+        configured_idle_scroll_limit = (
+            int(settings.MARKETLY_FACEBOOK_IDLE_SCROLL_LIMIT)
+            if idle_scroll_limit is None
+            else int(idle_scroll_limit)
+        )
+        configured_max_scrolls = (
+            int(settings.MARKETLY_FACEBOOK_MAX_SCROLLS)
+            if max_scrolls is None
+            else int(max_scrolls)
+        )
+        configured_max_concurrency = (
+            int(settings.MARKETLY_FACEBOOK_MAX_CONCURRENCY)
+            if max_concurrency is None
+            else int(max_concurrency)
+        )
+
+        self.retries = max(1, configured_retries)
+        self.timeout_ms = int(max(5, configured_timeout) * 1000)
+        self.idle_scroll_limit = max(1, configured_idle_scroll_limit)
+        self.max_scrolls = max(4, configured_max_scrolls)
+        self._semaphore = asyncio.Semaphore(max(1, configured_max_concurrency))
 
     async def search(self, request: FacebookSearchRequest) -> list[FacebookNormalizedListing]:
         if async_playwright is None:
@@ -204,7 +233,8 @@ class FacebookMarketplaceConnector:
         last_error: Exception | None = None
         for attempt in range(1, self.retries + 1):
             try:
-                return await self._search_once(request)
+                async with self._semaphore:
+                    return await self._search_once(request)
             except FacebookConnectorError as exc:
                 last_error = exc
                 if not exc.retryable or attempt >= self.retries:
@@ -312,7 +342,23 @@ class FacebookMarketplaceConnector:
                 await page.goto(search_url, wait_until="domcontentloaded")
                 await self._jitter_sleep()
 
-                raw_cards = await self._scroll_and_extract(page=page, target_limit=request.limit)
+                if request.multi_source:
+                    max_scrolls = self.max_scrolls
+                    idle_scroll_limit = self.idle_scroll_limit
+                else:
+                    max_scrolls = max(
+                        self.max_scrolls, int(settings.MARKETLY_FACEBOOK_MAX_SCROLLS_SINGLE_SOURCE)
+                    )
+                    idle_scroll_limit = max(
+                        self.idle_scroll_limit,
+                        int(settings.MARKETLY_FACEBOOK_IDLE_SCROLL_LIMIT_SINGLE_SOURCE),
+                    )
+                raw_cards = await self._scroll_and_extract(
+                    page=page,
+                    target_limit=request.limit,
+                    max_scrolls=max_scrolls,
+                    idle_scroll_limit=idle_scroll_limit,
+                )
                 normalized = self._normalize_cards(
                     raw_cards,
                     limit=request.limit,
@@ -395,8 +441,17 @@ class FacebookMarketplaceConnector:
             names=sorted(set(cookie_names)),
         )
 
-    async def _scroll_and_extract(self, *, page, target_limit: int) -> list[dict[str, Any]]:
-        max_scrolls = max(8, min(40, target_limit * 2))
+    async def _scroll_and_extract(
+        self,
+        *,
+        page,
+        target_limit: int,
+        max_scrolls: int | None = None,
+        idle_scroll_limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        scroll_budget = self.max_scrolls if max_scrolls is None else max_scrolls
+        max_scrolls = max(4, min(scroll_budget, target_limit + 4))
+        idle_limit = self.idle_scroll_limit if idle_scroll_limit is None else idle_scroll_limit
         idle_scrolls = 0
         seen_urls: set[str] = set()
         merged: list[dict[str, Any]] = []
@@ -428,7 +483,7 @@ class FacebookMarketplaceConnector:
                 idle_scrolls += 1
             else:
                 idle_scrolls = 0
-            if idle_scrolls >= self.idle_scroll_limit:
+            if idle_scrolls >= idle_limit:
                 break
 
             await page.mouse.wheel(0, random.randint(1000, 1700))

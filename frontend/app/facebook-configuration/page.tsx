@@ -5,7 +5,6 @@ import Link from "next/link";
 import {
   ArrowLeft,
   ChevronDown,
-  ImageIcon,
   Loader2,
   LogOut,
   Sparkles,
@@ -49,15 +48,15 @@ function GlassPanel({
   );
 }
 
-function PlaceholderShot({ title, caption }: { title: string; caption: string }) {
+function InstructionScreenshot({ src, caption }: { src: string; caption: string }) {
   return (
     <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-3">
       <div className="flex aspect-[16/10] items-center justify-center rounded-xl border border-dashed border-white/15 bg-black/30">
-        <div className="text-center">
-          <ImageIcon className="mx-auto size-6 text-zinc-500" />
-          <p className="mt-2 text-xs font-medium text-zinc-300">{title}</p>
-          <p className="mt-1 text-[11px] text-zinc-500">Placeholder image (replace with screenshot)</p>
-        </div>
+            <img
+          src={src}
+          className="h-full w-full object-cover"
+        />
+
       </div>
       <p className="mt-2 text-xs leading-relaxed text-zinc-400">{caption}</p>
     </div>
@@ -521,17 +520,17 @@ export default function FacebookConfigurationPage() {
             </ol>
 
             <div className="mt-4 grid gap-3">
-              <PlaceholderShot
-                title="Marketplace + DevTools"
-                caption="Placeholder: screenshot showing Facebook Marketplace with DevTools open."
+              <InstructionScreenshot
+                src="/Marketplace-DevTools.png"
+                caption="Screenshot showing Facebook Marketplace with DevTools open."
               />
-              <PlaceholderShot
-                title="Application > Cookies"
-                caption="Placeholder: screenshot of the Application tab with `https://www.facebook.com` selected under Cookies."
+              <InstructionScreenshot
+                src="/Application-Cookies.png"
+                caption="Screenshot of the Application tab with `https://www.facebook.com` selected under Cookies."
               />
-              <PlaceholderShot
-                title="JSON Export Example"
-                caption="Placeholder: screenshot of the cookie export JSON file before upload. Replace sensitive values if showing an example."
+              <InstructionScreenshot
+                src="/ExportCookies.png"
+                caption="Screenshot of the cookie export JSON file before upload. Replace sensitive values if showing an example."
               />
             </div>
 

@@ -120,6 +120,48 @@ function formatPrice(price?: Money | null) {
   return `${price.currency} ${price.amount}`;
 }
 
+function sortListingsLocal(listings: Listing[], sort: SortOption): Listing[] {
+  if (sort === "relevance") {
+    return [...listings];
+  }
+
+  const indexed = listings.map((item, index) => ({ item, index }));
+
+  if (sort === "price_asc") {
+    indexed.sort((a, b) => {
+      const aMissing = a.item.price == null;
+      const bMissing = b.item.price == null;
+      if (aMissing !== bMissing) return aMissing ? 1 : -1;
+      const aAmount = a.item.price?.amount ?? Number.POSITIVE_INFINITY;
+      const bAmount = b.item.price?.amount ?? Number.POSITIVE_INFINITY;
+      if (aAmount !== bAmount) return aAmount - bAmount;
+      return a.index - b.index;
+    });
+    return indexed.map((entry) => entry.item);
+  }
+
+  if (sort === "price_desc") {
+    indexed.sort((a, b) => {
+      const aMissing = a.item.price == null;
+      const bMissing = b.item.price == null;
+      if (aMissing !== bMissing) return aMissing ? 1 : -1;
+      const aAmount = a.item.price?.amount ?? Number.NEGATIVE_INFINITY;
+      const bAmount = b.item.price?.amount ?? Number.NEGATIVE_INFINITY;
+      if (aAmount !== bAmount) return bAmount - aAmount;
+      return a.index - b.index;
+    });
+    return indexed.map((entry) => entry.item);
+  }
+
+  return [...listings];
+}
+
+function sortDebounceMs(resultCount: number): number {
+  if (resultCount >= 1000) return 220;
+  if (resultCount >= 200) return 120;
+  return 0;
+}
+
 function formatSourceLabel(source: string) {
   if (!source) return "";
   return source
@@ -153,6 +195,7 @@ type SearchPageViewProps = {
   setQ: React.Dispatch<React.SetStateAction<string>>;
   sources: SourceOption[];
   sortBy: SortOption;
+  sortApplying: boolean;
   onChangeSort: (nextSort: SortOption) => Promise<void>;
   toggleSource: (source: SourceOption) => void;
   searchLoading: boolean;
@@ -249,6 +292,7 @@ type SearchControlsRailProps = Pick<
   | "sources"
   | "toggleSource"
   | "sortBy"
+  | "sortApplying"
   | "onChangeSort"
   | "locationFilterText"
   | "setLocationFilterText"
@@ -584,6 +628,12 @@ function SearchControlsRail(props: SearchControlsRailProps) {
                 </option>
               ))}
             </select>
+            {props.sortApplying ? (
+              <p className="inline-flex items-center gap-1 text-xs text-zinc-500">
+                <Loader2 className="size-3 animate-spin" />
+                Sorting...
+              </p>
+            ) : null}
           </div>
 
           <div className="space-y-2">
@@ -1297,7 +1347,9 @@ export default function HomePage() {
   const [searchLoading, setSearchLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rawResults, setRawResults] = useState<Listing[]>([]);
   const [results, setResults] = useState<Listing[]>([]);
+  const [sortApplying, setSortApplying] = useState(false);
   const [nextOffset, setNextOffset] = useState<number | null>(null);
   const [total, setTotal] = useState<number | null>(null);
   const [sourceErrors, setSourceErrors] = useState<Record<string, SourceErrorEntry>>({});
@@ -1357,6 +1409,23 @@ export default function HomePage() {
   const distanceFilterActive = deviceCoords !== null && travelRangeMiles !== null;
   const distanceFilterPendingLocation = deviceCoords === null && travelRangeMiles !== null;
 
+  useEffect(() => {
+    const delayMs = sortDebounceMs(rawResults.length);
+    if (delayMs <= 0) {
+      setResults(sortListingsLocal(rawResults, sortBy));
+      setSortApplying(false);
+      return;
+    }
+
+    setSortApplying(true);
+    const timeout = window.setTimeout(() => {
+      setResults(sortListingsLocal(rawResults, sortBy));
+      setSortApplying(false);
+    }, delayMs);
+
+    return () => window.clearTimeout(timeout);
+  }, [rawResults, sortBy]);
+
   const filteredResults = useMemo(() => {
     return results.filter((item) => {
       if (normalizedLocationFilterText) {
@@ -1397,7 +1466,6 @@ export default function HomePage() {
     (
       query: string,
       selectedSources: SourceOption[],
-      selectedSort: SortOption,
       selectedLimit: number,
       offset: number,
     ) => {
@@ -1406,7 +1474,7 @@ export default function HomePage() {
       for (const source of selectedSources) {
         params.append("sources", source);
       }
-      params.set("sort", selectedSort);
+      params.set("sort", "relevance");
       params.set("limit", String(selectedLimit));
       params.set("offset", String(offset));
       if (deviceCoords) {
@@ -1445,6 +1513,7 @@ export default function HomePage() {
       } else {
         setSearchLoading(true);
         setError(null);
+        setRawResults([]);
         setResults([]);
         setNextOffset(null);
         setTotal(null);
@@ -1454,7 +1523,7 @@ export default function HomePage() {
       }
 
       try {
-        const url = buildSearchUrl(query, sourceList, selectedSort, selectedLimit, offset);
+        const url = buildSearchUrl(query, sourceList, selectedLimit, offset);
         const res = await fetch(url, {
           cache: "no-store",
           headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
@@ -1489,10 +1558,10 @@ export default function HomePage() {
         }
 
         if (append) {
-          setResults((prev) => [...prev, ...dedupedIncoming]);
+          setRawResults((prev) => [...prev, ...dedupedIncoming]);
           setSourceErrors((prev) => ({ ...prev, ...incomingSourceErrors }));
         } else {
-          setResults(dedupedIncoming);
+          setRawResults(dedupedIncoming);
           setSourceErrors(incomingSourceErrors);
           setActiveQuery(query);
           setActiveSources(sourceList);
@@ -1610,6 +1679,15 @@ export default function HomePage() {
       setFacebookConfigLoading(false);
     }
   }, [API_BASE, accessToken, parseApiError]);
+
+  useEffect(() => {
+    if (!accessToken) {
+      setFacebookConfigStatus(null);
+      setFacebookConfigError(null);
+      return;
+    }
+    void fetchFacebookConfigStatus();
+  }, [accessToken, fetchFacebookConfigStatus]);
 
   const uploadFacebookCookiePayload = useCallback(async (cookiePayload: unknown) => {
     if (!accessToken) {
@@ -1756,11 +1834,9 @@ export default function HomePage() {
   const fetchSavedSearchPage = useCallback(async (
     entry: SavedSearch | SavedBatchPaginationEntry,
     {
-      selectedSort,
       selectedLimit,
       offset,
     }: {
-      selectedSort: SortOption;
       selectedLimit: number;
       offset: number;
     },
@@ -1768,7 +1844,7 @@ export default function HomePage() {
     if (!accessToken) throw new Error("Please log in again.");
 
     const params = new URLSearchParams();
-    params.set("sort", selectedSort);
+    params.set("sort", "relevance");
     params.set("limit", String(selectedLimit));
     params.set("offset", String(offset));
     if (deviceCoords) {
@@ -1814,7 +1890,6 @@ export default function HomePage() {
       const requests = pendingEntries.map(async (entry) => ({
         entryId: entry.id,
         payload: await fetchSavedSearchPage(entry, {
-          selectedSort: savedBatchPagination.selectedSort,
           selectedLimit: savedBatchPagination.selectedLimit,
           offset: entry.nextOffset ?? 0,
         }),
@@ -1849,7 +1924,7 @@ export default function HomePage() {
       }
 
       if (dedupedIncoming.length > 0) {
-        setResults((prev) => [...prev, ...dedupedIncoming]);
+        setRawResults((prev) => [...prev, ...dedupedIncoming]);
       }
 
       if (Object.keys(mergedSourceErrors).length > 0) {
@@ -1962,6 +2037,7 @@ export default function HomePage() {
     setSearchLoading(true);
     setLoadingMore(false);
     setError(null);
+    setRawResults([]);
     setResults([]);
     setNextOffset(null);
     setTotal(null);
@@ -1975,7 +2051,6 @@ export default function HomePage() {
       const requests = savedSearches.map(async (entry) => ({
         entry,
         payload: await fetchSavedSearchPage(entry, {
-          selectedSort,
           selectedLimit,
           offset: 0,
         }),
@@ -2022,7 +2097,7 @@ export default function HomePage() {
       }
 
       seenKeysRef.current = seenKeys;
-      setResults(dedupedResults);
+      setRawResults(dedupedResults);
       setSourceErrors(mergedSourceErrors);
       const nextSavedBatchPagination: SavedBatchPaginationState = {
         selectedSort,
@@ -2173,24 +2248,15 @@ export default function HomePage() {
 
   async function onChangeSort(nextSort: SortOption) {
     setSortBy(nextSort);
-    if (!hasSearched) return;
-
-    if (resultMode === "saved_batch") {
-      await runAllSavedSearches(saved, {
-        selectedSort: nextSort,
-        selectedLimit: limit,
-      });
-      return;
-    }
-
-    await runSearch({
-      query: activeQuery,
-      sourceList: activeSources,
-      selectedSort: nextSort,
-      selectedLimit: activeLimit,
-      offset: 0,
-      append: false,
-    });
+    setActiveSort(nextSort);
+    setSavedBatchPagination((prev) =>
+      prev
+        ? {
+            ...prev,
+            selectedSort: nextSort,
+          }
+        : prev,
+    );
   }
 
   function toggleSource(source: SourceOption) {
@@ -2293,7 +2359,7 @@ export default function HomePage() {
 
   const hasSourceErrorEntries = Object.keys(sourceErrors).length > 0;
   const summarySources = hasSearched && activeSources.length > 0 ? activeSources : sources;
-  const totalResultsCount = total ?? results.length;
+  const totalResultsCount = total ?? rawResults.length;
 
   return (
     <SearchPageView
@@ -2304,6 +2370,7 @@ export default function HomePage() {
       setQ={setQ}
       sources={sources}
       sortBy={sortBy}
+      sortApplying={sortApplying}
       onChangeSort={onChangeSort}
       toggleSource={toggleSource}
       searchLoading={searchLoading}

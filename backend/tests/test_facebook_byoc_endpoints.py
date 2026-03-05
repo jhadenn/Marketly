@@ -104,3 +104,24 @@ def test_me_facebook_verify_returns_typed_error(monkeypatch):
     assert payload["ok"] is False
     assert payload["error_code"] == "login_wall"
     assert calls["failed"] == 1
+
+
+def test_me_facebook_put_rate_limited(monkeypatch):
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = _override_db
+    monkeypatch.setattr(
+        "app.main.check_rate_limit",
+        lambda **kwargs: SimpleNamespace(allowed=False, retry_after_seconds=30),
+    )
+
+    response = client.put(
+        "/me/connectors/facebook/cookies",
+        json={"cookies_json": [{"name": "c_user"}, {"name": "xs"}, {"name": "fr"}, {"name": "datr"}]},
+    )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 429
+    payload = response.json()
+    assert payload["code"] == "RATE_LIMITED"
+    assert payload["retry_after_seconds"] == 30

@@ -148,11 +148,20 @@ class FacebookUnifiedConnector(MarketplaceConnector):
         latitude: float | None = None,
         longitude: float | None = None,
         radius_km: int | None = None,
+        multi_source: bool = False,
     ) -> list[Listing]:
         requested_limit = max(1, int(limit))
-        # Facebook often injects sponsored/junk cards that are filtered out after normalization.
-        # Overfetch so the post-filter result can still fill the requested page size.
-        scrape_limit = min(100, requested_limit + max(12, requested_limit // 2))
+        overfetch_buffer = max(0, int(settings.MARKETLY_FACEBOOK_OVERFETCH_BUFFER))
+        if multi_source:
+            max_scrape_limit = max(1, int(settings.MARKETLY_FACEBOOK_MAX_SCRAPE_LIMIT))
+        else:
+            max_scrape_limit = max(
+                int(settings.MARKETLY_FACEBOOK_MAX_SCRAPE_LIMIT),
+                int(settings.MARKETLY_FACEBOOK_MAX_SCRAPE_LIMIT_SINGLE_SOURCE),
+            )
+        # Keep overfetch bounded to protect low-memory hosts.
+        scrape_limit = min(max_scrape_limit, requested_limit + overfetch_buffer)
+        scrape_limit = max(requested_limit, scrape_limit)
 
         effective_auth_mode = (auth_mode or settings.MARKETLY_FACEBOOK_AUTH_MODE or "guest").strip().lower()
         if cookie_payload is not None:
@@ -192,6 +201,7 @@ class FacebookUnifiedConnector(MarketplaceConnector):
             auth_mode=effective_auth_mode,
             cookie_path=cookie_path,
             cookie_payload=cookie_payload,
+            multi_source=multi_source,
             latitude=latitude,
             longitude=longitude,
             radius_km=radius_km,

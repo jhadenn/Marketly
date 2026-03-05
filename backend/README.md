@@ -2,11 +2,78 @@
 
 ## Facebook BYOC (Stage 1)
 
-- Facebook unified search now uses per-user BYOC (bring your own cookies) instead of a shared server cookie.
+- Facebook unified search uses per-user BYOC (bring your own cookies), not a shared server cookie.
 - Configure `MARKETLY_CREDENTIALS_ENCRYPTION_KEY` (Fernet key) before using BYOC endpoints.
 - Logged-in users manage cookies via:
   - `GET /me/connectors/facebook`
   - `PUT /me/connectors/facebook/cookies`
   - `POST /me/connectors/facebook/verify`
   - `DELETE /me/connectors/facebook`
-- `GET /search` accepts optional `latitude`, `longitude`, and `radius_km` query params for better Facebook region relevance.
+- `GET /search` accepts optional `latitude`, `longitude`, and `radius_km`.
+
+## Production cache + rate limiting
+
+- Optional response cache for `/search` using Redis first with bounded in-memory fallback.
+- Fixed-window rate limits using Redis first with bounded in-memory fallback for:
+  - `/search` (IP + authenticated user),
+  - saved-search mutation/run endpoints,
+  - Facebook BYOC mutation endpoints.
+- If both Redis and local fallback are unavailable and `MARKETLY_RATE_LIMIT_FAIL_OPEN=true`, requests are allowed.
+
+## Environment variables (production additions)
+
+```bash
+# Optional. If omitted, backend uses bounded in-memory fallback.
+REDIS_URL=redis://:<password>@<host>:6379/0
+
+MARKETLY_RESPONSE_CACHE_ENABLED=true
+MARKETLY_RESPONSE_CACHE_TTL_SECONDS=45
+MARKETLY_RESPONSE_CACHE_LOCAL_FALLBACK_ENABLED=true
+MARKETLY_RESPONSE_CACHE_LOCAL_MAX_ITEMS=24
+
+MARKETLY_RATE_LIMIT_ENABLED=true
+MARKETLY_RATE_LIMIT_FAIL_OPEN=true
+MARKETLY_RATE_LIMIT_LOCAL_FALLBACK_ENABLED=true
+MARKETLY_RATE_LIMIT_LOCAL_MAX_KEYS=5000
+
+MARKETLY_RATE_LIMIT_SEARCH_IP_PER_MIN=60
+MARKETLY_RATE_LIMIT_SEARCH_USER_PER_MIN=30
+MARKETLY_RATE_LIMIT_SAVED_MUTATION_PER_MIN=20
+MARKETLY_RATE_LIMIT_FB_COOKIE_PUT_PER_HOUR=6
+MARKETLY_RATE_LIMIT_FB_VERIFY_PER_HOUR=12
+MARKETLY_RATE_LIMIT_FB_DELETE_PER_HOUR=20
+
+MARKETLY_SEARCH_FETCH_CACHE_MAX_ITEMS=32
+MARKETLY_SEARCH_PAGINATION_CACHE_MAX_ITEMS=8
+```
+
+## Render deployment (512 MB)
+
+1. Create a Render Web Service from the `backend/` Dockerfile.
+2. Configure required secrets (`DATABASE_URL`, Supabase keys, eBay keys, `MARKETLY_CREDENTIALS_ENCRYPTION_KEY`).
+3. Use these baseline memory-safe settings:
+
+```bash
+ENV=prod
+CACHE_TTL_SECONDS=60
+
+MARKETLY_DISABLE_FACEBOOK_MULTI_SOURCE_EXPANSION=true
+MARKETLY_SEARCH_FETCH_CACHE_MAX_ITEMS=32
+MARKETLY_SEARCH_PAGINATION_CACHE_MAX_ITEMS=8
+
+MARKETLY_RESPONSE_CACHE_ENABLED=true
+MARKETLY_RESPONSE_CACHE_TTL_SECONDS=45
+MARKETLY_RESPONSE_CACHE_LOCAL_FALLBACK_ENABLED=true
+MARKETLY_RESPONSE_CACHE_LOCAL_MAX_ITEMS=24
+
+MARKETLY_RATE_LIMIT_ENABLED=true
+MARKETLY_RATE_LIMIT_FAIL_OPEN=true
+MARKETLY_RATE_LIMIT_LOCAL_FALLBACK_ENABLED=true
+MARKETLY_RATE_LIMIT_LOCAL_MAX_KEYS=5000
+```
+
+4. Optional: attach a Redis service and set `REDIS_URL` for shared cache/rate-limit state across instances.
+5. Set your frontend `NEXT_PUBLIC_API_BASE` to your Render backend URL and redeploy frontend.
+
+Local fallback cache/rate limits are per-instance memory state and reset on restart.
+If you scale to multiple instances, configure Redis for shared and consistent behavior.
