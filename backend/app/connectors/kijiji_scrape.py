@@ -29,11 +29,11 @@ class KijijiScrapeConnector(MarketplaceConnector):
             "Accept-Language": "en-CA,en;q=0.9",
         }
 
-    def _build_search_url(self, query: str) -> str:
-        # This URL pattern matches what you see in the browser for “iphone” searches
-        # e.g. https://www.kijiji.ca/b-canada/iphone/k0l0?dc=true&view=list
+    def _build_search_url(self, query: str, page: int = 1) -> str:
         q = quote_plus(query.strip())
-        return f"{BASE}/b-canada/{q}/k0l0?dc=true&view=list"
+        if page <= 1:
+            return f"{BASE}/b-canada/{q}/k0l0?dc=true&view=list"
+        return f"{BASE}/b-canada/{q}/page-{page}/k0l0?dc=true&view=list"
 
     def _abs_url(self, href: str) -> str:
         return urljoin(BASE, href)
@@ -56,14 +56,11 @@ class KijijiScrapeConnector(MarketplaceConnector):
             return None
 
     def _token_score(self, query: str, title: str) -> int:
-        # Generic relevance scoring (works for any item type, not just iphones)
         q_tokens = [t.lower() for t in query.split() if len(t) >= 2]
         t = (title or "").lower()
         return sum(1 for tok in q_tokens if tok in t)
 
     def _extract_location_from_listing_url(self, listing_url: str) -> str | None:
-        # Kijiji listing URL pattern usually includes city as the second path segment:
-        # /v-category/{city-slug}/{title-slug}/{id}
         path = listing_url.replace(BASE, "")
         parts = [part for part in path.split("/") if part]
         if len(parts) < 2:
@@ -74,60 +71,36 @@ class KijijiScrapeConnector(MarketplaceConnector):
         city = city_slug.replace("-", " ").title()
         return city or None
 
-    async def search(self, query: str, limit: int = 20) -> list[Listing]:
-        url = self._build_search_url(query)
-
-        async with httpx.AsyncClient(
-            timeout=20,
-            headers=self._headers,
-            follow_redirects=True,
-        ) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-
-        soup = BeautifulSoup(r.text, "lxml")
-        # DEBUG: show what links exist in the HTML we received
-        hrefs = [a.get("href") for a in soup.find_all("a", href=True)]
-        print("KIJIJI(BS4): total <a href> =", len(hrefs))
-        print("KIJIJI(BS4): first 40 hrefs =", hrefs[:40])
-
-        v_links = [h for h in hrefs if h and "/v-" in h]
-        print("KIJIJI(BS4): links containing /v- =", len(v_links))
-        print("KIJIJI(BS4): first 20 /v- links =", v_links[:20])
-
-        # 1) Grab candidate listing links
+    def _extract_candidates(
+        self,
+        *,
+        query: str,
+        soup: BeautifulSoup,
+        seen_urls: set[str],
+    ) -> list[tuple[int, str, str, str, list[str]]]:
         anchors = soup.find_all("a", href=True)
-        candidates: list[tuple[int, str, str, str]] = []
-        # tuple: (score, url, title, blob_text)
+        candidates: list[tuple[int, str, str, str, list[str]]] = []
 
-        seen = set()
-
-        for a in anchors:
-            href = a.get("href", "")
+        for anchor in anchors:
+            href = anchor.get("href", "")
             if not href:
                 continue
 
-            # Normalize absolute vs relative
             if href.startswith("http"):
-                # absolute url
                 if "kijiji.ca" not in href:
                     continue
-                path = href.replace(BASE, "")  # convert to /v-...
+                path = href.replace(BASE, "")
                 full_url = href
             else:
-                # relative url like /v-...
                 path = href
                 full_url = self._abs_url(href)
 
-            # Now apply regex to the PATH
             if not LISTING_HREF_RE.match(path):
                 continue
-            if full_url in seen:
+            if full_url in seen_urls:
                 continue
-            seen.add(full_url)
 
-            # 2) Find a reasonable “card container” around this link
-            container = a
+            container = anchor
             for _ in range(6):
                 if container.parent:
                     container = container.parent
@@ -135,57 +108,77 @@ class KijijiScrapeConnector(MarketplaceConnector):
                     break
 
             blob = container.get_text(" ", strip=True)
-            # title: prefer visible text near the link; fallback to blob
-            title = a.get_text(" ", strip=True) or ""
+            title = anchor.get_text(" ", strip=True) or ""
             if not title or len(title) < 4:
-                # sometimes the link text is empty; try h3/h2 in container
-                h = container.find(["h3", "h2"])
-                if h:
-                    title = h.get_text(" ", strip=True) or title
+                heading = container.find(["h3", "h2"])
+                if heading:
+                    title = heading.get_text(" ", strip=True) or title
 
             title = (title or "").strip()
             if not title:
                 continue
 
-            score = self._token_score(query, title)
-            candidates.append((score, full_url, title, blob))
+            image_urls: list[str] = []
+            img = container.find("img")
+            if img:
+                src = img.get("src") or img.get("data-src")
+                if src:
+                    image_urls = [src]
 
-        # 3) Sort by relevance score (descending), then take top N
-        candidates.sort(key=lambda x: x[0], reverse=True)
+            score = self._token_score(query, title)
+            candidates.append((score, full_url, title, blob, image_urls))
+            seen_urls.add(full_url)
+
+        return candidates
+
+    async def search(self, query: str, limit: int = 20) -> list[Listing]:
+        safe_limit = max(1, int(limit))
+        max_pages = max(1, min(10, (safe_limit // 24) + 2))
+        all_candidates: list[tuple[int, str, str, str, list[str]]] = []
+        seen_urls: set[str] = set()
+
+        async with httpx.AsyncClient(
+            timeout=20,
+            headers=self._headers,
+            follow_redirects=True,
+        ) as client:
+            for page in range(1, max_pages + 1):
+                url = self._build_search_url(query, page=page)
+                try:
+                    response = await client.get(url)
+                    response.raise_for_status()
+                except Exception:
+                    if page == 1:
+                        raise
+                    break
+
+                soup = BeautifulSoup(response.text, "lxml")
+                page_candidates = self._extract_candidates(
+                    query=query,
+                    soup=soup,
+                    seen_urls=seen_urls,
+                )
+                if not page_candidates:
+                    break
+                all_candidates.extend(page_candidates)
+
+                if len(all_candidates) >= safe_limit * 2:
+                    break
+
+        all_candidates.sort(key=lambda item: item[0], reverse=True)
 
         results: list[Listing] = []
-        for score, listing_url, title, blob in candidates:
-            if len(results) >= limit:
+        for score, listing_url, title, blob, image_urls in all_candidates:
+            if len(results) >= safe_limit:
                 break
-
-            # If the query has tokens, require at least ONE token hit.
-            # (This prevents random junk, but won’t kill results for broad searches.)
             if query.strip() and score == 0:
                 continue
 
             price_val = self._parse_price(blob)
-            image_urls: list[str] = []
-
-            # Try to grab an image near the listing card (best-effort)
-            # We need to refind the card by URL: quick hack via searching the soup again.
-            card_link = soup.find("a", href=re.compile(re.escape(listing_url.replace(BASE, ""))))
-            if card_link:
-                card = card_link
-                for _ in range(6):
-                    if card.parent:
-                        card = card.parent
-                    else:
-                        break
-                img = card.find("img")
-                if img:
-                    src = img.get("src") or img.get("data-src")
-                    if src:
-                        image_urls = [src]
-
             results.append(
                 Listing(
                     source="kijiji",
-                    source_listing_id=listing_url,  
+                    source_listing_id=listing_url,
                     title=title,
                     price=Money(amount=price_val or 0.0, currency="CAD"),
                     url=listing_url,
@@ -195,10 +188,5 @@ class KijijiScrapeConnector(MarketplaceConnector):
                     snippet=None,
                 )
             )
-
-        print("KIJIJI(BS4): url =", url)
-        print("KIJIJI(BS4): candidates =", len(candidates), "returned =", len(results))
-        if results:
-            print("KIJIJI(BS4): top titles =", [r.title for r in results[:10]])
 
         return results

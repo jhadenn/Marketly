@@ -17,12 +17,28 @@ PRICE_RE = re.compile(
     r"(?P<symbol>[$\u00a3\u20ac])\s*(?P<amount>\d[\d,]*(?:\.\d{1,2})?)",
     re.IGNORECASE,
 )
-EXTERNAL_ID_RE = re.compile(r"/marketplace/item/(?P<id>\d+)")
-AGE_LINE_RE = re.compile(
-    r"\b(?:listed\s+)?\d+\s+(?:minute|hour|day|week|month|year)s?\s+ago\b",
+PRICE_CODE_PREFIX_RE = re.compile(
+    r"\b(?P<code>CAD|USD|EUR|GBP)\s*(?P<amount>\d[\d,]*(?:\.\d{1,2})?)\b",
     re.IGNORECASE,
 )
-PRICE_TEXT_RE = re.compile(r"^\s*(?:free|[$\u00a3\u20ac])", re.IGNORECASE)
+PRICE_CODE_SUFFIX_RE = re.compile(
+    r"\b(?P<amount>\d[\d,]*(?:\.\d{1,2})?)\s*(?P<code>CAD|USD|EUR|GBP)\b",
+    re.IGNORECASE,
+)
+EXTERNAL_ID_RE = re.compile(r"/marketplace/item/(?P<id>\d+)")
+AGE_LINE_RE = re.compile(
+    r"\b(?:just\s+listed|(?:listed\s+)?\d+\s+(?:minute|hour|day|week|month|year)s?\s+ago)\b",
+    re.IGNORECASE,
+)
+PRICE_TEXT_RE = re.compile(
+    r"^\s*(?:"
+    r"free"
+    r"|(?:ca|us|au|nz)?\s*[$\u00a3\u20ac]\s*\d[\d,]*(?:\.\d{1,2})?"
+    r"|(?:cad|usd|eur|gbp)\s*\d[\d,]*(?:\.\d{1,2})?"
+    r"|\d[\d,]*(?:\.\d{1,2})?\s*(?:cad|usd|eur|gbp)"
+    r")\s*$",
+    re.IGNORECASE,
+)
 LOCATION_TOKEN_RE = re.compile(r"(?:\bkm away\b|,)", re.IGNORECASE)
 GENERIC_TITLE_RE = re.compile(
     r"^(?:facebook\s+)?marketp\w*(?:\s+listing|\s+item)?$",
@@ -65,18 +81,29 @@ def _parse_price_from_line(line: str) -> tuple[float | None, str | None]:
         return 0.0, "CAD"
 
     match = PRICE_RE.search(stripped)
+    currency: str | None = None
+    if match:
+        symbol = match.group("symbol") or "$"
+        currency = SYMBOL_TO_CURRENCY.get(symbol, "CAD")
+    else:
+        match = PRICE_CODE_PREFIX_RE.search(stripped)
+        if match:
+            currency = str(match.group("code") or "").upper()[:3]
+        else:
+            match = PRICE_CODE_SUFFIX_RE.search(stripped)
+            if match:
+                currency = str(match.group("code") or "").upper()[:3]
+
     if not match:
         return None, None
 
-    amount_raw = match.group("amount").replace(",", "")
+    amount_raw = str(match.group("amount") or "").replace(",", "")
     try:
         amount = float(amount_raw)
     except ValueError:
         return None, None
 
-    symbol = match.group("symbol") or "$"
-    currency = SYMBOL_TO_CURRENCY.get(symbol, "CAD")
-    return amount, currency
+    return amount, (currency or "CAD")
 
 
 def _looks_like_location(line: str) -> bool:
@@ -175,12 +202,13 @@ def normalize_marketplace_card(
     used_fallback_title = False
 
     for line in lines:
-        if price_value is None:
-            parsed_price, parsed_currency = _parse_price_from_line(line)
-            if parsed_price is not None:
-                price_value = parsed_price
-                price_currency = parsed_currency or default_currency
-                continue
+        if PRICE_TEXT_RE.match(line):
+            if price_value is None:
+                parsed_price, parsed_currency = _parse_price_from_line(line)
+                if parsed_price is not None:
+                    price_value = parsed_price
+                    price_currency = parsed_currency or default_currency
+            continue
 
         if age_hint is None and _looks_like_age(line):
             age_hint = line
@@ -195,7 +223,11 @@ def normalize_marketplace_card(
 
     if title is None:
         candidate_title = _clean_line(str(card.get("title") or ""))
-        if candidate_title and not _is_generic_title(candidate_title):
+        if (
+            candidate_title
+            and not _is_generic_title(candidate_title)
+            and _is_title_candidate(candidate_title)
+        ):
             title = candidate_title
     if not title:
         title = _fallback_title_from_url(listing_url)

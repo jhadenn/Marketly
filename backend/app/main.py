@@ -1,7 +1,8 @@
 import logging
 
-from fastapi import Depends, FastAPI, HTTPException, Header, Query
+from fastapi import Depends, FastAPI, HTTPException, Header, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -35,6 +36,13 @@ from app.services.facebook_credentials import (
     mark_credential_used,
     mark_credential_validated,
     upsert_user_facebook_credential,
+)
+from app.services.rate_limit import check_rate_limit, get_client_ip
+from app.services.response_cache import (
+    build_search_response_cache_key,
+    get_cached_search_response,
+    is_search_response_cache_active,
+    set_cached_search_response,
 )
 from app.services.search_service import FacebookRuntimeContext, unified_search
 from app.services.supabase_ingestion import upsert_facebook_records
@@ -163,6 +171,40 @@ def parse_sources(raw_sources: list[str] | None, *, include_facebook: bool = Fal
     return deduped
 
 
+def _rate_limited_response(retry_after_seconds: int) -> JSONResponse:
+    retry_after = max(1, int(retry_after_seconds))
+    return JSONResponse(
+        status_code=429,
+        content={
+            "code": "RATE_LIMITED",
+            "message": "Rate limit exceeded",
+            "retry_after_seconds": retry_after,
+        },
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
+def _apply_rate_limit(
+    *,
+    bucket: str,
+    identifier: str | None,
+    limit: int,
+    window_seconds: int,
+) -> JSONResponse | None:
+    if not identifier:
+        return None
+    decision = check_rate_limit(
+        bucket=bucket,
+        identifier=identifier,
+        limit=limit,
+        window_seconds=window_seconds,
+    )
+    if decision.allowed:
+        return None
+    retry_after = decision.retry_after_seconds or window_seconds
+    return _rate_limited_response(retry_after)
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -175,6 +217,8 @@ def sources():
 
 @app.get("/search", response_model=SearchResponse)
 async def search(
+    request: Request,
+    response: Response,
     q: str = Query(min_length=1, description="Search query"),
     sources: list[str] | None = Query(
         default=None,
@@ -199,9 +243,28 @@ async def search(
         if source_name not in CONNECTORS:
             raise HTTPException(status_code=400, detail=f"Unknown source: {source_name}")
 
+    optional_user_id = try_get_current_user_id_from_authorization(authorization)
+    client_ip = get_client_ip(request)
+    limited = _apply_rate_limit(
+        bucket="search_ip",
+        identifier=client_ip,
+        limit=int(settings.MARKETLY_RATE_LIMIT_SEARCH_IP_PER_MIN),
+        window_seconds=60,
+    )
+    if limited is not None:
+        return limited
+    if optional_user_id:
+        limited = _apply_rate_limit(
+            bucket="search_user",
+            identifier=optional_user_id,
+            limit=int(settings.MARKETLY_RATE_LIMIT_SEARCH_USER_PER_MIN),
+            window_seconds=60,
+        )
+        if limited is not None:
+            return limited
+
     facebook_runtime_context = None
     if "facebook" in source_list:
-        optional_user_id = try_get_current_user_id_from_authorization(authorization)
         facebook_runtime_context = _build_facebook_runtime_context(
             db=db,
             user_id=optional_user_id,
@@ -209,6 +272,20 @@ async def search(
             longitude=longitude,
             radius_km=radius_km,
         )
+
+    cache_key = build_search_response_cache_key(
+        query=q,
+        sources=source_list,
+        limit=limit,
+        offset=offset,
+        sort=sort,
+        facebook_runtime_context=facebook_runtime_context,
+    )
+    cache_active = is_search_response_cache_active()
+    cached_payload = get_cached_search_response(cache_key) if cache_active else None
+    if cached_payload is not None:
+        response.headers["X-Cache"] = "HIT"
+        return SearchResponse.model_validate(cached_payload)
 
     if facebook_runtime_context is None:
         results, total, next_offset, source_errors = await unified_search(
@@ -230,7 +307,7 @@ async def search(
 
     typed_sources: list[Source] = [source_name for source_name in source_list]
 
-    return SearchResponse(
+    payload = SearchResponse(
         query=q,
         sources=typed_sources,
         count=len(results),
@@ -239,6 +316,10 @@ async def search(
         total=total,
         source_errors=source_errors,
     )
+    if cache_active:
+        set_cached_search_response(cache_key, payload.model_dump(mode="json"))
+    response.headers["X-Cache"] = "MISS" if cache_active else "BYPASS"
+    return payload
 
 
 @app.post("/connectors/facebook/search", response_model=FacebookSearchResponse)
@@ -327,6 +408,15 @@ def put_facebook_connector_cookies(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
+    limited = _apply_rate_limit(
+        bucket="fb_cookie_put_user",
+        identifier=user_id,
+        limit=int(settings.MARKETLY_RATE_LIMIT_FB_COOKIE_PUT_PER_HOUR),
+        window_seconds=3600,
+    )
+    if limited is not None:
+        return limited
+
     try:
         row = upsert_user_facebook_credential(db, user_id, payload.cookies_json)
     except FacebookConnectorError as exc:
@@ -341,6 +431,15 @@ async def verify_facebook_connector_cookies(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
+    limited = _apply_rate_limit(
+        bucket="fb_verify_user",
+        identifier=user_id,
+        limit=int(settings.MARKETLY_RATE_LIMIT_FB_VERIFY_PER_HOUR),
+        window_seconds=3600,
+    )
+    if limited is not None:
+        return limited
+
     row = get_user_facebook_credential(db, user_id)
     if row is None:
         return FacebookVerifyResponse(
@@ -419,6 +518,15 @@ def delete_facebook_connector_cookies(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
+    limited = _apply_rate_limit(
+        bucket="fb_delete_user",
+        identifier=user_id,
+        limit=int(settings.MARKETLY_RATE_LIMIT_FB_DELETE_PER_HOUR),
+        window_seconds=3600,
+    )
+    if limited is not None:
+        return limited
+
     deleted = delete_user_facebook_credential(db, user_id)
     return {"deleted": deleted}
 
@@ -429,6 +537,15 @@ def create_saved_search(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
+    limited = _apply_rate_limit(
+        bucket="saved_mutation_user",
+        identifier=user_id,
+        limit=int(settings.MARKETLY_RATE_LIMIT_SAVED_MUTATION_PER_MIN),
+        window_seconds=60,
+    )
+    if limited is not None:
+        return limited
+
     row = SavedSearch(
         user_id=user_id,
         query=payload.query,
@@ -475,6 +592,15 @@ def delete_saved_search(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
+    limited = _apply_rate_limit(
+        bucket="saved_mutation_user",
+        identifier=user_id,
+        limit=int(settings.MARKETLY_RATE_LIMIT_SAVED_MUTATION_PER_MIN),
+        window_seconds=60,
+    )
+    if limited is not None:
+        return limited
+
     row = (
         db.query(SavedSearch)
         .filter(SavedSearch.id == search_id, SavedSearch.user_id == user_id)
@@ -494,6 +620,15 @@ def update_saved_search(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
+    limited = _apply_rate_limit(
+        bucket="saved_mutation_user",
+        identifier=user_id,
+        limit=int(settings.MARKETLY_RATE_LIMIT_SAVED_MUTATION_PER_MIN),
+        window_seconds=60,
+    )
+    if limited is not None:
+        return limited
+
     row = (
         db.query(SavedSearch)
         .filter(SavedSearch.id == search_id, SavedSearch.user_id == user_id)
@@ -535,6 +670,15 @@ async def run_saved_search(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
+    limited = _apply_rate_limit(
+        bucket="saved_mutation_user",
+        identifier=user_id,
+        limit=int(settings.MARKETLY_RATE_LIMIT_SAVED_MUTATION_PER_MIN),
+        window_seconds=60,
+    )
+    if limited is not None:
+        return limited
+
     row = (
         db.query(SavedSearch)
         .filter(SavedSearch.id == search_id, SavedSearch.user_id == user_id)

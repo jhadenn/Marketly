@@ -1,5 +1,8 @@
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
+from app.core.cache import TTLCache
 from app.main import app
 from app.models.listing import Listing, Money
 
@@ -194,3 +197,82 @@ def test_search_passes_facebook_runtime_context_and_location(monkeypatch):
     assert captured["context_build_kwargs"]["latitude"] == 43.6532
     assert captured["context_build_kwargs"]["longitude"] == -79.3832
     assert captured["context_build_kwargs"]["radius_km"] == 25
+
+
+def test_search_cache_hit_returns_header(monkeypatch):
+    payload = {
+        "query": "iphone",
+        "sources": ["ebay"],
+        "count": 1,
+        "results": [
+            {
+                "source": "ebay",
+                "source_listing_id": "1",
+                "title": "ebay item 1",
+                "price": {"amount": 100.0, "currency": "CAD"},
+                "url": "https://example.com/ebay/1",
+                "image_urls": [],
+                "location": "Toronto",
+                "latitude": None,
+                "longitude": None,
+                "condition": None,
+                "snippet": None,
+                "score": 0.0,
+                "score_reason": None,
+            }
+        ],
+        "next_offset": None,
+        "total": 1,
+        "source_errors": {},
+    }
+
+    monkeypatch.setattr("app.main.settings.MARKETLY_RESPONSE_CACHE_ENABLED", True)
+    monkeypatch.setattr("app.main.is_search_response_cache_active", lambda: True)
+    monkeypatch.setattr("app.main.get_cached_search_response", lambda key: payload)
+    monkeypatch.setattr("app.main.unified_search", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not call")))
+
+    response = client.get("/search", params={"q": "iphone", "sources": "ebay"})
+
+    assert response.status_code == 200
+    assert response.headers.get("x-cache") == "HIT"
+    assert response.json()["count"] == 1
+
+
+def test_search_local_cache_fallback_miss_then_hit(monkeypatch):
+    calls = {"unified_search": 0}
+
+    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance", **kwargs):
+        calls["unified_search"] += 1
+        return ([_sample_listing("ebay", "1")], 1, None, {})
+
+    monkeypatch.setattr("app.main.unified_search", fake_unified_search)
+    monkeypatch.setattr("app.main.settings.MARKETLY_RESPONSE_CACHE_ENABLED", True)
+    monkeypatch.setattr("app.main.settings.MARKETLY_RESPONSE_CACHE_LOCAL_FALLBACK_ENABLED", True)
+    monkeypatch.setattr("app.main.settings.REDIS_URL", "")
+    monkeypatch.setattr("app.services.response_cache.get_redis_client", lambda: None)
+    monkeypatch.setattr("app.services.response_cache._local_response_cache", TTLCache(max_items=8))
+
+    first = client.get("/search", params={"q": "iphone", "sources": "ebay"})
+    second = client.get("/search", params={"q": "iphone", "sources": "ebay"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.headers.get("x-cache") == "MISS"
+    assert second.headers.get("x-cache") == "HIT"
+    assert calls["unified_search"] == 1
+
+
+def test_search_rate_limit_returns_429(monkeypatch):
+    monkeypatch.setattr("app.main.settings.MARKETLY_RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(
+        "app.main.check_rate_limit",
+        lambda **kwargs: SimpleNamespace(allowed=False, retry_after_seconds=17),
+    )
+
+    response = client.get("/search", params={"q": "iphone", "sources": "ebay"})
+
+    assert response.status_code == 429
+    payload = response.json()
+    assert payload["code"] == "RATE_LIMITED"
+    assert payload["retry_after_seconds"] == 17
+    assert response.headers.get("Retry-After") == "17"

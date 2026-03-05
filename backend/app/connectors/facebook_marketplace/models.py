@@ -24,6 +24,7 @@ class FacebookSearchRequest(BaseModel):
     auth_mode: AuthMode = "guest"
     cookie_path: str = "secrets/fb_cookies.json"
     cookie_payload: Any | None = None
+    multi_source: bool = False
     ingest: bool = False
 
     @model_validator(mode="after")
