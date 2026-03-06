@@ -33,7 +33,7 @@ export default function CallToAction() {
                             triggerOnView
                             preset="fade-in-blur"
                             speedSegment={0.3}
-                            delay={0.2}
+                            delay={0.001}
                             as="p"
                             className="mx-auto mt-4 max-w-2xl text-pretty text-sm leading-relaxed text-zinc-400 sm:text-base"
                         >

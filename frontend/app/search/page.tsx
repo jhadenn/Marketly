@@ -29,6 +29,52 @@ const SORT_OPTIONS = [
   { value: "newest", label: "Newest (unavailable)", disabled: true },
 ] as const;
 
+type PreviewListing = {
+  title: string;
+  price: string;
+  location: string;
+  source: SourceOption;
+  imagePath: string;
+  fallbackImagePath: string;
+};
+
+// Drop your own files in frontend/public as:
+// /preview-listing-1.jpg ... /preview-listing-4.jpg
+const PREVIEW_SAMPLE_LISTINGS: PreviewListing[] = [
+  {
+    title: "Kawaii Chiikawa Plush Toy",
+    price: "CAD 15",
+    location: "Toronto, ON",
+    source: "facebook",
+    imagePath: "/example-listing-1.jpg",
+    fallbackImagePath: "/example-listing-1.jpg",
+  },
+  {
+    title: "1999 Mazda Miata",
+    price: "CAD 6,500",
+    location: "North York, ON",
+    source: "kijiji",
+    imagePath: "/preview-listing-2.jpg",
+    fallbackImagePath: "/example-listing-2.jpg",
+  },
+  {
+    title: "Nike SB Dunks",
+    price: "CAD 150",
+    location: "Mississauga, ON",
+    source: "ebay",
+    imagePath: "/example-listing-3.jpg",
+    fallbackImagePath: "/example-listing-2.jpg",
+  },
+  {
+    title: "Comfy Grey Sofa",
+    price: "CAD 300",
+    location: "Etobicoke, ON",
+    source: "facebook",
+    imagePath: "/example-listing-4.jpg",
+    fallbackImagePath: "/example-listing-1.jpg",
+  },
+];
+
 type SourceOption = (typeof SOURCE_OPTIONS)[number];
 type SortOption = (typeof SORT_OPTIONS)[number]["value"];
 
@@ -110,6 +156,12 @@ type SavedBatchPaginationState = {
 
 type ResultMode = "single" | "saved_batch";
 type Coordinates = { latitude: number; longitude: number };
+type SavedSearchResultBucket = { items: Listing[] };
+type InterleavedSavedSearchBucketResult = {
+  orderedItems: Listing[];
+  seenKeys: Set<string>;
+  nextLaneStart: number;
+};
 
 function isSourceOption(value: string): value is SourceOption {
   return SOURCE_OPTIONS.includes(value as SourceOption);
@@ -118,6 +170,10 @@ function isSourceOption(value: string): value is SourceOption {
 function formatPrice(price?: Money | null) {
   if (!price) return "-";
   return `${price.currency} ${price.amount}`;
+}
+
+function getListingKey(item: Listing): string {
+  return `${item.source}:${item.source_listing_id || item.url}`;
 }
 
 function sortListingsLocal(listings: Listing[], sort: SortOption): Listing[] {
@@ -160,6 +216,75 @@ function sortDebounceMs(resultCount: number): number {
   if (resultCount >= 1000) return 220;
   if (resultCount >= 200) return 120;
   return 0;
+}
+
+function computeSavedBatchSeed(savedSearches: Pick<SavedSearch, "id" | "query">[]): number {
+  if (savedSearches.length <= 1) return 0;
+
+  let hash = 0;
+  for (const entry of savedSearches) {
+    const token = `${entry.id}:${entry.query}`;
+    for (let index = 0; index < token.length; index += 1) {
+      hash = ((hash * 31) + token.charCodeAt(index)) >>> 0;
+    }
+  }
+
+  return hash % savedSearches.length;
+}
+
+function interleaveSavedSearchBuckets({
+  buckets,
+  laneStart,
+  initialSeenKeys,
+}: {
+  buckets: SavedSearchResultBucket[];
+  laneStart: number;
+  initialSeenKeys: Set<string>;
+}): InterleavedSavedSearchBucketResult {
+  if (buckets.length === 0) {
+    return {
+      orderedItems: [],
+      seenKeys: new Set(initialSeenKeys),
+      nextLaneStart: 0,
+    };
+  }
+
+  const normalizedLaneStart = ((laneStart % buckets.length) + buckets.length) % buckets.length;
+  const laneOrder = Array.from(
+    { length: buckets.length },
+    (_, index) => (normalizedLaneStart + index) % buckets.length,
+  );
+  const positions = buckets.map(() => 0);
+  const seenKeys = new Set(initialSeenKeys);
+  const orderedItems: Listing[] = [];
+
+  while (true) {
+    let appendedInCycle = false;
+
+    for (const laneIndex of laneOrder) {
+      const laneItems = buckets[laneIndex]?.items ?? [];
+      while (positions[laneIndex] < laneItems.length) {
+        const item = laneItems[positions[laneIndex]];
+        positions[laneIndex] += 1;
+        const listingKey = getListingKey(item);
+        if (seenKeys.has(listingKey)) continue;
+        seenKeys.add(listingKey);
+        orderedItems.push(item);
+        appendedInCycle = true;
+        break;
+      }
+    }
+
+    if (!appendedInCycle) {
+      break;
+    }
+  }
+
+  return {
+    orderedItems,
+    seenKeys,
+    nextLaneStart: (normalizedLaneStart + 1) % buckets.length,
+  };
 }
 
 function formatSourceLabel(source: string) {
@@ -364,6 +489,11 @@ type ResultsPanelProps = Pick<
 >;
 
 function SearchPageView(props: SearchPageViewProps) {
+  const heroQuery = props.q.trim();
+  const heroTitle =
+    heroQuery || (props.hasSearched ? "Unified results" : "All marketplaces. One search.");
+  const showLiveHeroCopy = heroQuery.length > 0 || props.hasSearched;
+
   return (
     <main className="dark relative min-h-screen overflow-x-hidden bg-black text-white antialiased">
       <div className="pointer-events-none fixed inset-0 -z-20 opacity-20">
@@ -461,10 +591,10 @@ function SearchPageView(props: SearchPageViewProps) {
                 Search all marketplaces in one feed
               </p>
               <h1 className="mt-4 max-w-4xl text-balance text-3xl font-semibold tracking-tight text-white sm:text-4xl lg:text-5xl">
-                {props.hasSearched ? props.q.trim() || "Unified results" : "All marketplaces. One search."}
+                {heroTitle}
               </h1>
               <p className="mt-3 max-w-3xl text-sm leading-relaxed text-zinc-400 sm:text-base">
-                {props.hasSearched
+                {showLiveHeroCopy
                   ? "Compare live listings across Kijiji, eBay, and Facebook Marketplace in a single feed with image-first tiles inspired by Facebook Marketplace."
                   : "Run a search, choose sources, and browse a unified marketplace grid with saved searches and infinite scroll."}
               </p>
@@ -913,7 +1043,7 @@ function ResultsPanel({
           <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_420px]">
             <div>
               <p className="font-mono text-xs uppercase tracking-[0.18em] text-zinc-500">Preview</p>
-              <h3 className="mt-2 text-xl font-semibold tracking-tight text-white">
+              <h3 className="mt-2 max-w-2xl text-2xl font-semibold tracking-tight text-white sm:text-3xl">
                 Start your search to see live results from all marketplaces in one feed.
               </h3>
               <p className="mt-2 max-w-xl text-sm leading-relaxed text-zinc-400">
@@ -922,18 +1052,8 @@ function ResultsPanel({
             </div>
 
             <div className="grid grid-cols-2 gap-3">
-              {Array.from({ length: 4 }).map((_, index) => (
-                <div
-                  key={`preview-card-${index}`}
-                  className="overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/80"
-                >
-                  <div className="aspect-[5/4] bg-gradient-to-br from-zinc-800 to-zinc-950" />
-                  <div className="space-y-2 p-3">
-                    <div className="h-4 w-16 rounded bg-zinc-800" />
-                    <div className="h-3 w-full rounded bg-zinc-900" />
-                    <div className="h-3 w-2/3 rounded bg-zinc-900" />
-                  </div>
-                </div>
+              {PREVIEW_SAMPLE_LISTINGS.map((listing, index) => (
+                <PreviewListingCard key={`preview-card-${index}`} listing={listing} />
               ))}
             </div>
           </div>
@@ -974,6 +1094,40 @@ function ResultsPanel({
         </>
       ) : null}
     </section>
+  );
+}
+
+function PreviewListingCard({ listing }: { listing: PreviewListing }) {
+  const [useFallbackImage, setUseFallbackImage] = useState(false);
+  const imageSrc = useFallbackImage ? listing.fallbackImagePath : listing.imagePath;
+
+  return (
+    <article className="overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/80">
+      <div className="relative aspect-[5/4] bg-zinc-900">
+        <Image
+          src={imageSrc}
+          alt={listing.title}
+          fill
+          sizes="(max-width: 1024px) 50vw, 220px"
+          className="object-cover"
+          onError={() => {
+            if (!useFallbackImage) {
+              setUseFallbackImage(true);
+            }
+          }}
+        />
+        <div className="absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-2.5">
+          <MarketplaceSourceBadge source={listing.source} />
+        </div>
+      </div>
+      <div className="space-y-1.5 p-3">
+        <p className="line-clamp-2 text-sm font-medium text-zinc-100">{listing.title}</p>
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs font-semibold text-zinc-200">{listing.price}</p>
+          <p className="line-clamp-1 text-[11px] text-zinc-500">{listing.location}</p>
+        </div>
+      </div>
+    </article>
   );
 }
 
@@ -1253,14 +1407,14 @@ function MarketplaceResultCard({
   const distanceLabel = distanceMiles !== null ? formatDistanceMiles(distanceMiles) : null;
 
   return (
-    <li>
+    <li className="h-full">
       <a
         href={item.url}
         target="_blank"
         rel="noreferrer"
-        className="group block overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/85 transition hover:-translate-y-0.5 hover:border-white/20 hover:bg-zinc-950"
+        className="group flex h-full flex-col overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/85 transition hover:-translate-y-0.5 hover:border-white/20 hover:bg-zinc-950"
       >
-        <div className="relative aspect-[5/4] overflow-hidden bg-zinc-900">
+        <div className="relative aspect-[5/4] shrink-0 overflow-hidden bg-zinc-900">
           {imageUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
@@ -1279,7 +1433,7 @@ function MarketplaceResultCard({
           </div>
         </div>
 
-        <div className="space-y-2 p-3.5">
+        <div className="flex h-[196px] flex-col gap-2 overflow-hidden p-3.5">
           <div className="flex items-start justify-between gap-2">
             <p className="text-base font-semibold tracking-tight text-white">{formatPrice(item.price)}</p>
             {distanceLabel ? (
@@ -1297,21 +1451,19 @@ function MarketplaceResultCard({
             {item.location || `${formatSourceLabel(item.source)} listing`}
           </p>
 
-          {(typeof item.score === "number" || item.condition || item.snippet) && (
-            <div className="space-y-1">
-              {typeof item.score === "number" ? (
-                <p className="text-[11px] text-zinc-500">Score {item.score.toFixed(2)}</p>
-              ) : null}
-              {item.condition ? (
-                <p className="line-clamp-1 text-[11px] uppercase tracking-[0.12em] text-zinc-500">
-                  {item.condition}
-                </p>
-              ) : null}
-              {item.snippet ? (
-                <p className="line-clamp-2 text-xs leading-relaxed text-zinc-500">{item.snippet}</p>
-              ) : null}
-            </div>
-          )}
+          <div className="mt-auto space-y-1">
+            {typeof item.score === "number" ? (
+              <p className="text-[11px] text-zinc-500">Score {item.score.toFixed(2)}</p>
+            ) : null}
+            {item.condition ? (
+              <p className="line-clamp-1 text-[11px] uppercase tracking-[0.12em] text-zinc-500">
+                {item.condition}
+              </p>
+            ) : null}
+            {item.snippet ? (
+              <p className="line-clamp-2 text-xs leading-relaxed text-zinc-500">{item.snippet}</p>
+            ) : null}
+          </div>
         </div>
       </a>
     </li>
@@ -1390,6 +1542,7 @@ export default function HomePage() {
   const seenKeysRef = useRef<Set<string>>(new Set());
   const fetchInFlightRef = useRef(false);
   const autoLoadedSavedForUserRef = useRef<string | null>(null);
+  const savedBatchLaneStartRef = useRef(0);
 
   const savedBatchHasMore =
     resultMode === "saved_batch" &&
@@ -1551,7 +1704,7 @@ export default function HomePage() {
 
         const dedupedIncoming: Listing[] = [];
         for (const item of incoming) {
-          const listingKey = `${item.source}:${item.source_listing_id || item.url}`;
+          const listingKey = getListingKey(item);
           if (seenKeysRef.current.has(listingKey)) continue;
           seenKeysRef.current.add(listingKey);
           dedupedIncoming.push(item);
@@ -1900,6 +2053,7 @@ export default function HomePage() {
       const mergedSourceErrors: Record<string, SourceErrorEntry> = {};
       const nextOffsetsById = new Map<number, number | null>();
       const dedupedIncoming: Listing[] = [];
+      const incomingBuckets: SavedSearchResultBucket[] = [];
 
       for (const outcome of settled) {
         if (outcome.status === "rejected") {
@@ -1911,12 +2065,28 @@ export default function HomePage() {
         nextOffsetsById.set(entryId, payload.next_offset ?? null);
         Object.assign(mergedSourceErrors, payload.source_errors ?? {});
 
-        for (const item of payload.results ?? []) {
-          const listingKey = `${item.source}:${item.source_listing_id || item.url}`;
-          if (seenKeysRef.current.has(listingKey)) continue;
-          seenKeysRef.current.add(listingKey);
-          dedupedIncoming.push(item);
+        const incomingItems = payload.results ?? [];
+        if (savedBatchPagination.selectedSort === "relevance") {
+          incomingBuckets.push({ items: incomingItems });
+        } else {
+          for (const item of incomingItems) {
+            const listingKey = getListingKey(item);
+            if (seenKeysRef.current.has(listingKey)) continue;
+            seenKeysRef.current.add(listingKey);
+            dedupedIncoming.push(item);
+          }
         }
+      }
+
+      if (savedBatchPagination.selectedSort === "relevance" && incomingBuckets.length > 0) {
+        const interleaved = interleaveSavedSearchBuckets({
+          buckets: incomingBuckets,
+          laneStart: savedBatchLaneStartRef.current,
+          initialSeenKeys: seenKeysRef.current,
+        });
+        dedupedIncoming.push(...interleaved.orderedItems);
+        seenKeysRef.current = interleaved.seenKeys;
+        savedBatchLaneStartRef.current = interleaved.nextLaneStart;
       }
 
       if (settled.length > 0 && failures.length === settled.length) {
@@ -2046,6 +2216,8 @@ export default function HomePage() {
     setHasSearched(false);
     setActiveSavedSearchId(null);
     seenKeysRef.current = new Set();
+    const seededLaneStart = computeSavedBatchSeed(savedSearches);
+    savedBatchLaneStartRef.current = seededLaneStart;
 
     try {
       const requests = savedSearches.map(async (entry) => ({
@@ -2062,6 +2234,7 @@ export default function HomePage() {
       const seenKeys = new Set<string>();
       const failures: string[] = [];
       const paginationEntries: SavedBatchPaginationEntry[] = [];
+      const initialBuckets: SavedSearchResultBucket[] = [];
 
       for (const outcome of settled) {
         if (outcome.status === "rejected") {
@@ -2078,14 +2251,31 @@ export default function HomePage() {
           nextOffset: payload.next_offset ?? null,
         });
 
-        for (const item of payload.results ?? []) {
-          const listingKey = `${item.source}:${item.source_listing_id || item.url}`;
-          if (seenKeys.has(listingKey)) continue;
-          seenKeys.add(listingKey);
-          dedupedResults.push(item);
+        const initialItems = payload.results ?? [];
+        initialBuckets.push({ items: initialItems });
+        if (selectedSort !== "relevance") {
+          for (const item of initialItems) {
+            const listingKey = getListingKey(item);
+            if (seenKeys.has(listingKey)) continue;
+            seenKeys.add(listingKey);
+            dedupedResults.push(item);
+          }
         }
 
         Object.assign(mergedSourceErrors, payload.source_errors ?? {});
+      }
+
+      if (selectedSort === "relevance") {
+        const interleaved = interleaveSavedSearchBuckets({
+          buckets: initialBuckets,
+          laneStart: seededLaneStart,
+          initialSeenKeys: seenKeys,
+        });
+        dedupedResults.push(...interleaved.orderedItems);
+        seenKeysRef.current = interleaved.seenKeys;
+        savedBatchLaneStartRef.current = interleaved.nextLaneStart;
+      } else {
+        seenKeysRef.current = seenKeys;
       }
 
       if (settled.length > 0 && failures.length === settled.length) {
@@ -2096,7 +2286,6 @@ export default function HomePage() {
         setError(`Some saved searches failed to load (${failures.length}/${settled.length}).`);
       }
 
-      seenKeysRef.current = seenKeys;
       setRawResults(dedupedResults);
       setSourceErrors(mergedSourceErrors);
       const nextSavedBatchPagination: SavedBatchPaginationState = {

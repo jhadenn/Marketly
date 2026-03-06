@@ -2,7 +2,6 @@ import Link from 'next/link'
 import { ArrowUpRightIcon, SparklesIcon } from 'lucide-react'
 
 const quickLinks = [
-    { title: 'Home', href: '/' },
     { title: 'Search', href: '/search' },
     { title: 'Login', href: '/login' },
 ]
