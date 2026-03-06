@@ -47,6 +47,22 @@ MARKETLY_SEARCH_FETCH_CACHE_MAX_ITEMS=32
 MARKETLY_SEARCH_PAGINATION_CACHE_MAX_ITEMS=8
 ```
 
+## Facebook speed tuning
+
+Use these when Facebook feels slow:
+
+```bash
+# Skip facebook.com home bootstrap before search (faster cold request).
+MARKETLY_FACEBOOK_BOOTSTRAP_HOME=false
+
+# Reduce per-scroll wait jitter.
+MARKETLY_FACEBOOK_JITTER_MIN_SECONDS=0.08
+MARKETLY_FACEBOOK_JITTER_MAX_SECONDS=0.25
+
+# Keep extra Facebook overfetch smaller in unified multi-source mode.
+MARKETLY_FACEBOOK_OVERFETCH_BUFFER_MULTI_SOURCE=2
+```
+
 ## Render deployment (512 MB)
 
 1. Create a Render Web Service from the `backend/` Dockerfile.

@@ -151,10 +151,14 @@ class FacebookUnifiedConnector(MarketplaceConnector):
         multi_source: bool = False,
     ) -> list[Listing]:
         requested_limit = max(1, int(limit))
-        overfetch_buffer = max(0, int(settings.MARKETLY_FACEBOOK_OVERFETCH_BUFFER))
         if multi_source:
+            overfetch_buffer = max(
+                0,
+                int(settings.MARKETLY_FACEBOOK_OVERFETCH_BUFFER_MULTI_SOURCE),
+            )
             max_scrape_limit = max(1, int(settings.MARKETLY_FACEBOOK_MAX_SCRAPE_LIMIT))
         else:
+            overfetch_buffer = max(0, int(settings.MARKETLY_FACEBOOK_OVERFETCH_BUFFER))
             max_scrape_limit = max(
                 int(settings.MARKETLY_FACEBOOK_MAX_SCRAPE_LIMIT),
                 int(settings.MARKETLY_FACEBOOK_MAX_SCRAPE_LIMIT_SINGLE_SOURCE),

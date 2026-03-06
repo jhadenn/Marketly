@@ -70,7 +70,7 @@ export default function HeroSection() {
                                     size="lg"
                                     className="h-12 px-8 text-lg">
                                     <Link href="/search">
-                                        <span className="text-nowrap">Try It Out</span>
+                                        <span className="text-nowrap">Start Searching</span>
                                     </Link>
                                 </Button>
                             

@@ -221,6 +221,38 @@ class FacebookMarketplaceConnector:
         self.idle_scroll_limit = max(1, configured_idle_scroll_limit)
         self.max_scrolls = max(4, configured_max_scrolls)
         self._semaphore = asyncio.Semaphore(max(1, configured_max_concurrency))
+        self._playwright_driver: Any | None = None
+        self._browser: Any | None = None
+        self._browser_lock = asyncio.Lock()
+
+    async def _get_browser(self):
+        async with self._browser_lock:
+            if self._browser is not None and self._browser.is_connected():
+                return self._browser
+            if self._browser is not None:
+                await self._close_browser_locked()
+            if self._playwright_driver is None:
+                self._playwright_driver = await async_playwright().start()
+            self._browser = await self._playwright_driver.chromium.launch(headless=True)
+            return self._browser
+
+    async def _close_browser_locked(self) -> None:
+        if self._browser is not None:
+            try:
+                await self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
+        if self._playwright_driver is not None:
+            try:
+                await self._playwright_driver.stop()
+            except Exception:
+                pass
+            self._playwright_driver = None
+
+    async def _invalidate_browser(self) -> None:
+        async with self._browser_lock:
+            await self._close_browser_locked()
 
     async def search(self, request: FacebookSearchRequest) -> list[FacebookNormalizedListing]:
         if async_playwright is None:
@@ -257,6 +289,8 @@ class FacebookMarketplaceConnector:
                     ) from exc
                 await asyncio.sleep(self._retry_delay(attempt))
             except Exception as exc:  # pragma: no cover - network/runtime variability
+                if self._is_browser_closed_error(exc):
+                    await self._invalidate_browser()
                 last_error = exc
                 if attempt >= self.retries:
                     raise self._classify_unexpected_error(exc) from exc
@@ -291,7 +325,7 @@ class FacebookMarketplaceConnector:
                 details={"error": message},
             )
 
-        if "target page, context or browser has been closed" in lowered:
+        if self._is_browser_closed_error(exc):
             return FacebookConnectorError(
                 FacebookConnectorErrorCode.scrape_failed,
                 "Browser context closed unexpectedly during scrape.",
@@ -306,6 +340,14 @@ class FacebookMarketplaceConnector:
             details={"error": message},
         )
 
+    @staticmethod
+    def _is_browser_closed_error(exc: Exception) -> bool:
+        lowered = str(exc).lower()
+        return (
+            "target page, context or browser has been closed" in lowered
+            or "browser has been closed" in lowered
+        )
+
     async def _search_once(self, request: FacebookSearchRequest) -> list[FacebookNormalizedListing]:
         search_url = self._build_search_url(request)
         self._log(
@@ -316,74 +358,78 @@ class FacebookMarketplaceConnector:
             url=search_url,
         )
 
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True)
-            context = await browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/122.0.0.0 Safari/537.36"
-                ),
-                locale="en-CA",
-            )
-            context.set_default_timeout(self.timeout_ms)
+        browser = await self._get_browser()
+        context = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+            locale="en-CA",
+        )
+        context.set_default_timeout(self.timeout_ms)
 
-            try:
-                if request.auth_mode == "cookie":
-                    if request.cookie_payload is not None:
-                        await self._load_cookie_payload(context, request.cookie_payload)
-                    else:
-                        await self._load_cookies(context, request.cookie_path)
+        try:
+            if request.auth_mode == "cookie":
+                if request.cookie_payload is not None:
+                    await self._load_cookie_payload(context, request.cookie_payload)
+                else:
+                    await self._load_cookies(context, request.cookie_path)
 
-                page = await context.new_page()
-                # Session bootstrap helps Facebook attach cookies before marketplace navigation.
+            page = await context.new_page()
+            if settings.MARKETLY_FACEBOOK_BOOTSTRAP_HOME and request.auth_mode == "cookie":
                 await page.goto("https://www.facebook.com/", wait_until="domcontentloaded")
                 await self._jitter_sleep()
-                await page.goto(search_url, wait_until="domcontentloaded")
-                await self._jitter_sleep()
+            await page.goto(search_url, wait_until="domcontentloaded")
 
-                if request.multi_source:
-                    max_scrolls = self.max_scrolls
-                    idle_scroll_limit = self.idle_scroll_limit
-                else:
-                    max_scrolls = max(
-                        self.max_scrolls, int(settings.MARKETLY_FACEBOOK_MAX_SCROLLS_SINGLE_SOURCE)
-                    )
-                    idle_scroll_limit = max(
-                        self.idle_scroll_limit,
-                        int(settings.MARKETLY_FACEBOOK_IDLE_SCROLL_LIMIT_SINGLE_SOURCE),
-                    )
-                raw_cards = await self._scroll_and_extract(
-                    page=page,
-                    target_limit=request.limit,
-                    max_scrolls=max_scrolls,
-                    idle_scroll_limit=idle_scroll_limit,
+            if request.multi_source:
+                max_scrolls = self.max_scrolls
+                idle_scroll_limit = self.idle_scroll_limit
+            else:
+                max_scrolls = max(
+                    self.max_scrolls, int(settings.MARKETLY_FACEBOOK_MAX_SCROLLS_SINGLE_SOURCE)
                 )
-                normalized = self._normalize_cards(
-                    raw_cards,
-                    limit=request.limit,
-                    fallback_latitude=request.latitude,
-                    fallback_longitude=request.longitude,
+                idle_scroll_limit = max(
+                    self.idle_scroll_limit,
+                    int(settings.MARKETLY_FACEBOOK_IDLE_SCROLL_LIMIT_SINGLE_SOURCE),
+                )
+            raw_cards = await self._scroll_and_extract(
+                page=page,
+                target_limit=request.limit,
+                max_scrolls=max_scrolls,
+                idle_scroll_limit=idle_scroll_limit,
+            )
+            normalized = self._normalize_cards(
+                raw_cards,
+                limit=request.limit,
+                fallback_latitude=request.latitude,
+                fallback_longitude=request.longitude,
+            )
+
+            if not normalized:
+                await self._raise_if_blocked(page, extracted_cards=len(raw_cards))
+                raise FacebookConnectorError(
+                    FacebookConnectorErrorCode.empty_results,
+                    "No listings were extracted from Facebook Marketplace.",
+                    retryable=False,
                 )
 
-                if not normalized:
-                    await self._raise_if_blocked(page, extracted_cards=len(raw_cards))
-                    raise FacebookConnectorError(
-                        FacebookConnectorErrorCode.empty_results,
-                        "No listings were extracted from Facebook Marketplace.",
-                        retryable=False,
-                    )
-
-                self._log(
-                    "facebook_search_complete",
-                    extracted=len(raw_cards),
-                    normalized=len(normalized),
-                    query=request.query,
-                )
-                return normalized
-            finally:
+            self._log(
+                "facebook_search_complete",
+                extracted=len(raw_cards),
+                normalized=len(normalized),
+                query=request.query,
+            )
+            return normalized
+        except Exception as exc:
+            if self._is_browser_closed_error(exc):
+                await self._invalidate_browser()
+            raise
+        finally:
+            try:
                 await context.close()
-                await browser.close()
+            except Exception:
+                pass
 
     def _build_search_url(self, request: FacebookSearchRequest) -> str:
         params: dict[str, Any] = {
@@ -457,7 +503,6 @@ class FacebookMarketplaceConnector:
         merged: list[dict[str, Any]] = []
 
         for scroll_index in range(max_scrolls):
-            await self._jitter_sleep()
             cards = await page.evaluate(EXTRACTION_SCRIPT)
 
             new_count = 0
@@ -487,6 +532,7 @@ class FacebookMarketplaceConnector:
                 break
 
             await page.mouse.wheel(0, random.randint(1000, 1700))
+            await self._jitter_sleep()
 
         return merged
 
@@ -580,7 +626,11 @@ class FacebookMarketplaceConnector:
 
     @staticmethod
     async def _jitter_sleep() -> None:
-        await asyncio.sleep(random.uniform(0.2, 0.9))
+        jitter_min = max(0.0, float(settings.MARKETLY_FACEBOOK_JITTER_MIN_SECONDS))
+        jitter_max = max(0.0, float(settings.MARKETLY_FACEBOOK_JITTER_MAX_SECONDS))
+        if jitter_max < jitter_min:
+            jitter_min, jitter_max = jitter_max, jitter_min
+        await asyncio.sleep(random.uniform(jitter_min, jitter_max))
 
     def _log(self, event: str, **payload: Any) -> None:
         logger.info(json.dumps({"event": event, **payload}))
