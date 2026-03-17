@@ -2,3 +2,4 @@
 .env.local
 secrets/*.json
 backend/secrets/*.json
+AI_FEATURE_OPPORTUNITIES.md

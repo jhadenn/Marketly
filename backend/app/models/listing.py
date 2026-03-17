@@ -5,11 +5,31 @@ from pydantic import BaseModel, Field
 
 Source = Literal["ebay", "kijiji", "facebook"]
 SearchSort = Literal["relevance", "price_asc", "price_desc", "newest"]
+ValuationVerdict = Literal["underpriced", "fair", "overpriced", "insufficient_data"]
+RiskLevel = Literal["low", "medium", "high"]
 
 
 class Money(BaseModel):
     amount: float = Field(ge=0)
     currency: str = Field(default="CAD", min_length=3, max_length=3)
+
+
+class ListingValuation(BaseModel):
+    verdict: ValuationVerdict = "insufficient_data"
+    estimated_low: Optional[float] = Field(default=None, ge=0)
+    estimated_high: Optional[float] = Field(default=None, ge=0)
+    median_price: Optional[float] = Field(default=None, ge=0)
+    currency: str = Field(default="CAD", min_length=3, max_length=3)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    sample_count: int = Field(default=0, ge=0)
+    explanation: Optional[str] = None
+
+
+class ListingRisk(BaseModel):
+    level: RiskLevel = "low"
+    score: float = Field(default=0.0, ge=0.0, le=1.0)
+    reasons: list[str] = Field(default_factory=list)
+    explanation: Optional[str] = None
 
 
 class Listing(BaseModel):
@@ -28,6 +48,8 @@ class Listing(BaseModel):
     # Ranking metadata
     score: float = Field(default=0.0, description="Relevance score (higher is better)")
     score_reason: Optional[str] = Field(default=None, description="Debug string explaining score")
+    valuation: Optional[ListingValuation] = None
+    risk: Optional[ListingRisk] = None
 
 
 class SourceError(BaseModel):

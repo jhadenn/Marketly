@@ -11,6 +11,27 @@
   - `DELETE /me/connectors/facebook`
 - `GET /search` accepts optional `latitude`, `longitude`, and `radius_km`.
 
+## AI insights, alerts, and copilot
+
+- Search results now expose fair-value and risk metadata directly on each listing.
+- Saved searches support `alerts_enabled` and daily in-app digests via:
+  - `GET /me/notifications`
+  - `POST /me/notifications/{id}/read`
+- The shopping copilot is available at `POST /copilot/query`.
+- Run the alert digest job from cron or your scheduler with:
+
+```bash
+python scripts/run_saved_search_alerts.py
+```
+
+- Optional overrides:
+
+```bash
+python scripts/run_saved_search_alerts.py --limit 30
+python scripts/run_saved_search_alerts.py --saved-search-id 42
+python scripts/run_saved_search_alerts.py --user-id your-user-id
+```
+
 ## Production cache + rate limiting
 
 - Optional response cache for `/search` using Redis first with bounded in-memory fallback.
@@ -45,6 +66,13 @@ MARKETLY_RATE_LIMIT_FB_DELETE_PER_HOUR=20
 
 MARKETLY_SEARCH_FETCH_CACHE_MAX_ITEMS=32
 MARKETLY_SEARCH_PAGINATION_CACHE_MAX_ITEMS=8
+
+MARKETLY_ALERTS_SEARCH_LIMIT=20
+MARKETLY_VALUATION_LOOKBACK_DAYS=120
+MARKETLY_OPENAI_MODEL=gpt-5-mini
+MARKETLY_OPENAI_TIMEOUT_SECONDS=25
+OPENAI_API_KEY=
+OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
 ## Facebook speed tuning

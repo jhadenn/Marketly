@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import {
+  BellRing,
+  Bot,
   Bookmark,
   ChevronDown,
   Loader2,
@@ -83,6 +85,24 @@ type Money = {
   currency: string;
 };
 
+type Valuation = {
+  verdict: "underpriced" | "fair" | "overpriced" | "insufficient_data";
+  estimated_low?: number | null;
+  estimated_high?: number | null;
+  median_price?: number | null;
+  currency: string;
+  confidence: number;
+  sample_count: number;
+  explanation?: string | null;
+};
+
+type Risk = {
+  level: "low" | "medium" | "high";
+  score: number;
+  reasons: string[];
+  explanation?: string | null;
+};
+
 type Listing = {
   source: string;
   source_listing_id: string;
@@ -97,6 +117,8 @@ type Listing = {
   snippet?: string | null;
   score?: number;
   score_reason?: string | null;
+  valuation?: Valuation | null;
+  risk?: Risk | null;
 };
 
 type SearchResponse = {
@@ -138,7 +160,49 @@ type SavedSearch = {
   id: number;
   query: string;
   sources: string[];
+  alerts_enabled: boolean;
+  last_alert_checked_at?: string | null;
+  last_alert_notified_at?: string | null;
   created_at: string;
+};
+
+type NotificationItem = {
+  listing_key: string;
+  source: string;
+  source_listing_id: string;
+  title: string;
+  url: string;
+  price?: Money | null;
+  location?: string | null;
+  match_confidence: number;
+  why_matched: string[];
+  valuation?: Valuation | null;
+  risk?: Risk | null;
+};
+
+type SavedSearchNotification = {
+  id: number;
+  saved_search_id: number;
+  saved_search_query: string;
+  summary: string;
+  created_at: string;
+  read_at?: string | null;
+  items: NotificationItem[];
+};
+
+type CopilotShortlistItem = {
+  listing_key: string;
+  title: string;
+  reason: string;
+};
+
+type CopilotResponse = {
+  available: boolean;
+  answer: string;
+  shortlist: CopilotShortlistItem[];
+  seller_questions: string[];
+  red_flags: string[];
+  error_message?: string | null;
 };
 
 type SavedBatchPaginationEntry = {
@@ -170,6 +234,11 @@ function isSourceOption(value: string): value is SourceOption {
 function formatPrice(price?: Money | null) {
   if (!price) return "-";
   return `${price.currency} ${price.amount}`;
+}
+
+function formatMoneyCompact(amount?: number | null, currency = "CAD") {
+  if (typeof amount !== "number" || !Number.isFinite(amount)) return null;
+  return `${currency} ${Math.round(amount)}`;
 }
 
 function getListingKey(item: Listing): string {
@@ -296,6 +365,18 @@ function formatSourceLabel(source: string) {
     .join(" ");
 }
 
+function formatTimestamp(value?: string | null) {
+  if (!value) return "Just now";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function haversineMiles(a: Coordinates, b: Coordinates) {
   const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
   const earthRadiusMiles = 3958.8;
@@ -358,11 +439,17 @@ type SearchPageViewProps = {
   saved: SavedSearch[];
   savedLoading: boolean;
   savedError: string | null;
+  notifications: SavedSearchNotification[];
+  notificationsLoading: boolean;
+  notificationsError: string | null;
   activeSavedSearchId: number | null;
   fetchSavedSearches: () => Promise<SavedSearch[] | null>;
+  fetchNotifications: () => Promise<SavedSearchNotification[] | null>;
+  onMarkNotificationRead: (id: number) => Promise<void>;
   runAllSavedSearches: (savedSearches: SavedSearch[]) => Promise<void>;
   onRunSavedSearch: (id: number) => Promise<void>;
   onDeleteSavedSearch: (id: number) => Promise<void>;
+  onToggleSavedSearchAlerts: (entry: SavedSearch) => Promise<void>;
   openEdit: (entry: SavedSearch) => void;
   editing: SavedSearch | null;
   closeEdit: () => void;
@@ -372,6 +459,8 @@ type SearchPageViewProps = {
   setEditQuery: React.Dispatch<React.SetStateAction<string>>;
   editSources: SourceOption[];
   toggleEditSource: (source: SourceOption) => void;
+  editAlertsEnabled: boolean;
+  setEditAlertsEnabled: React.Dispatch<React.SetStateAction<boolean>>;
   onSaveEdit: () => Promise<void>;
   facebookConfigStatus: FacebookConnectorStatus | null;
   facebookConfigLoading: boolean;
@@ -385,6 +474,15 @@ type SearchPageViewProps = {
   onVerifyFacebookCookies: () => Promise<void>;
   onDeleteFacebookCookies: () => Promise<void>;
   onFacebookCookieFileSelected: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  activeQuery: string;
+  copilotOpen: boolean;
+  toggleCopilotOpen: () => void;
+  copilotQuestion: string;
+  setCopilotQuestion: React.Dispatch<React.SetStateAction<string>>;
+  copilotLoading: boolean;
+  copilotError: string | null;
+  copilotResponse: CopilotResponse | null;
+  onAskCopilot: (questionOverride?: string) => Promise<void>;
 };
 
 function GlassPanel({
@@ -462,7 +560,19 @@ type SavedSearchRailProps = Pick<
   | "runAllSavedSearches"
   | "onRunSavedSearch"
   | "onDeleteSavedSearch"
+  | "onToggleSavedSearchAlerts"
   | "openEdit"
+>;
+
+type AlertsRailProps = Pick<
+  SearchPageViewProps,
+  | "authLoading"
+  | "user"
+  | "notifications"
+  | "notificationsLoading"
+  | "notificationsError"
+  | "fetchNotifications"
+  | "onMarkNotificationRead"
 >;
 
 type ResultsPanelProps = Pick<
@@ -486,6 +596,15 @@ type ResultsPanelProps = Pick<
   | "sentinelRef"
   | "loadingMore"
   | "hasMore"
+  | "activeQuery"
+  | "copilotOpen"
+  | "toggleCopilotOpen"
+  | "copilotQuestion"
+  | "setCopilotQuestion"
+  | "copilotLoading"
+  | "copilotError"
+  | "copilotResponse"
+  | "onAskCopilot"
 >;
 
 function SearchPageView(props: SearchPageViewProps) {
@@ -634,6 +753,7 @@ function SearchPageView(props: SearchPageViewProps) {
         <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
           <aside className="space-y-4 xl:sticky xl:top-24 xl:self-start">
             <SearchControlsRail {...props} />
+            <AlertsRail {...props} />
             <SavedSearchRail {...props} />
           </aside>
 
@@ -911,7 +1031,7 @@ function SavedSearchRail(props: SavedSearchRailProps) {
                 : "Log in to view and run saved searches."}
           </p>
           <p className="mt-1 text-xs text-zinc-500">
-            Saved searches can auto-load a multi-query feed when you come back.
+            Saved searches can auto-load a multi-query feed and feed the alert digest.
           </p>
         </div>
       ) : (
@@ -927,7 +1047,19 @@ function SavedSearchRail(props: SavedSearchRailProps) {
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <p className="line-clamp-1 text-sm font-medium text-zinc-100">{entry.query}</p>
-                  <p className="mt-1 text-[11px] text-zinc-500">Saved</p>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+                    <span>Saved</span>
+                    <span
+                      className={cn(
+                        "rounded-full border px-1.5 py-0.5",
+                        entry.alerts_enabled
+                          ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-100"
+                          : "border-white/10 bg-white/[0.02] text-zinc-400",
+                      )}
+                    >
+                      {entry.alerts_enabled ? "Alerts on" : "Alerts off"}
+                    </span>
+                  </div>
                 </div>
                 {props.activeSavedSearchId === entry.id ? (
                   <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-zinc-300">
@@ -958,6 +1090,18 @@ function SavedSearchRail(props: SavedSearchRailProps) {
                   Edit
                 </button>
                 <button
+                  className={cn(
+                    "rounded-lg border px-3 py-1.5 text-xs transition",
+                    entry.alerts_enabled
+                      ? "border-emerald-300/25 bg-emerald-400/10 text-emerald-100 hover:border-emerald-300/40"
+                      : "border-white/10 bg-white/[0.02] text-zinc-200 hover:border-white/20 hover:bg-white/[0.05]",
+                  )}
+                  type="button"
+                  onClick={() => void props.onToggleSavedSearchAlerts(entry)}
+                >
+                  {entry.alerts_enabled ? "Disable alerts" : "Enable alerts"}
+                </button>
+                <button
                   className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-200 transition hover:border-red-300/30 hover:bg-red-400/10 hover:text-red-100"
                   type="button"
                   onClick={() => void props.onDeleteSavedSearch(entry.id)}
@@ -965,6 +1109,123 @@ function SavedSearchRail(props: SavedSearchRailProps) {
                   Delete
                 </button>
               </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </GlassPanel>
+  );
+}
+
+function AlertsRail(props: AlertsRailProps) {
+  const unreadCount = props.notifications.filter((entry) => !entry.read_at).length;
+
+  return (
+    <GlassPanel className="p-4 sm:p-5">
+      <div className="mb-4 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <BellRing className="size-4 text-zinc-400" />
+          <p className="font-mono text-xs uppercase tracking-[0.18em] text-zinc-400">
+            Alerts
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="rounded-full border border-white/10 bg-white/[0.02] px-2.5 py-1 text-[11px] text-zinc-300">
+            {unreadCount} unread
+          </span>
+          <button
+            className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.02] px-2.5 py-1 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={() => void props.fetchNotifications()}
+            disabled={props.notificationsLoading}
+            type="button"
+          >
+            <RefreshCw className={cn("size-3.5", props.notificationsLoading && "animate-spin")} />
+            {props.notificationsLoading ? "Refreshing" : "Refresh"}
+          </button>
+        </div>
+      </div>
+
+      {props.notificationsError ? (
+        <div className="mb-3 rounded-xl border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-100">
+          {props.notificationsError}
+        </div>
+      ) : null}
+
+      {!props.user ? (
+        <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-4">
+          <p className="text-sm text-zinc-300">
+            {props.authLoading ? "Checking your account..." : "Log in to receive alert digests."}
+          </p>
+          <p className="mt-1 text-xs text-zinc-500">
+            Daily digests only include new high-confidence matches from alert-enabled saved searches.
+          </p>
+        </div>
+      ) : props.notifications.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-4">
+          <p className="text-sm text-zinc-300">No alert digests yet.</p>
+          <p className="mt-1 text-xs text-zinc-500">
+            Enable alerts on a saved search and the next digest will show up here.
+          </p>
+        </div>
+      ) : (
+        <ul className="space-y-2">
+          {props.notifications.map((notification) => (
+            <li
+              key={notification.id}
+              className={cn(
+                "rounded-xl border p-3 transition",
+                notification.read_at
+                  ? "border-white/10 bg-white/[0.02]"
+                  : "border-emerald-300/20 bg-emerald-400/[0.06]",
+              )}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="line-clamp-2 text-sm font-medium text-zinc-100">
+                    {notification.summary}
+                  </p>
+                  <p className="mt-1 text-[11px] text-zinc-500">
+                    {notification.saved_search_query} | {formatTimestamp(notification.created_at)}
+                  </p>
+                </div>
+                {!notification.read_at ? (
+                  <button
+                    type="button"
+                    className="rounded-full border border-emerald-300/25 bg-emerald-400/10 px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-emerald-100 transition hover:border-emerald-300/40"
+                    onClick={() => void props.onMarkNotificationRead(notification.id)}
+                  >
+                    Read
+                  </button>
+                ) : (
+                  <span className="rounded-full border border-white/10 bg-white/[0.02] px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-zinc-400">
+                    Read
+                  </span>
+                )}
+              </div>
+
+              <ul className="mt-3 space-y-1.5">
+                {notification.items.slice(0, 3).map((item) => (
+                  <li key={`${notification.id}-${item.listing_key}`}>
+                    <a
+                      href={item.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="block rounded-lg border border-white/10 bg-black/20 px-3 py-2 transition hover:border-white/20 hover:bg-white/[0.03]"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="line-clamp-1 text-xs font-medium text-zinc-100">{item.title}</p>
+                          <p className="mt-1 text-[11px] text-zinc-500">
+                            {formatSourceLabel(item.source)} | {Math.round(item.match_confidence * 100)}% match
+                          </p>
+                        </div>
+                        <span className="text-[11px] text-zinc-300">{formatPrice(item.price)}</span>
+                      </div>
+                    </a>
+                  </li>
+                ))}
+              </ul>
             </li>
           ))}
         </ul>
@@ -986,9 +1247,31 @@ function ResultsPanel({
   sentinelRef,
   loadingMore,
   hasMore,
+  activeQuery,
+  copilotOpen,
+  toggleCopilotOpen,
+  copilotQuestion,
+  setCopilotQuestion,
+  copilotLoading,
+  copilotError,
+  copilotResponse,
+  onAskCopilot,
 }: ResultsPanelProps) {
   return (
     <section className="space-y-4">
+      <CopilotPanel
+        activeQuery={activeQuery}
+        filteredResults={filteredResults}
+        copilotOpen={copilotOpen}
+        toggleCopilotOpen={toggleCopilotOpen}
+        copilotQuestion={copilotQuestion}
+        setCopilotQuestion={setCopilotQuestion}
+        copilotLoading={copilotLoading}
+        copilotError={copilotError}
+        copilotResponse={copilotResponse}
+        onAskCopilot={onAskCopilot}
+      />
+
       {error ? (
         <GlassPanel className="border-red-400/20 bg-red-500/10 p-4 text-red-100">
           <p className="text-sm font-medium">Search error</p>
@@ -1142,6 +1425,8 @@ function EditSavedSearchModal(
     | "setEditQuery"
     | "editSources"
     | "toggleEditSource"
+    | "editAlertsEnabled"
+    | "setEditAlertsEnabled"
     | "onSaveEdit"
   >,
 ) {
@@ -1210,6 +1495,25 @@ function EditSavedSearchModal(
               <p className="text-xs text-red-300">Select at least one source.</p>
             ) : null}
           </div>
+
+          <label className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2.5">
+            <div>
+              <p className="text-sm font-medium text-zinc-100">AI alerts</p>
+              <p className="text-xs text-zinc-500">Include this search in the daily alert digest.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => props.setEditAlertsEnabled((prev) => !prev)}
+              className={cn(
+                "inline-flex items-center rounded-full border px-3 py-1 text-xs transition",
+                props.editAlertsEnabled
+                  ? "border-emerald-300/30 bg-emerald-400/10 text-emerald-100"
+                  : "border-white/10 bg-white/[0.02] text-zinc-300",
+              )}
+            >
+              {props.editAlertsEnabled ? "Enabled" : "Disabled"}
+            </button>
+          </label>
 
           <div className="flex items-center justify-end gap-2">
             <button
@@ -1393,6 +1697,42 @@ function MarketplaceSourceBadge({ source }: { source: string }) {
   );
 }
 
+function InsightPill({
+  label,
+  tone,
+}: {
+  label: string;
+  tone: "emerald" | "amber" | "red" | "slate";
+}) {
+  const toneClasses = {
+    emerald: "border-emerald-300/25 bg-emerald-400/10 text-emerald-100",
+    amber: "border-amber-300/25 bg-amber-300/10 text-amber-100",
+    red: "border-red-300/25 bg-red-400/10 text-red-100",
+    slate: "border-white/10 bg-white/[0.03] text-zinc-300",
+  }[tone];
+
+  return (
+    <span className={cn("rounded-full border px-2 py-0.5 text-[10px] font-medium", toneClasses)}>
+      {label}
+    </span>
+  );
+}
+
+function valuationTone(valuation?: Valuation | null): "emerald" | "amber" | "red" | "slate" {
+  if (!valuation) return "slate";
+  if (valuation.verdict === "underpriced") return "emerald";
+  if (valuation.verdict === "overpriced") return "red";
+  if (valuation.verdict === "fair") return "amber";
+  return "slate";
+}
+
+function riskTone(risk?: Risk | null): "emerald" | "amber" | "red" | "slate" {
+  if (!risk) return "slate";
+  if (risk.level === "high") return "red";
+  if (risk.level === "medium") return "amber";
+  return "emerald";
+}
+
 function MarketplaceResultCard({
   item,
   deviceCoords,
@@ -1451,9 +1791,38 @@ function MarketplaceResultCard({
             {item.location || `${formatSourceLabel(item.source)} listing`}
           </p>
 
+          <div className="flex flex-wrap gap-1.5">
+            {item.valuation ? (
+              <InsightPill
+                label={
+                  item.valuation.verdict === "insufficient_data"
+                    ? "Value: pending"
+                    : `Value: ${item.valuation.verdict.replace("_", " ")}`
+                }
+                tone={valuationTone(item.valuation)}
+              />
+            ) : null}
+            {item.risk ? (
+              <InsightPill label={`Risk: ${item.risk.level}`} tone={riskTone(item.risk)} />
+            ) : null}
+          </div>
+
           <div className="mt-auto space-y-1">
             {typeof item.score === "number" ? (
               <p className="text-[11px] text-zinc-500">Score {item.score.toFixed(2)}</p>
+            ) : null}
+            {item.valuation?.explanation ? (
+              <p className="line-clamp-2 text-xs leading-relaxed text-zinc-400">
+                {item.valuation.explanation}
+                {item.valuation.estimated_low != null && item.valuation.estimated_high != null
+                  ? ` | ${formatMoneyCompact(item.valuation.estimated_low, item.valuation.currency)}-${formatMoneyCompact(item.valuation.estimated_high, item.valuation.currency)}`
+                  : ""}
+              </p>
+            ) : null}
+            {item.risk?.reasons?.[0] && item.risk.level !== "low" ? (
+              <p className="line-clamp-2 text-xs leading-relaxed text-amber-100/80">
+                {item.risk.reasons[0]}
+              </p>
             ) : null}
             {item.condition ? (
               <p className="line-clamp-1 text-[11px] uppercase tracking-[0.12em] text-zinc-500">
@@ -1467,6 +1836,187 @@ function MarketplaceResultCard({
         </div>
       </a>
     </li>
+  );
+}
+
+function CopilotPanel({
+  activeQuery,
+  filteredResults,
+  copilotOpen,
+  toggleCopilotOpen,
+  copilotQuestion,
+  setCopilotQuestion,
+  copilotLoading,
+  copilotError,
+  copilotResponse,
+  onAskCopilot,
+}: Pick<
+  SearchPageViewProps,
+  | "activeQuery"
+  | "filteredResults"
+  | "copilotOpen"
+  | "toggleCopilotOpen"
+  | "copilotQuestion"
+  | "setCopilotQuestion"
+  | "copilotLoading"
+  | "copilotError"
+  | "copilotResponse"
+  | "onAskCopilot"
+>) {
+  const listingMap = useMemo(
+    () => new Map(filteredResults.map((item) => [getListingKey(item), item])),
+    [filteredResults],
+  );
+  const hasListings = filteredResults.length > 0 && activeQuery.trim().length > 0;
+  const presets = [
+    "Which is the best value?",
+    "What should I ask the seller?",
+    "What are the red flags?",
+  ];
+
+  return (
+    <GlassPanel className="overflow-hidden">
+      <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+        <div className="flex items-center gap-2">
+          <Bot className="size-4 text-zinc-300" />
+          <div>
+            <p className="font-mono text-xs uppercase tracking-[0.18em] text-zinc-500">Copilot</p>
+            <p className="text-sm text-zinc-300">Ask about the listings currently on screen.</p>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={toggleCopilotOpen}
+          className="rounded-full border border-white/10 bg-white/[0.02] px-3 py-1 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05]"
+        >
+          {copilotOpen ? "Collapse" : "Open"}
+        </button>
+      </div>
+
+      {copilotOpen ? (
+        <div className="space-y-4 p-4">
+          <div className="flex flex-wrap gap-2">
+            {presets.map((preset) => (
+              <button
+                key={preset}
+                type="button"
+                className="rounded-full border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => {
+                  setCopilotQuestion(preset);
+                  void onAskCopilot(preset);
+                }}
+                disabled={!hasListings || copilotLoading}
+              >
+                {preset}
+              </button>
+            ))}
+          </div>
+
+          <div className="space-y-2">
+            <textarea
+              className="min-h-[108px] w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-white/20 focus:outline-none"
+              placeholder="Ask about the currently loaded listings..."
+              value={copilotQuestion}
+              onChange={(event) => setCopilotQuestion(event.target.value)}
+            />
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-zinc-500">
+                Uses the top {Math.min(filteredResults.length, 25)} visible listings from this search.
+              </p>
+              <button
+                type="button"
+                className="inline-flex items-center gap-2 rounded-xl bg-white px-4 py-2 text-sm font-medium text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => void onAskCopilot()}
+                disabled={!hasListings || copilotLoading || !copilotQuestion.trim()}
+              >
+                {copilotLoading ? <Loader2 className="size-4 animate-spin" /> : <Bot className="size-4" />}
+                {copilotLoading ? "Thinking..." : "Ask copilot"}
+              </button>
+            </div>
+          </div>
+
+          {copilotError ? (
+            <div className="rounded-xl border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-100">
+              {copilotError}
+            </div>
+          ) : null}
+
+          {copilotResponse ? (
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
+              <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                <p className="text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">Answer</p>
+                <p className="mt-2 text-sm leading-relaxed text-zinc-100">{copilotResponse.answer}</p>
+                {!copilotResponse.available && copilotResponse.error_message ? (
+                  <p className="mt-2 text-xs text-zinc-500">{copilotResponse.error_message}</p>
+                ) : null}
+              </div>
+
+              <div className="space-y-4">
+                <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                  <p className="text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">Shortlist</p>
+                  <ul className="mt-2 space-y-2">
+                    {copilotResponse.shortlist.length === 0 ? (
+                      <li className="text-sm text-zinc-400">No shortlist yet.</li>
+                    ) : (
+                      copilotResponse.shortlist.map((entry) => {
+                        const linkedListing = listingMap.get(entry.listing_key);
+                        const content = (
+                          <>
+                            <p className="text-sm font-medium text-zinc-100">{entry.title}</p>
+                            <p className="mt-1 text-xs text-zinc-400">{entry.reason}</p>
+                          </>
+                        );
+                        return (
+                          <li key={entry.listing_key}>
+                            {linkedListing ? (
+                              <a
+                                href={linkedListing.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="block rounded-xl border border-white/10 bg-white/[0.02] p-3 transition hover:border-white/20 hover:bg-white/[0.04]"
+                              >
+                                {content}
+                              </a>
+                            ) : (
+                              <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
+                                {content}
+                              </div>
+                            )}
+                          </li>
+                        );
+                      })
+                    )}
+                  </ul>
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                    <p className="text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">Seller questions</p>
+                    <ul className="mt-2 space-y-1.5 text-sm text-zinc-300">
+                      {copilotResponse.seller_questions.length === 0 ? (
+                        <li className="text-zinc-500">No questions suggested.</li>
+                      ) : (
+                        copilotResponse.seller_questions.map((entry) => <li key={entry}>- {entry}</li>)
+                      )}
+                    </ul>
+                  </div>
+                  <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                    <p className="text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">Red flags</p>
+                    <ul className="mt-2 space-y-1.5 text-sm text-zinc-300">
+                      {copilotResponse.red_flags.length === 0 ? (
+                        <li className="text-zinc-500">No extra red flags called out.</li>
+                      ) : (
+                        copilotResponse.red_flags.map((entry) => <li key={entry}>- {entry}</li>)
+                      )}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </GlassPanel>
   );
 }
 
@@ -1517,6 +2067,9 @@ export default function HomePage() {
   const [saved, setSaved] = useState<SavedSearch[]>([]);
   const [savedLoading, setSavedLoading] = useState(false);
   const [savedError, setSavedError] = useState<string | null>(null);
+  const [notifications, setNotifications] = useState<SavedSearchNotification[]>([]);
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
+  const [notificationsError, setNotificationsError] = useState<string | null>(null);
   const [activeSavedSearchId, setActiveSavedSearchId] = useState<number | null>(null);
   const [locationFilterText, setLocationFilterText] = useState("");
   const [travelRangeMilesInput, setTravelRangeMilesInput] = useState("");
@@ -1528,8 +2081,14 @@ export default function HomePage() {
   const [editing, setEditing] = useState<SavedSearch | null>(null);
   const [editQuery, setEditQuery] = useState("");
   const [editSources, setEditSources] = useState<SourceOption[]>([]);
+  const [editAlertsEnabled, setEditAlertsEnabled] = useState(true);
   const [editError, setEditError] = useState<string | null>(null);
   const [editSaving, setEditSaving] = useState(false);
+  const [copilotOpen, setCopilotOpen] = useState(true);
+  const [copilotQuestion, setCopilotQuestion] = useState("");
+  const [copilotLoading, setCopilotLoading] = useState(false);
+  const [copilotError, setCopilotError] = useState<string | null>(null);
+  const [copilotResponse, setCopilotResponse] = useState<CopilotResponse | null>(null);
   const [facebookConfigStatus, setFacebookConfigStatus] = useState<FacebookConnectorStatus | null>(null);
   const [facebookConfigLoading, setFacebookConfigLoading] = useState(false);
   const [facebookConfigError, setFacebookConfigError] = useState<string | null>(null);
@@ -1666,6 +2225,8 @@ export default function HomePage() {
       } else {
         setSearchLoading(true);
         setError(null);
+        setCopilotError(null);
+        setCopilotResponse(null);
         setRawResults([]);
         setResults([]);
         setNextOffset(null);
@@ -1984,6 +2545,37 @@ export default function HomePage() {
     }
   }
 
+  async function fetchNotifications(): Promise<SavedSearchNotification[] | null> {
+    setNotificationsLoading(true);
+    setNotificationsError(null);
+
+    try {
+      if (!accessToken) {
+        setNotifications([]);
+        return [];
+      }
+
+      const res = await fetch(`${API_BASE}/me/notifications`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        cache: "no-store",
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`GET /me/notifications failed (${res.status}): ${text}`);
+      }
+
+      const json = (await res.json()) as SavedSearchNotification[];
+      setNotifications(json);
+      return json;
+    } catch (err: unknown) {
+      setNotificationsError(err instanceof Error ? err.message : "Failed to load notifications");
+      return null;
+    } finally {
+      setNotificationsLoading(false);
+    }
+  }
+
   const fetchSavedSearchPage = useCallback(async (
     entry: SavedSearch | SavedBatchPaginationEntry,
     {
@@ -2207,6 +2799,8 @@ export default function HomePage() {
     setSearchLoading(true);
     setLoadingMore(false);
     setError(null);
+    setCopilotError(null);
+    setCopilotResponse(null);
     setRawResults([]);
     setResults([]);
     setNextOffset(null);
@@ -2319,6 +2913,7 @@ export default function HomePage() {
     if (user) {
       void (async () => {
         const fetched = await fetchSavedSearches();
+        void fetchNotifications();
         if (!fetched) return;
 
         if (autoLoadedSavedForUserRef.current === user.id) return;
@@ -2331,6 +2926,7 @@ export default function HomePage() {
     } else {
       autoLoadedSavedForUserRef.current = null;
       setSaved([]);
+      setNotifications([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, accessToken]);
@@ -2362,6 +2958,7 @@ export default function HomePage() {
       const payload = {
         query: q.trim(),
         sources,
+        alerts_enabled: true,
       };
 
       const res = await fetch(`${API_BASE}/saved-searches`, {
@@ -2406,6 +3003,37 @@ export default function HomePage() {
       await fetchSavedSearches();
     } catch (err: unknown) {
       setSavedError(err instanceof Error ? err.message : "Failed to delete saved search");
+    }
+  }
+
+  async function onToggleSavedSearchAlerts(entry: SavedSearch) {
+    setSavedError(null);
+
+    try {
+      if (!accessToken) throw new Error("Please log in to update alert settings.");
+
+      const res = await fetch(`${API_BASE}/saved-searches/${entry.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          query: entry.query,
+          sources: entry.sources,
+          alerts_enabled: !entry.alerts_enabled,
+        }),
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`PATCH /saved-searches/${entry.id} failed (${res.status}): ${text}`);
+      }
+
+      const updated = (await res.json()) as SavedSearch;
+      setSaved((prev) => prev.map((candidate) => (candidate.id === updated.id ? updated : candidate)));
+    } catch (err: unknown) {
+      setSavedError(err instanceof Error ? err.message : "Failed to update alert settings");
     }
   }
 
@@ -2456,6 +3084,7 @@ export default function HomePage() {
     setEditing(entry);
     setEditQuery(entry.query);
     setEditSources(entry.sources.filter(isSourceOption));
+    setEditAlertsEnabled(entry.alerts_enabled);
     setEditError(null);
   }
 
@@ -2463,6 +3092,7 @@ export default function HomePage() {
     setEditing(null);
     setEditError(null);
     setEditSaving(false);
+    setEditAlertsEnabled(true);
   }
 
   function toggleEditSource(source: SourceOption) {
@@ -2502,6 +3132,7 @@ export default function HomePage() {
         body: JSON.stringify({
           query: trimmedQuery,
           sources: editSources,
+          alerts_enabled: editAlertsEnabled,
         }),
       });
 
@@ -2545,6 +3176,76 @@ export default function HomePage() {
       setEditSaving(false);
     }
   }
+
+  async function onMarkNotificationRead(id: number) {
+    setNotificationsError(null);
+
+    try {
+      if (!accessToken) throw new Error("Please log in to manage notifications.");
+      const res = await fetch(`${API_BASE}/me/notifications/${id}/read`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`POST /me/notifications/${id}/read failed (${res.status}): ${text}`);
+      }
+      const updated = (await res.json()) as SavedSearchNotification;
+      setNotifications((prev) => prev.map((entry) => (entry.id === updated.id ? updated : entry)));
+    } catch (err: unknown) {
+      setNotificationsError(err instanceof Error ? err.message : "Failed to mark notification as read");
+    }
+  }
+
+  const onAskCopilot = useCallback(async (questionOverride?: string) => {
+    const question = (questionOverride ?? copilotQuestion).trim();
+    const query = (activeQuery || q).trim();
+    const listingContext = filteredResults.slice(0, 25).map((item) => ({
+      listing_key: getListingKey(item),
+      source: item.source,
+      source_listing_id: item.source_listing_id,
+      title: item.title,
+      price: item.price ?? null,
+      location: item.location ?? null,
+      snippet: item.snippet ?? null,
+      score: item.score ?? null,
+      valuation: item.valuation ?? null,
+      risk: item.risk ?? null,
+    }));
+
+    if (!question || !query || listingContext.length === 0) {
+      setCopilotError("Run a search first, then ask about the visible listings.");
+      return;
+    }
+
+    setCopilotLoading(true);
+    setCopilotError(null);
+    try {
+      const res = await fetch(`${API_BASE}/copilot/query`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query,
+          user_question: question,
+          listings: listingContext,
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`POST /copilot/query failed (${res.status}): ${text}`);
+      }
+      const json = (await res.json()) as CopilotResponse;
+      setCopilotResponse(json);
+      if (!json.available && json.error_message) {
+        setCopilotError(json.error_message);
+      }
+    } catch (err: unknown) {
+      setCopilotResponse(null);
+      setCopilotError(err instanceof Error ? err.message : "Failed to query copilot");
+    } finally {
+      setCopilotLoading(false);
+    }
+  }, [API_BASE, activeQuery, copilotQuestion, filteredResults, q]);
 
   const hasSourceErrorEntries = Object.keys(sourceErrors).length > 0;
   const summarySources = hasSearched && activeSources.length > 0 ? activeSources : sources;
@@ -2597,11 +3298,17 @@ export default function HomePage() {
       saved={saved}
       savedLoading={savedLoading}
       savedError={savedError}
+      notifications={notifications}
+      notificationsLoading={notificationsLoading}
+      notificationsError={notificationsError}
       activeSavedSearchId={activeSavedSearchId}
       fetchSavedSearches={fetchSavedSearches}
+      fetchNotifications={fetchNotifications}
+      onMarkNotificationRead={onMarkNotificationRead}
       runAllSavedSearches={runAllSavedSearches}
       onRunSavedSearch={onRunSavedSearch}
       onDeleteSavedSearch={onDeleteSavedSearch}
+      onToggleSavedSearchAlerts={onToggleSavedSearchAlerts}
       openEdit={openEdit}
       editing={editing}
       closeEdit={closeEdit}
@@ -2611,6 +3318,8 @@ export default function HomePage() {
       setEditQuery={setEditQuery}
       editSources={editSources}
       toggleEditSource={toggleEditSource}
+      editAlertsEnabled={editAlertsEnabled}
+      setEditAlertsEnabled={setEditAlertsEnabled}
       onSaveEdit={onSaveEdit}
       facebookConfigStatus={facebookConfigStatus}
       facebookConfigLoading={facebookConfigLoading}
@@ -2624,6 +3333,15 @@ export default function HomePage() {
       onVerifyFacebookCookies={onVerifyFacebookCookies}
       onDeleteFacebookCookies={onDeleteFacebookCookies}
       onFacebookCookieFileSelected={onFacebookCookieFileSelected}
+      activeQuery={activeQuery}
+      copilotOpen={copilotOpen}
+      toggleCopilotOpen={() => setCopilotOpen((prev) => !prev)}
+      copilotQuestion={copilotQuestion}
+      setCopilotQuestion={setCopilotQuestion}
+      copilotLoading={copilotLoading}
+      copilotError={copilotError}
+      copilotResponse={copilotResponse}
+      onAskCopilot={onAskCopilot}
     />
   );
 }
