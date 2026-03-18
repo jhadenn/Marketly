@@ -56,7 +56,7 @@ const PREVIEW_SAMPLE_LISTINGS: PreviewListing[] = [
     price: "CAD 6,500",
     location: "North York, ON",
     source: "kijiji",
-    imagePath: "/preview-listing-2.jpg",
+    imagePath: "/example-listing-2.jpg",
     fallbackImagePath: "/example-listing-2.jpg",
   },
   {

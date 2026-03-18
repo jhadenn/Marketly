@@ -11,9 +11,9 @@ from app.models.saved_search import SavedSearch
 from app.models.saved_search_notification import SavedSearchNotification
 from app.schemas.notifications import SavedSearchNotificationOut
 from app.services.facebook_credentials import decrypt_cookie_payload, get_user_facebook_credential
+from app.services.gemini_client import generate_alert_summary
 from app.services.listing_insights import enrich_listings_with_insights, listing_fingerprint, listing_key
 from app.services.listing_snapshots import persist_listing_snapshots, previously_seen_fingerprints
-from app.services.openai_client import generate_alert_summary
 from app.services.search_service import FacebookRuntimeContext, unified_search
 
 logger = logging.getLogger(__name__)

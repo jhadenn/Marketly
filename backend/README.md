@@ -18,6 +18,7 @@
   - `GET /me/notifications`
   - `POST /me/notifications/{id}/read`
 - The shopping copilot is available at `POST /copilot/query`.
+- Gemini is the only configured AI provider. For low-cost local development, use a Gemini Developer API key from Google AI Studio and set `MARKETLY_GEMINI_MODEL=gemini-2.5-flash-lite`.
 - Run the alert digest job from cron or your scheduler with:
 
 ```bash
@@ -69,10 +70,10 @@ MARKETLY_SEARCH_PAGINATION_CACHE_MAX_ITEMS=8
 
 MARKETLY_ALERTS_SEARCH_LIMIT=20
 MARKETLY_VALUATION_LOOKBACK_DAYS=120
-MARKETLY_OPENAI_MODEL=gpt-5-mini
-MARKETLY_OPENAI_TIMEOUT_SECONDS=25
-OPENAI_API_KEY=
-OPENAI_BASE_URL=https://api.openai.com/v1
+MARKETLY_GEMINI_MODEL=gemini-2.5-flash-lite
+MARKETLY_GEMINI_TIMEOUT_SECONDS=25
+GEMINI_API_KEY=
+GEMINI_API_BASE=https://generativelanguage.googleapis.com/v1beta
 ```
 
 ## Facebook speed tuning

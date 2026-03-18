@@ -11,62 +11,69 @@ from app.schemas.copilot import CopilotQueryResponse
 logger = logging.getLogger(__name__)
 
 
-def openai_is_configured() -> bool:
-    return bool((settings.OPENAI_API_KEY or "").strip())
+def gemini_is_configured() -> bool:
+    return bool((settings.GEMINI_API_KEY or "").strip())
 
 
-def _responses_url() -> str:
-    base = (settings.OPENAI_BASE_URL or "https://api.openai.com/v1").rstrip("/")
-    return f"{base}/responses"
+def _generate_content_url() -> str:
+    base = (settings.GEMINI_API_BASE or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+    model = (settings.MARKETLY_GEMINI_MODEL or "gemini-2.5-flash-lite").strip()
+    return f"{base}/models/{model}:generateContent"
 
 
-async def request_openai_structured_json(
+async def request_gemini_structured_json(
     *,
-    schema_name: str,
     schema: dict,
     instructions: str,
     prompt: str,
 ) -> dict:
-    if not openai_is_configured():
-        raise RuntimeError("OpenAI API key is not configured.")
+    if not gemini_is_configured():
+        raise RuntimeError("Gemini API key is not configured.")
 
     payload = {
-        "model": settings.MARKETLY_OPENAI_MODEL,
-        "instructions": instructions,
-        "input": prompt,
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": schema_name,
-                "schema": schema,
-                "strict": True,
+        "systemInstruction": {
+            "parts": [
+                {
+                    "text": instructions,
+                }
+            ]
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": prompt,
+                    }
+                ],
             }
+        ],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseJsonSchema": schema,
         },
     }
     headers = {
-        "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+        "x-goog-api-key": settings.GEMINI_API_KEY or "",
         "Content-Type": "application/json",
     }
 
-    async with httpx.AsyncClient(timeout=settings.MARKETLY_OPENAI_TIMEOUT_SECONDS) as client:
-        response = await client.post(_responses_url(), headers=headers, json=payload)
+    async with httpx.AsyncClient(timeout=settings.MARKETLY_GEMINI_TIMEOUT_SECONDS) as client:
+        response = await client.post(_generate_content_url(), headers=headers, json=payload)
     response.raise_for_status()
     data = response.json()
 
-    output_text = data.get("output_text")
-    if isinstance(output_text, str) and output_text.strip():
-        return json.loads(output_text)
-
     output_parts: list[str] = []
-    for item in data.get("output", []) or []:
-        for content_item in item.get("content", []) or []:
-            text = content_item.get("text")
+    for candidate in data.get("candidates", []) or []:
+        content = candidate.get("content") or {}
+        for part in content.get("parts", []) or []:
+            text = part.get("text")
             if isinstance(text, str) and text.strip():
                 output_parts.append(text)
     if output_parts:
         return json.loads("\n".join(output_parts))
 
-    raise RuntimeError("OpenAI response did not include structured text output.")
+    raise RuntimeError("Gemini response did not include structured text output.")
 
 
 async def generate_alert_summary(query: str, items: list[dict]) -> str:
@@ -74,7 +81,7 @@ async def generate_alert_summary(query: str, items: list[dict]) -> str:
         return f"No strong new matches were found for '{query}'."
 
     fallback = _fallback_alert_summary(query, items)
-    if not openai_is_configured():
+    if not gemini_is_configured():
         return fallback
 
     schema = {
@@ -103,8 +110,7 @@ async def generate_alert_summary(query: str, items: list[dict]) -> str:
         ensure_ascii=True,
     )
     try:
-        result = await request_openai_structured_json(
-            schema_name="alert_digest_summary",
+        result = await request_gemini_structured_json(
             schema=schema,
             instructions=(
                 "Write one concise sentence summarizing the best new Marketplace matches. "
@@ -149,8 +155,8 @@ async def generate_copilot_response(
         error_message="Copilot service is unavailable.",
     )
 
-    if not openai_is_configured():
-        unavailable.error_message = "OpenAI API key is not configured."
+    if not gemini_is_configured():
+        unavailable.error_message = "Gemini API key is not configured."
         return unavailable
 
     schema = {
@@ -192,8 +198,7 @@ async def generate_copilot_response(
     )
 
     try:
-        result = await request_openai_structured_json(
-            schema_name="marketly_copilot_response",
+        result = await request_gemini_structured_json(
             schema=schema,
             instructions=(
                 "You are Marketly's shopping copilot. Answer using only the supplied listings. "

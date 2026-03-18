@@ -47,9 +47,9 @@ from app.services.response_cache import (
     set_cached_search_response,
 )
 from app.services.alerts import list_notifications, mark_notification_read
+from app.services.gemini_client import generate_copilot_response
 from app.services.listing_insights import enrich_listings_with_insights
 from app.services.listing_snapshots import persist_listing_snapshots
-from app.services.openai_client import generate_copilot_response
 from app.services.search_service import FacebookRuntimeContext, unified_search
 from app.services.supabase_ingestion import upsert_facebook_records
 

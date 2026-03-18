@@ -52,11 +52,11 @@ class Settings(BaseSettings):
     MARKETLY_SEARCH_PAGINATION_CACHE_MAX_ITEMS: int = 8
     MARKETLY_ALERTS_SEARCH_LIMIT: int = 20
     MARKETLY_VALUATION_LOOKBACK_DAYS: int = 120
-    MARKETLY_OPENAI_MODEL: str = "gpt-5-mini"
-    MARKETLY_OPENAI_TIMEOUT_SECONDS: float = 25.0
+    MARKETLY_GEMINI_MODEL: str = "gemini-2.5-flash-lite"
+    MARKETLY_GEMINI_TIMEOUT_SECONDS: float = 25.0
     MARKETLY_CREDENTIALS_ENCRYPTION_KEY: str | None = None
-    OPENAI_API_KEY: str | None = None
-    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
+    GEMINI_API_KEY: str | None = None
+    GEMINI_API_BASE: str = "https://generativelanguage.googleapis.com/v1beta"
     EBAY_ENV: str = "production"
     EBAY_CLIENT_ID: str | None = None
     EBAY_CLIENT_SECRET: str | None = None
