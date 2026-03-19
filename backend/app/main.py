@@ -800,8 +800,10 @@ def mark_notification_as_read(
 @app.post("/copilot/query", response_model=CopilotQueryResponse)
 async def copilot_query(payload: CopilotQueryRequest):
     listing_payload = [item.model_dump(mode="json") for item in payload.listings[:25]]
+    conversation_payload = [item.model_dump(mode="json") for item in payload.conversation[-20:]]
     return await generate_copilot_response(
         query=payload.query,
         user_question=payload.user_question,
         listings=listing_payload,
+        conversation=conversation_payload,
     )

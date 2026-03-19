@@ -130,3 +130,132 @@ def test_generate_copilot_response_surfaces_generation_errors(monkeypatch):
 
     assert result.available is False
     assert result.error_message == "Gemini quota exhausted"
+
+
+def test_generate_copilot_response_clears_seller_questions_and_red_flags_when_not_requested(
+    monkeypatch,
+):
+    async def fake_request(**kwargs):
+        return {
+            "answer": "The road bike is the strongest overall value.",
+            "shortlist": [
+                {
+                    "listing_key": "ebay:1",
+                    "title": "Road bike",
+                    "reason": "It is priced below comps.",
+                }
+            ],
+            "seller_questions": ["Has it been serviced recently?"],
+            "red_flags": ["Ask why the price is this low."],
+        }
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setattr("app.services.gemini_client.request_gemini_structured_json", fake_request)
+
+    result = asyncio.run(
+        generate_copilot_response(
+            query="road bike",
+            user_question="Which is the best value?",
+            listings=[{"listing_key": "ebay:1", "title": "Road bike"}],
+            conversation=[{"role": "user", "content": "Show me the strongest options."}],
+        )
+    )
+
+    assert result.available is True
+    assert result.seller_questions == []
+    assert result.red_flags == []
+
+
+def test_generate_copilot_response_keeps_seller_questions_when_requested(monkeypatch):
+    async def fake_request(**kwargs):
+        return {
+            "answer": "Ask the seller about service history and ownership.",
+            "shortlist": [],
+            "seller_questions": ["Has it been serviced recently?"],
+            "red_flags": ["The price is unusually low."],
+        }
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setattr("app.services.gemini_client.request_gemini_structured_json", fake_request)
+
+    result = asyncio.run(
+        generate_copilot_response(
+            query="road bike",
+            user_question="What should I ask the seller about this bike?",
+            listings=[{"listing_key": "ebay:1", "title": "Road bike"}],
+        )
+    )
+
+    assert result.seller_questions == ["Has it been serviced recently?"]
+    assert result.red_flags == []
+
+
+def test_generate_copilot_response_keeps_red_flags_when_requested(monkeypatch):
+    async def fake_request(**kwargs):
+        return {
+            "answer": "The low price and thin description deserve follow-up.",
+            "shortlist": [],
+            "seller_questions": ["Has it been serviced recently?"],
+            "red_flags": ["The price is unusually low."],
+        }
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setattr("app.services.gemini_client.request_gemini_structured_json", fake_request)
+
+    result = asyncio.run(
+        generate_copilot_response(
+            query="road bike",
+            user_question="What red flags do you see here?",
+            listings=[{"listing_key": "ebay:1", "title": "Road bike"}],
+        )
+    )
+
+    assert result.seller_questions == []
+    assert result.red_flags == ["The price is unusually low."]
+
+
+def test_generate_copilot_response_clears_shortlist_when_not_requested(monkeypatch):
+    async def fake_request(**kwargs):
+        return {
+            "answer": "The condition details are limited in the listing.",
+            "shortlist": [
+                {
+                    "listing_key": "ebay:1",
+                    "title": "Road bike",
+                    "reason": "It is priced below comps.",
+                }
+            ],
+            "seller_questions": [],
+            "red_flags": [],
+        }
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setattr("app.services.gemini_client.request_gemini_structured_json", fake_request)
+
+    result = asyncio.run(
+        generate_copilot_response(
+            query="road bike",
+            user_question="Tell me more about the condition of this listing.",
+            listings=[{"listing_key": "ebay:1", "title": "Road bike"}],
+        )
+    )
+
+    assert result.shortlist == []
+
+
+def test_generate_copilot_response_handles_small_talk_without_shortlist(monkeypatch):
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+
+    result = asyncio.run(
+        generate_copilot_response(
+            query="road bike",
+            user_question="hello",
+            listings=[{"listing_key": "ebay:1", "title": "Road bike"}],
+        )
+    )
+
+    assert result.available is True
+    assert result.shortlist == []
+    assert result.seller_questions == []
+    assert result.red_flags == []
+    assert "compare listings" in result.answer.lower()

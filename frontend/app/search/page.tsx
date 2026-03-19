@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import {
+  ArrowUpRight,
   BellRing,
   Bot,
   Bookmark,
@@ -16,6 +17,7 @@ import {
   Search,
   SlidersHorizontal,
   Sparkles,
+  X,
 } from "lucide-react";
 import Dither from "@/components/Dither";
 import { cn } from "@/lib/utils";
@@ -24,6 +26,19 @@ import { useAuth } from "../providers";
 const SOURCE_OPTIONS = ["kijiji", "ebay", "facebook"] as const;
 const DEFAULT_SOURCES: SourceOption[] = ["kijiji", "ebay", "facebook"];
 const DEFAULT_PAGE_SIZE = 24;
+const COPILOT_DESKTOP_BREAKPOINT = 1024;
+const COPILOT_FLOATING_MARGIN = 24;
+const COPILOT_LAUNCHER_WIDTH = 196;
+const COPILOT_LAUNCHER_HEIGHT = 72;
+const COPILOT_WINDOW_WIDTH_DEFAULT = 440;
+const COPILOT_WINDOW_WIDTH_MIN = 360;
+const COPILOT_WINDOW_WIDTH_MAX = 860;
+const COPILOT_WINDOW_HEIGHT_DEFAULT = 720;
+const COPILOT_WINDOW_HEIGHT_MIN = 480;
+const COPILOT_WINDOW_HEIGHT_MAX = 920;
+const COPILOT_WINDOW_WIDTH_STORAGE_KEY = "marketly:copilot-window-width";
+const COPILOT_WINDOW_RECT_STORAGE_KEY = "marketly:copilot-window-rect";
+const COPILOT_LAUNCHER_POSITION_STORAGE_KEY = "marketly:copilot-launcher-position";
 const SORT_OPTIONS = [
   { value: "relevance", label: "Relevance", disabled: false },
   { value: "price_asc", label: "Price: Low -> High", disabled: false },
@@ -205,6 +220,44 @@ type CopilotResponse = {
   error_message?: string | null;
 };
 
+type CopilotConversationPayload = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+type CopilotWindowRect = {
+  width: number;
+  height: number;
+  x: number;
+  y: number;
+};
+
+type CopilotLauncherPosition = {
+  x: number;
+  y: number;
+};
+
+type CopilotResizeDirection =
+  | "n"
+  | "s"
+  | "e"
+  | "w"
+  | "ne"
+  | "nw"
+  | "se"
+  | "sw";
+
+type CopilotMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  answer?: string;
+  seller_questions?: string[];
+  red_flags?: string[];
+  available?: boolean;
+  error_message?: string | null;
+};
+
 type SavedBatchPaginationEntry = {
   id: number;
   query: string;
@@ -243,6 +296,120 @@ function formatMoneyCompact(amount?: number | null, currency = "CAD") {
 
 function getListingKey(item: Listing): string {
   return `${item.source}:${item.source_listing_id || item.url}`;
+}
+
+function buildCopilotListingContext(item: Listing) {
+  return {
+    listing_key: getListingKey(item),
+    source: item.source,
+    source_listing_id: item.source_listing_id,
+    title: item.title,
+    price: item.price ?? null,
+    url: item.url,
+    condition: item.condition ?? null,
+    location: item.location ?? null,
+    snippet: item.snippet ?? null,
+    score: item.score ?? null,
+    score_reason: item.score_reason ?? null,
+    valuation: item.valuation ?? null,
+    risk: item.risk ?? null,
+  };
+}
+
+function createCopilotMessageId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function buildAssistantConversationContent(response: CopilotResponse) {
+  const sections = [response.answer.trim()];
+
+  if (response.seller_questions.length > 0) {
+    sections.push(
+      `Seller questions:\n${response.seller_questions.map((entry) => `- ${entry}`).join("\n")}`,
+    );
+  }
+
+  if (response.red_flags.length > 0) {
+    sections.push(`Red flags:\n${response.red_flags.map((entry) => `- ${entry}`).join("\n")}`);
+  }
+
+  return sections.filter(Boolean).join("\n\n");
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  if (min > max) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
+function getDefaultCopilotWindowRect(
+  viewportWidth: number,
+  viewportHeight: number,
+  widthOverride = COPILOT_WINDOW_WIDTH_DEFAULT,
+): CopilotWindowRect {
+  const maxWidth = Math.max(COPILOT_WINDOW_WIDTH_MIN, viewportWidth - COPILOT_FLOATING_MARGIN * 2);
+  const maxHeight = Math.max(COPILOT_WINDOW_HEIGHT_MIN, viewportHeight - COPILOT_FLOATING_MARGIN * 2);
+  const width = clampNumber(widthOverride, COPILOT_WINDOW_WIDTH_MIN, maxWidth);
+  const height = clampNumber(COPILOT_WINDOW_HEIGHT_DEFAULT, COPILOT_WINDOW_HEIGHT_MIN, maxHeight);
+  return {
+    width,
+    height,
+    x: Math.max(COPILOT_FLOATING_MARGIN, viewportWidth - width - COPILOT_FLOATING_MARGIN),
+    y: Math.max(COPILOT_FLOATING_MARGIN, viewportHeight - height - COPILOT_FLOATING_MARGIN),
+  };
+}
+
+function clampCopilotWindowRect(
+  rect: CopilotWindowRect,
+  viewportWidth: number,
+  viewportHeight: number,
+) {
+  const maxWidth = Math.max(COPILOT_WINDOW_WIDTH_MIN, viewportWidth - COPILOT_FLOATING_MARGIN * 2);
+  const maxHeight = Math.max(COPILOT_WINDOW_HEIGHT_MIN, viewportHeight - COPILOT_FLOATING_MARGIN * 2);
+  const width = clampNumber(rect.width, COPILOT_WINDOW_WIDTH_MIN, maxWidth);
+  const height = clampNumber(rect.height, COPILOT_WINDOW_HEIGHT_MIN, maxHeight);
+  const x = clampNumber(
+    rect.x,
+    COPILOT_FLOATING_MARGIN,
+    Math.max(COPILOT_FLOATING_MARGIN, viewportWidth - width - COPILOT_FLOATING_MARGIN),
+  );
+  const y = clampNumber(
+    rect.y,
+    COPILOT_FLOATING_MARGIN,
+    Math.max(COPILOT_FLOATING_MARGIN, viewportHeight - height - COPILOT_FLOATING_MARGIN),
+  );
+  return { width, height, x, y };
+}
+
+function getDefaultCopilotLauncherPosition(viewportWidth: number, viewportHeight: number) {
+  return {
+    x: Math.max(COPILOT_FLOATING_MARGIN, viewportWidth - COPILOT_LAUNCHER_WIDTH - COPILOT_FLOATING_MARGIN),
+    y: Math.max(COPILOT_FLOATING_MARGIN, viewportHeight - COPILOT_LAUNCHER_HEIGHT - COPILOT_FLOATING_MARGIN),
+  };
+}
+
+function clampCopilotLauncherPosition(
+  position: CopilotLauncherPosition,
+  viewportWidth: number,
+  viewportHeight: number,
+) {
+  return {
+    x: clampNumber(
+      position.x,
+      COPILOT_FLOATING_MARGIN,
+      Math.max(
+        COPILOT_FLOATING_MARGIN,
+        viewportWidth - COPILOT_LAUNCHER_WIDTH - COPILOT_FLOATING_MARGIN,
+      ),
+    ),
+    y: clampNumber(
+      position.y,
+      COPILOT_FLOATING_MARGIN,
+      Math.max(
+        COPILOT_FLOATING_MARGIN,
+        viewportHeight - COPILOT_LAUNCHER_HEIGHT - COPILOT_FLOATING_MARGIN,
+      ),
+    ),
+  };
 }
 
 function sortListingsLocal(listings: Listing[], sort: SortOption): Listing[] {
@@ -476,12 +643,29 @@ type SearchPageViewProps = {
   onFacebookCookieFileSelected: (e: React.ChangeEvent<HTMLInputElement>) => void;
   activeQuery: string;
   copilotOpen: boolean;
-  toggleCopilotOpen: () => void;
+  openCopilot: () => void;
+  closeCopilot: () => void;
   copilotQuestion: string;
   setCopilotQuestion: React.Dispatch<React.SetStateAction<string>>;
   copilotLoading: boolean;
   copilotError: string | null;
-  copilotResponse: CopilotResponse | null;
+  copilotMessages: CopilotMessage[];
+  latestShortlist: CopilotShortlistItem[];
+  copilotSelectionMode: boolean;
+  toggleCopilotSelectionMode: () => void;
+  copilotSelectedListingKeys: string[];
+  clearCopilotSelection: () => void;
+  removeListingFromCopilotSelection: (listingKey: string) => void;
+  onToggleListingSelection: (item: Listing) => void;
+  resetCopilotConversation: () => void;
+  copilotWindowRect: CopilotWindowRect;
+  copilotLauncherPosition: CopilotLauncherPosition;
+  onCopilotLauncherDragStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onCopilotWindowDragStart: (event: React.PointerEvent<HTMLDivElement>) => void;
+  onCopilotResizeStart: (
+    direction: CopilotResizeDirection,
+    event: React.PointerEvent<HTMLDivElement>,
+  ) => void;
   onAskCopilot: (questionOverride?: string) => Promise<void>;
 };
 
@@ -596,15 +780,9 @@ type ResultsPanelProps = Pick<
   | "sentinelRef"
   | "loadingMore"
   | "hasMore"
-  | "activeQuery"
-  | "copilotOpen"
-  | "toggleCopilotOpen"
-  | "copilotQuestion"
-  | "setCopilotQuestion"
-  | "copilotLoading"
-  | "copilotError"
-  | "copilotResponse"
-  | "onAskCopilot"
+  | "copilotSelectionMode"
+  | "copilotSelectedListingKeys"
+  | "onToggleListingSelection"
 >;
 
 function SearchPageView(props: SearchPageViewProps) {
@@ -612,6 +790,15 @@ function SearchPageView(props: SearchPageViewProps) {
   const heroTitle =
     heroQuery || (props.hasSearched ? "Unified results" : "All marketplaces. One search.");
   const showLiveHeroCopy = heroQuery.length > 0 || props.hasSearched;
+  const [isDesktop, setIsDesktop] = useState(false);
+
+  useEffect(() => {
+    const media = window.matchMedia(`(min-width: ${COPILOT_DESKTOP_BREAKPOINT}px)`);
+    const sync = () => setIsDesktop(media.matches);
+    sync();
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
 
   return (
     <main className="dark relative min-h-screen overflow-x-hidden bg-black text-white antialiased">
@@ -761,6 +948,39 @@ function SearchPageView(props: SearchPageViewProps) {
         </div>
       </div>
 
+      {!props.copilotOpen ? (
+        <button
+          type="button"
+          onClick={props.openCopilot}
+          onPointerDown={isDesktop ? props.onCopilotLauncherDragStart : undefined}
+          className={cn(
+            "fixed z-50 inline-flex max-w-[calc(100vw-2rem)] items-center gap-3 rounded-[24px] border border-white/10 bg-zinc-950/90 px-5 py-4 text-left text-zinc-100 shadow-2xl backdrop-blur-xl transition hover:border-white/20 hover:bg-zinc-950 sm:max-w-[calc(100vw-3rem)]",
+            isDesktop ? "" : "bottom-4 right-4 sm:bottom-6 sm:right-6",
+          )}
+          style={
+            isDesktop
+              ? {
+                  left: props.copilotLauncherPosition.x,
+                  top: props.copilotLauncherPosition.y,
+                  width: COPILOT_LAUNCHER_WIDTH,
+                  minHeight: COPILOT_LAUNCHER_HEIGHT,
+                }
+              : undefined
+          }
+        >
+          <div className="rounded-full border border-white/10 bg-white/[0.02] p-2.5 text-zinc-200">
+            <Bot className="size-5" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold tracking-tight text-white">Copilot</p>
+            <p className="mt-0.5 text-xs text-zinc-400">
+              {isDesktop ? "Drag me anywhere" : "Ask about these listings"}
+            </p>
+          </div>
+        </button>
+      ) : null}
+
+      <CopilotWindow {...props} />
       <EditSavedSearchModal {...props} />
     </main>
   );
@@ -1247,31 +1467,17 @@ function ResultsPanel({
   sentinelRef,
   loadingMore,
   hasMore,
-  activeQuery,
-  copilotOpen,
-  toggleCopilotOpen,
-  copilotQuestion,
-  setCopilotQuestion,
-  copilotLoading,
-  copilotError,
-  copilotResponse,
-  onAskCopilot,
+  copilotSelectionMode,
+  copilotSelectedListingKeys,
+  onToggleListingSelection,
 }: ResultsPanelProps) {
+  const selectedListingKeys = useMemo(
+    () => new Set(copilotSelectedListingKeys),
+    [copilotSelectedListingKeys],
+  );
+
   return (
     <section className="space-y-4">
-      <CopilotPanel
-        activeQuery={activeQuery}
-        filteredResults={filteredResults}
-        copilotOpen={copilotOpen}
-        toggleCopilotOpen={toggleCopilotOpen}
-        copilotQuestion={copilotQuestion}
-        setCopilotQuestion={setCopilotQuestion}
-        copilotLoading={copilotLoading}
-        copilotError={copilotError}
-        copilotResponse={copilotResponse}
-        onAskCopilot={onAskCopilot}
-      />
-
       {error ? (
         <GlassPanel className="border-red-400/20 bg-red-500/10 p-4 text-red-100">
           <p className="text-sm font-medium">Search error</p>
@@ -1356,7 +1562,14 @@ function ResultsPanel({
               {filteredResults.map((item) => {
                 const cardKey = `${item.source}:${item.source_listing_id || item.url}`;
                 return (
-                  <MarketplaceResultCard key={cardKey} item={item} deviceCoords={deviceCoords} />
+                  <MarketplaceResultCard
+                    key={cardKey}
+                    item={item}
+                    deviceCoords={deviceCoords}
+                    selectionMode={copilotSelectionMode}
+                    copilotSelected={selectedListingKeys.has(cardKey)}
+                    onToggleSelection={onToggleListingSelection}
+                  />
                 );
               })}
             </ul>
@@ -1726,19 +1939,14 @@ function valuationTone(valuation?: Valuation | null): "emerald" | "amber" | "red
   return "slate";
 }
 
-function riskTone(risk?: Risk | null): "emerald" | "amber" | "red" | "slate" {
-  if (!risk) return "slate";
-  if (risk.level === "high") return "red";
-  if (risk.level === "medium") return "amber";
-  return "emerald";
-}
-
-function MarketplaceResultCard({
+function ListingCardBody({
   item,
   deviceCoords,
+  titleClassName,
 }: {
   item: Listing;
   deviceCoords: Coordinates | null;
+  titleClassName?: string;
 }) {
   const imageUrl = item.image_urls?.[0];
   const listingCoords = deviceCoords ? getListingCoordinates(item) : null;
@@ -1747,276 +1955,633 @@ function MarketplaceResultCard({
   const distanceLabel = distanceMiles !== null ? formatDistanceMiles(distanceMiles) : null;
 
   return (
-    <li className="h-full">
-      <a
-        href={item.url}
-        target="_blank"
-        rel="noreferrer"
-        className="group flex h-full flex-col overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/85 transition hover:-translate-y-0.5 hover:border-white/20 hover:bg-zinc-950"
-      >
-        <div className="relative aspect-[5/4] shrink-0 overflow-hidden bg-zinc-900">
-          {imageUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={imageUrl}
-              alt={item.title}
-              className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.03]"
-            />
-          ) : (
-            <div className="flex h-full w-full items-center justify-center text-xs text-zinc-500">
-              No image
-            </div>
+    <>
+      <div className="relative aspect-[5/4] shrink-0 overflow-hidden bg-zinc-900">
+        {imageUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={imageUrl}
+            alt={item.title}
+            className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.03]"
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-xs text-zinc-500">
+            No image
+          </div>
+        )}
+
+        <div className="absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-2.5">
+          <MarketplaceSourceBadge source={item.source} />
+        </div>
+      </div>
+
+      <div className="flex min-h-[196px] flex-1 flex-col gap-2 overflow-hidden p-3.5">
+        <div className="flex items-start justify-between gap-2">
+          <p className="text-base font-semibold tracking-tight text-white">{formatPrice(item.price)}</p>
+          {distanceLabel ? (
+            <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[10px] text-zinc-300">
+              {distanceLabel}
+            </span>
+          ) : null}
+        </div>
+
+        <p
+          className={cn(
+            "line-clamp-2 text-sm font-medium leading-snug text-zinc-100 transition group-hover:text-white",
+            titleClassName,
           )}
+        >
+          {item.title}
+        </p>
 
-          <div className="absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-2.5">
-            <MarketplaceSourceBadge source={item.source} />
-          </div>
+        <p className="line-clamp-1 text-xs text-zinc-400">
+          {item.location || `${formatSourceLabel(item.source)} listing`}
+        </p>
+
+        <div className="flex flex-wrap gap-1.5">
+          {item.valuation ? (
+            <InsightPill
+              label={
+                item.valuation.verdict === "insufficient_data"
+                  ? "Value: pending"
+                  : `Value: ${item.valuation.verdict.replace("_", " ")}`
+              }
+              tone={valuationTone(item.valuation)}
+            />
+          ) : null}
         </div>
 
-        <div className="flex h-[196px] flex-col gap-2 overflow-hidden p-3.5">
-          <div className="flex items-start justify-between gap-2">
-            <p className="text-base font-semibold tracking-tight text-white">{formatPrice(item.price)}</p>
-            {distanceLabel ? (
-              <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[10px] text-zinc-300">
-                {distanceLabel}
-              </span>
-            ) : null}
-          </div>
-
-          <p className="line-clamp-2 text-sm font-medium leading-snug text-zinc-100 transition group-hover:text-white">
-            {item.title}
-          </p>
-
-          <p className="line-clamp-1 text-xs text-zinc-400">
-            {item.location || `${formatSourceLabel(item.source)} listing`}
-          </p>
-
-          <div className="flex flex-wrap gap-1.5">
-            {item.valuation ? (
-              <InsightPill
-                label={
-                  item.valuation.verdict === "insufficient_data"
-                    ? "Value: pending"
-                    : `Value: ${item.valuation.verdict.replace("_", " ")}`
-                }
-                tone={valuationTone(item.valuation)}
-              />
-            ) : null}
-            {item.risk ? (
-              <InsightPill label={`Risk: ${item.risk.level}`} tone={riskTone(item.risk)} />
-            ) : null}
-          </div>
-
-          <div className="mt-auto space-y-1">
-            {typeof item.score === "number" ? (
-              <p className="text-[11px] text-zinc-500">Score {item.score.toFixed(2)}</p>
-            ) : null}
-            {item.valuation?.explanation ? (
-              <p className="line-clamp-2 text-xs leading-relaxed text-zinc-400">
-                {item.valuation.explanation}
-                {item.valuation.estimated_low != null && item.valuation.estimated_high != null
-                  ? ` | ${formatMoneyCompact(item.valuation.estimated_low, item.valuation.currency)}-${formatMoneyCompact(item.valuation.estimated_high, item.valuation.currency)}`
-                  : ""}
-              </p>
-            ) : null}
-            {item.risk?.reasons?.[0] && item.risk.level !== "low" ? (
-              <p className="line-clamp-2 text-xs leading-relaxed text-amber-100/80">
-                {item.risk.reasons[0]}
-              </p>
-            ) : null}
-            {item.condition ? (
-              <p className="line-clamp-1 text-[11px] uppercase tracking-[0.12em] text-zinc-500">
-                {item.condition}
-              </p>
-            ) : null}
-            {item.snippet ? (
-              <p className="line-clamp-2 text-xs leading-relaxed text-zinc-500">{item.snippet}</p>
-            ) : null}
-          </div>
+        <div className="mt-auto space-y-1">
+          {typeof item.score === "number" ? (
+            <p className="text-[11px] text-zinc-500">Score {item.score.toFixed(2)}</p>
+          ) : null}
+          {item.valuation?.explanation ? (
+            <p className="line-clamp-2 text-xs leading-relaxed text-zinc-400">
+              {item.valuation.explanation}
+              {item.valuation.estimated_low != null && item.valuation.estimated_high != null
+                ? ` | ${formatMoneyCompact(item.valuation.estimated_low, item.valuation.currency)}-${formatMoneyCompact(item.valuation.estimated_high, item.valuation.currency)}`
+                : ""}
+            </p>
+          ) : null}
+          {item.condition ? (
+            <p className="line-clamp-1 text-[11px] uppercase tracking-[0.12em] text-zinc-500">
+              {item.condition}
+            </p>
+          ) : null}
+          {item.snippet ? (
+            <p className="line-clamp-2 text-xs leading-relaxed text-zinc-500">{item.snippet}</p>
+          ) : null}
         </div>
-      </a>
+      </div>
+    </>
+  );
+}
+
+function MarketplaceResultCard({
+  item,
+  deviceCoords,
+  selectionMode,
+  copilotSelected,
+  onToggleSelection,
+}: {
+  item: Listing;
+  deviceCoords: Coordinates | null;
+  selectionMode: boolean;
+  copilotSelected: boolean;
+  onToggleSelection: (item: Listing) => void;
+}) {
+  const content = <ListingCardBody item={item} deviceCoords={deviceCoords} />;
+
+  return (
+    <li className="h-full">
+      <article
+        className={cn(
+          "group flex h-full flex-col overflow-hidden rounded-2xl border bg-zinc-950/85 transition hover:-translate-y-0.5 hover:border-white/20 hover:bg-zinc-950",
+          copilotSelected
+            ? "border-emerald-300/50 shadow-[0_0_0_1px_rgba(110,231,183,0.35)_inset]"
+            : "border-white/10",
+        )}
+      >
+        {selectionMode ? (
+          <button
+            type="button"
+            onClick={() => onToggleSelection(item)}
+            className="flex flex-1 flex-col text-left"
+            aria-pressed={copilotSelected}
+          >
+            {content}
+          </button>
+        ) : (
+          <a href={item.url} target="_blank" rel="noreferrer" className="flex flex-1 flex-col">
+            {content}
+          </a>
+        )}
+      </article>
     </li>
   );
 }
 
-function CopilotPanel({
+function CopilotShortlistCard({
+  item,
+  reason,
+  deviceCoords,
+  selectionMode,
+  copilotSelected,
+  onToggleSelection,
+}: {
+  item: Listing;
+  reason: string;
+  deviceCoords: Coordinates | null;
+  selectionMode: boolean;
+  copilotSelected: boolean;
+  onToggleSelection: (item: Listing) => void;
+}) {
+  const body = (
+    <div className="flex flex-1 flex-col">
+      <ListingCardBody item={item} deviceCoords={deviceCoords} titleClassName="text-[15px]" />
+    </div>
+  );
+
+  return (
+    <li className="h-full">
+      <article
+        className={cn(
+          "group flex h-full flex-col overflow-hidden rounded-2xl border bg-zinc-950/85 transition hover:border-white/20 hover:bg-zinc-950",
+          copilotSelected
+            ? "border-emerald-300/50 shadow-[0_0_0_1px_rgba(110,231,183,0.35)_inset]"
+            : "border-white/10",
+        )}
+      >
+        {selectionMode ? (
+          <button
+            type="button"
+            onClick={() => onToggleSelection(item)}
+            className="flex flex-1 flex-col text-left"
+            aria-pressed={copilotSelected}
+          >
+            {body}
+          </button>
+        ) : (
+          body
+        )}
+
+        <div className="space-y-3 border-t border-white/10 p-3">
+          <p className="text-xs leading-relaxed text-zinc-300">{reason}</p>
+          <div className="grid grid-cols-1 gap-2">
+            <a
+              href={item.url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2 text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05]"
+            >
+              <ArrowUpRight className="size-4" />
+              Open listing
+            </a>
+          </div>
+        </div>
+      </article>
+    </li>
+  );
+}
+
+function CopilotTranscriptMessage({ message }: { message: CopilotMessage }) {
+  if (message.role === "user") {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[88%] whitespace-pre-wrap rounded-2xl bg-white px-4 py-3 text-sm text-black">
+          {message.content}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+      <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-100">
+        {message.answer ?? message.content}
+      </p>
+      {message.seller_questions && message.seller_questions.length > 0 ? (
+        <div className="mt-3">
+          <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-500">
+            Seller questions
+          </p>
+          <ul className="mt-2 space-y-1.5 text-sm text-zinc-300">
+            {message.seller_questions.map((entry) => (
+              <li key={entry}>- {entry}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {message.red_flags && message.red_flags.length > 0 ? (
+        <div className="mt-3">
+          <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-500">
+            Red flags
+          </p>
+          <ul className="mt-2 space-y-1.5 text-sm text-zinc-300">
+            {message.red_flags.map((entry) => (
+              <li key={entry}>- {entry}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {!message.available && message.error_message ? (
+        <p className="mt-3 text-xs text-zinc-500">{message.error_message}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function CopilotSelectedListingCard({
+  item,
+  onRemove,
+}: {
+  item: Listing;
+  onRemove: (listingKey: string) => void;
+}) {
+  return (
+    <li className="rounded-2xl border border-white/10 bg-white/[0.02] p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-zinc-100">{item.title}</p>
+          <p className="mt-1 text-xs text-zinc-500">
+            {formatSourceLabel(item.source)} | {formatPrice(item.price)}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => onRemove(getListingKey(item))}
+          className="rounded-full border border-white/10 bg-white/[0.02] p-1.5 text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05]"
+          aria-label={`Remove ${item.title} from copilot selection`}
+        >
+          <X className="size-3.5" />
+        </button>
+      </div>
+    </li>
+  );
+}
+
+function CopilotWindow({
   activeQuery,
   filteredResults,
+  deviceCoords,
   copilotOpen,
-  toggleCopilotOpen,
+  closeCopilot,
   copilotQuestion,
   setCopilotQuestion,
   copilotLoading,
   copilotError,
-  copilotResponse,
+  copilotMessages,
+  latestShortlist,
+  copilotSelectionMode,
+  toggleCopilotSelectionMode,
+  copilotSelectedListingKeys,
+  clearCopilotSelection,
+  removeListingFromCopilotSelection,
+  resetCopilotConversation,
+  onToggleListingSelection,
+  copilotWindowRect,
+  onCopilotWindowDragStart,
+  onCopilotResizeStart,
   onAskCopilot,
 }: Pick<
   SearchPageViewProps,
   | "activeQuery"
   | "filteredResults"
+  | "deviceCoords"
   | "copilotOpen"
-  | "toggleCopilotOpen"
+  | "closeCopilot"
   | "copilotQuestion"
   | "setCopilotQuestion"
   | "copilotLoading"
   | "copilotError"
-  | "copilotResponse"
+  | "copilotMessages"
+  | "latestShortlist"
+  | "copilotSelectionMode"
+  | "toggleCopilotSelectionMode"
+  | "copilotSelectedListingKeys"
+  | "clearCopilotSelection"
+  | "removeListingFromCopilotSelection"
+  | "resetCopilotConversation"
+  | "onToggleListingSelection"
+  | "copilotWindowRect"
+  | "onCopilotWindowDragStart"
+  | "onCopilotResizeStart"
   | "onAskCopilot"
 >) {
   const listingMap = useMemo(
     () => new Map(filteredResults.map((item) => [getListingKey(item), item])),
     [filteredResults],
   );
+  const scrollContentRef = useRef<HTMLDivElement | null>(null);
   const hasListings = filteredResults.length > 0 && activeQuery.trim().length > 0;
+  const selectedListings = useMemo(
+    () =>
+      copilotSelectedListingKeys
+        .map((listingKey) => listingMap.get(listingKey) ?? null)
+        .filter((item): item is Listing => item !== null),
+    [copilotSelectedListingKeys, listingMap],
+  );
+  const hasSelectedListings = selectedListings.length > 0;
+  const selectedListingKeySet = useMemo(
+    () => new Set(copilotSelectedListingKeys),
+    [copilotSelectedListingKeys],
+  );
   const presets = [
     "Which is the best value?",
     "What should I ask the seller?",
     "What are the red flags?",
   ];
+  const [isDesktop, setIsDesktop] = useState(false);
+
+  useEffect(() => {
+    const media = window.matchMedia(`(min-width: ${COPILOT_DESKTOP_BREAKPOINT}px)`);
+    const sync = () => setIsDesktop(media.matches);
+    sync();
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
+
+  useEffect(() => {
+    if (!scrollContentRef.current) return;
+    scrollContentRef.current.scrollTop = scrollContentRef.current.scrollHeight;
+  }, [copilotLoading, copilotMessages, copilotSelectedListingKeys.length, latestShortlist]);
+
+  if (!copilotOpen) {
+    return null;
+  }
 
   return (
-    <GlassPanel className="overflow-hidden">
-      <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
-        <div className="flex items-center gap-2">
-          <Bot className="size-4 text-zinc-300" />
-          <div>
-            <p className="font-mono text-xs uppercase tracking-[0.18em] text-zinc-500">Copilot</p>
-            <p className="text-sm text-zinc-300">Ask about the listings currently on screen.</p>
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={toggleCopilotOpen}
-          className="rounded-full border border-white/10 bg-white/[0.02] px-3 py-1 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05]"
-        >
-          {copilotOpen ? "Collapse" : "Open"}
-        </button>
-      </div>
-
-      {copilotOpen ? (
-        <div className="space-y-4 p-4">
-          <div className="flex flex-wrap gap-2">
-            {presets.map((preset) => (
+    <div className="pointer-events-none fixed inset-0 z-50">
+      <div
+        className={cn(
+          "pointer-events-auto absolute flex flex-col",
+          isDesktop ? "" : "inset-4 sm:inset-6",
+        )}
+        style={
+          isDesktop
+            ? {
+                width: copilotWindowRect.width,
+                height: copilotWindowRect.height,
+                left: copilotWindowRect.x,
+                top: copilotWindowRect.y,
+              }
+            : undefined
+        }
+      >
+        <GlassPanel className="relative flex h-full w-full min-h-0 flex-col overflow-hidden">
+          <div className="flex items-start justify-between gap-3 border-b border-white/10 px-4 py-3">
+            <div
+              className={cn(
+                "flex min-w-0 flex-1 items-start gap-3",
+                isDesktop ? "cursor-move select-none" : "",
+              )}
+              onPointerDown={isDesktop ? onCopilotWindowDragStart : undefined}
+            >
+              <div className="rounded-full border border-white/10 bg-white/[0.02] p-2 text-zinc-300">
+                <Bot className="size-4" />
+              </div>
+              <div className="min-w-0">
+                <p className="font-mono text-xs uppercase tracking-[0.18em] text-zinc-500">Copilot</p>
+              </div>
+            </div>
+            <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
               <button
-                key={preset}
                 type="button"
-                className="rounded-full border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
-                onClick={() => {
-                  setCopilotQuestion(preset);
-                  void onAskCopilot(preset);
-                }}
-                disabled={!hasListings || copilotLoading}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={toggleCopilotSelectionMode}
+                className={cn(
+                  "rounded-full border px-3 py-2 text-xs font-medium uppercase tracking-[0.14em] transition",
+                  copilotSelectionMode
+                    ? "border-emerald-300/30 bg-emerald-400/10 text-emerald-100"
+                    : "border-white/10 bg-white/[0.02] text-zinc-300 hover:border-white/20 hover:bg-white/[0.05]",
+                )}
               >
-                {preset}
+                {copilotSelectionMode ? "Selecting listings" : "Select listings"}
               </button>
-            ))}
-          </div>
-
-          <div className="space-y-2">
-            <textarea
-              className="min-h-[108px] w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-white/20 focus:outline-none"
-              placeholder="Ask about the currently loaded listings..."
-              value={copilotQuestion}
-              onChange={(event) => setCopilotQuestion(event.target.value)}
-            />
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-xs text-zinc-500">
-                Uses the top {Math.min(filteredResults.length, 25)} visible listings from this search.
-              </p>
               <button
                 type="button"
-                className="inline-flex items-center gap-2 rounded-xl bg-white px-4 py-2 text-sm font-medium text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
-                onClick={() => void onAskCopilot()}
-                disabled={!hasListings || copilotLoading || !copilotQuestion.trim()}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={resetCopilotConversation}
+                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05]"
               >
-                {copilotLoading ? <Loader2 className="size-4 animate-spin" /> : <Bot className="size-4" />}
-                {copilotLoading ? "Thinking..." : "Ask copilot"}
+                <RefreshCw className="size-3.5" />
+                New chat
+              </button>
+              <button
+                type="button"
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={closeCopilot}
+                className="rounded-full border border-white/10 bg-white/[0.02] p-2 text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05]"
+                aria-label="Close copilot"
+              >
+                <X className="size-4" />
               </button>
             </div>
           </div>
 
-          {copilotError ? (
-            <div className="rounded-xl border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-100">
-              {copilotError}
-            </div>
-          ) : null}
+          <div
+            ref={scrollContentRef}
+            className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4"
+          >
+            <div className="space-y-3">
+              {copilotMessages.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.02] p-4">
+                  <p className="text-sm text-zinc-200">How can I help you today?</p>
+                  <p className="mt-2 text-sm text-zinc-400">
+                    Ask about the visible listings, or turn on selection mode to compare specific listings directly.
+                  </p>
+                </div>
+              ) : (
+                copilotMessages.map((message) => (
+                  <CopilotTranscriptMessage key={message.id} message={message} />
+                ))
+              )}
 
-          {copilotResponse ? (
-            <div className="grid gap-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
-              <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                <p className="text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">Answer</p>
-                <p className="mt-2 text-sm leading-relaxed text-zinc-100">{copilotResponse.answer}</p>
-                {!copilotResponse.available && copilotResponse.error_message ? (
-                  <p className="mt-2 text-xs text-zinc-500">{copilotResponse.error_message}</p>
+              {copilotLoading ? (
+                <div className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
+                  <Loader2 className="size-4 animate-spin" />
+                  Thinking...
+                </div>
+              ) : null}
+            </div>
+
+            {(copilotSelectionMode || hasSelectedListings) && (
+              <div className="rounded-2xl border border-white/10 bg-black/30 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">
+                      Selected listings
+                    </p>
+                    <p className="mt-1 text-xs text-zinc-400">
+                      {hasSelectedListings
+                        ? `${selectedListings.length} listing${selectedListings.length === 1 ? "" : "s"} will be used for the next copilot answer.`
+                        : "Selection mode is on. Click result cards to add listings."}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={clearCopilotSelection}
+                    disabled={!hasSelectedListings}
+                    className="rounded-full border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Clear all
+                  </button>
+                </div>
+                {hasSelectedListings ? (
+                  <ul className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    {selectedListings.map((item) => (
+                      <CopilotSelectedListingCard
+                        key={getListingKey(item)}
+                        item={item}
+                        onRemove={removeListingFromCopilotSelection}
+                      />
+                    ))}
+                  </ul>
                 ) : null}
               </div>
+            )}
 
-              <div className="space-y-4">
-                <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+            {latestShortlist.length > 0 ? (
+              <div className="rounded-2xl border border-white/10 bg-black/30 p-3">
+                <div className="flex items-center justify-between gap-3">
                   <p className="text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">Shortlist</p>
-                  <ul className="mt-2 space-y-2">
-                    {copilotResponse.shortlist.length === 0 ? (
-                      <li className="text-sm text-zinc-400">No shortlist yet.</li>
-                    ) : (
-                      copilotResponse.shortlist.map((entry) => {
-                        const linkedListing = listingMap.get(entry.listing_key);
-                        const content = (
-                          <>
-                            <p className="text-sm font-medium text-zinc-100">{entry.title}</p>
-                            <p className="mt-1 text-xs text-zinc-400">{entry.reason}</p>
-                          </>
-                        );
-                        return (
-                          <li key={entry.listing_key}>
-                            {linkedListing ? (
-                              <a
-                                href={linkedListing.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="block rounded-xl border border-white/10 bg-white/[0.02] p-3 transition hover:border-white/20 hover:bg-white/[0.04]"
-                              >
-                                {content}
-                              </a>
-                            ) : (
-                              <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
-                                {content}
-                              </div>
-                            )}
-                          </li>
-                        );
-                      })
-                    )}
-                  </ul>
+                  <span className="text-xs text-zinc-500">
+                    {`${latestShortlist.length} listing${latestShortlist.length === 1 ? "" : "s"}`}
+                  </span>
                 </div>
+                <ul className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
+                  {latestShortlist.map((entry) => {
+                    const linkedListing = listingMap.get(entry.listing_key);
+                    if (!linkedListing) {
+                      return (
+                        <li
+                          key={entry.listing_key}
+                          className="rounded-2xl border border-white/10 bg-white/[0.02] p-3 text-sm text-zinc-300"
+                        >
+                          <p className="font-medium text-zinc-100">{entry.title}</p>
+                          <p className="mt-1 text-xs text-zinc-400">{entry.reason}</p>
+                        </li>
+                      );
+                    }
 
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                    <p className="text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">Seller questions</p>
-                    <ul className="mt-2 space-y-1.5 text-sm text-zinc-300">
-                      {copilotResponse.seller_questions.length === 0 ? (
-                        <li className="text-zinc-500">No questions suggested.</li>
-                      ) : (
-                        copilotResponse.seller_questions.map((entry) => <li key={entry}>- {entry}</li>)
-                      )}
-                    </ul>
-                  </div>
-                  <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                    <p className="text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">Red flags</p>
-                    <ul className="mt-2 space-y-1.5 text-sm text-zinc-300">
-                      {copilotResponse.red_flags.length === 0 ? (
-                        <li className="text-zinc-500">No extra red flags called out.</li>
-                      ) : (
-                        copilotResponse.red_flags.map((entry) => <li key={entry}>- {entry}</li>)
-                      )}
-                    </ul>
-                  </div>
-                </div>
+                    return (
+                      <CopilotShortlistCard
+                        key={entry.listing_key}
+                        item={linkedListing}
+                        reason={entry.reason}
+                        deviceCoords={deviceCoords}
+                        selectionMode={copilotSelectionMode}
+                        copilotSelected={selectedListingKeySet.has(entry.listing_key)}
+                        onToggleSelection={onToggleListingSelection}
+                      />
+                    );
+                  })}
+                </ul>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="space-y-3 border-t border-white/10 bg-black/20 px-4 py-4">
+            <div className="flex flex-wrap gap-2">
+              {presets.map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  className="rounded-full border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={() => {
+                    setCopilotQuestion(preset);
+                    void onAskCopilot(preset);
+                  }}
+                  disabled={!hasListings || copilotLoading}
+                >
+                  {preset}
+                </button>
+              ))}
+            </div>
+
+            <div className="space-y-2">
+              <textarea
+                className="min-h-[112px] w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-white/20 focus:outline-none"
+                placeholder={
+                  hasSelectedListings
+                    ? "Ask about the selected listings..."
+                    : "Ask about the currently loaded listings..."
+                }
+                value={copilotQuestion}
+                onChange={(event) => setCopilotQuestion(event.target.value)}
+              />
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-xs text-zinc-500">
+                  {hasSelectedListings
+                    ? `Uses ${Math.min(selectedListings.length, 25)} selected listing${selectedListings.length === 1 ? "" : "s"} from this search.`
+                    : `Uses the top ${Math.min(filteredResults.length, 25)} visible listings from this search.`}
+                </p>
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-2 rounded-xl bg-white px-4 py-2 text-sm font-medium text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={() => void onAskCopilot()}
+                  disabled={!hasListings || copilotLoading || !copilotQuestion.trim()}
+                >
+                  {copilotLoading ? <Loader2 className="size-4 animate-spin" /> : <Bot className="size-4" />}
+                  {copilotLoading ? "Thinking..." : "Ask copilot"}
+                </button>
               </div>
             </div>
-          ) : null}
-        </div>
-      ) : null}
-    </GlassPanel>
+
+            {copilotError ? (
+              <div className="rounded-xl border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-100">
+                {copilotError}
+              </div>
+            ) : null}
+          </div>
+        </GlassPanel>
+
+        {isDesktop && (
+          <>
+            <div
+              className="absolute inset-y-0 -left-2 hidden w-4 cursor-ew-resize lg:block"
+              onPointerDown={(event) => onCopilotResizeStart("w", event)}
+              role="presentation"
+            />
+            <div
+              className="absolute inset-y-0 -right-2 hidden w-4 cursor-ew-resize lg:block"
+              onPointerDown={(event) => onCopilotResizeStart("e", event)}
+              role="presentation"
+            />
+            <div
+              className="absolute inset-x-0 -top-2 hidden h-4 cursor-ns-resize lg:block"
+              onPointerDown={(event) => onCopilotResizeStart("n", event)}
+              role="presentation"
+            />
+            <div
+              className="absolute inset-x-0 -bottom-2 hidden h-4 cursor-ns-resize lg:block"
+              onPointerDown={(event) => onCopilotResizeStart("s", event)}
+              role="presentation"
+            />
+            <div
+              className="absolute -left-2 -top-2 hidden size-4 cursor-nwse-resize lg:block"
+              onPointerDown={(event) => onCopilotResizeStart("nw", event)}
+              role="presentation"
+            />
+            <div
+              className="absolute -right-2 -top-2 hidden size-4 cursor-nesw-resize lg:block"
+              onPointerDown={(event) => onCopilotResizeStart("ne", event)}
+              role="presentation"
+            />
+            <div
+              className="absolute -left-2 -bottom-2 hidden size-4 cursor-nesw-resize lg:block"
+              onPointerDown={(event) => onCopilotResizeStart("sw", event)}
+              role="presentation"
+            />
+            <div
+              className="absolute -bottom-2 -right-2 hidden size-4 cursor-nwse-resize lg:block"
+              onPointerDown={(event) => onCopilotResizeStart("se", event)}
+              role="presentation"
+            />
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -2084,11 +2649,24 @@ export default function HomePage() {
   const [editAlertsEnabled, setEditAlertsEnabled] = useState(true);
   const [editError, setEditError] = useState<string | null>(null);
   const [editSaving, setEditSaving] = useState(false);
-  const [copilotOpen, setCopilotOpen] = useState(true);
+  const [copilotOpen, setCopilotOpen] = useState(false);
   const [copilotQuestion, setCopilotQuestion] = useState("");
   const [copilotLoading, setCopilotLoading] = useState(false);
   const [copilotError, setCopilotError] = useState<string | null>(null);
-  const [copilotResponse, setCopilotResponse] = useState<CopilotResponse | null>(null);
+  const [copilotMessages, setCopilotMessages] = useState<CopilotMessage[]>([]);
+  const [latestShortlist, setLatestShortlist] = useState<CopilotShortlistItem[]>([]);
+  const [copilotSelectionMode, setCopilotSelectionMode] = useState(false);
+  const [copilotSelectedListingKeys, setCopilotSelectedListingKeys] = useState<string[]>([]);
+  const [copilotWindowRect, setCopilotWindowRect] = useState<CopilotWindowRect>({
+    width: COPILOT_WINDOW_WIDTH_DEFAULT,
+    height: COPILOT_WINDOW_HEIGHT_DEFAULT,
+    x: COPILOT_FLOATING_MARGIN,
+    y: COPILOT_FLOATING_MARGIN,
+  });
+  const [copilotLauncherPosition, setCopilotLauncherPosition] = useState<CopilotLauncherPosition>({
+    x: COPILOT_FLOATING_MARGIN,
+    y: COPILOT_FLOATING_MARGIN,
+  });
   const [facebookConfigStatus, setFacebookConfigStatus] = useState<FacebookConnectorStatus | null>(null);
   const [facebookConfigLoading, setFacebookConfigLoading] = useState(false);
   const [facebookConfigError, setFacebookConfigError] = useState<string | null>(null);
@@ -2102,6 +2680,8 @@ export default function HomePage() {
   const fetchInFlightRef = useRef(false);
   const autoLoadedSavedForUserRef = useRef<string | null>(null);
   const savedBatchLaneStartRef = useRef(0);
+  const copilotSessionVersionRef = useRef(0);
+  const copilotLauncherDragMovedRef = useRef(false);
 
   const savedBatchHasMore =
     resultMode === "saved_batch" &&
@@ -2120,6 +2700,89 @@ export default function HomePage() {
       : null;
   const distanceFilterActive = deviceCoords !== null && travelRangeMiles !== null;
   const distanceFilterPendingLocation = deviceCoords === null && travelRangeMiles !== null;
+
+  useEffect(() => {
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const legacyWidth = Number(window.localStorage.getItem(COPILOT_WINDOW_WIDTH_STORAGE_KEY));
+
+    let nextRect = getDefaultCopilotWindowRect(
+      viewportWidth,
+      viewportHeight,
+      Number.isFinite(legacyWidth) ? legacyWidth : COPILOT_WINDOW_WIDTH_DEFAULT,
+    );
+    const storedRect = window.localStorage.getItem(COPILOT_WINDOW_RECT_STORAGE_KEY);
+    if (storedRect) {
+      try {
+        const parsed = JSON.parse(storedRect) as Partial<CopilotWindowRect>;
+        if (
+          typeof parsed.width === "number" &&
+          typeof parsed.height === "number" &&
+          typeof parsed.x === "number" &&
+          typeof parsed.y === "number"
+        ) {
+          nextRect = clampCopilotWindowRect(
+            {
+              width: parsed.width,
+              height: parsed.height,
+              x: parsed.x,
+              y: parsed.y,
+            },
+            viewportWidth,
+            viewportHeight,
+          );
+        }
+      } catch {
+        // Ignore invalid persisted state.
+      }
+    }
+    setCopilotWindowRect(nextRect);
+
+    let nextLauncherPosition = getDefaultCopilotLauncherPosition(viewportWidth, viewportHeight);
+    const storedLauncher = window.localStorage.getItem(COPILOT_LAUNCHER_POSITION_STORAGE_KEY);
+    if (storedLauncher) {
+      try {
+        const parsed = JSON.parse(storedLauncher) as Partial<CopilotLauncherPosition>;
+        if (typeof parsed.x === "number" && typeof parsed.y === "number") {
+          nextLauncherPosition = clampCopilotLauncherPosition(
+            { x: parsed.x, y: parsed.y },
+            viewportWidth,
+            viewportHeight,
+          );
+        }
+      } catch {
+        // Ignore invalid persisted state.
+      }
+    }
+    setCopilotLauncherPosition(nextLauncherPosition);
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(COPILOT_WINDOW_RECT_STORAGE_KEY, JSON.stringify(copilotWindowRect));
+  }, [copilotWindowRect]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      COPILOT_LAUNCHER_POSITION_STORAGE_KEY,
+      JSON.stringify(copilotLauncherPosition),
+    );
+  }, [copilotLauncherPosition]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      setCopilotWindowRect((prev) =>
+        clampCopilotWindowRect(prev, viewportWidth, viewportHeight),
+      );
+      setCopilotLauncherPosition((prev) =>
+        clampCopilotLauncherPosition(prev, viewportWidth, viewportHeight),
+      );
+    };
+
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   useEffect(() => {
     const delayMs = sortDebounceMs(rawResults.length);
@@ -2169,6 +2832,25 @@ export default function HomePage() {
     results,
     travelRangeMiles,
   ]);
+
+  useEffect(() => {
+    const visibleKeys = new Set(filteredResults.map((item) => getListingKey(item)));
+    setCopilotSelectedListingKeys((prev) => {
+      const next = prev.filter((listingKey) => visibleKeys.has(listingKey));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [filteredResults]);
+
+  const resetCopilotConversation = useCallback(() => {
+    copilotSessionVersionRef.current += 1;
+    setCopilotQuestion("");
+    setCopilotLoading(false);
+    setCopilotError(null);
+    setCopilotMessages([]);
+    setLatestShortlist([]);
+    setCopilotSelectionMode(false);
+    setCopilotSelectedListingKeys([]);
+  }, []);
 
   const hasActiveClientFilters =
     normalizedLocationFilterText.length > 0 || distanceFilterActive;
@@ -2226,7 +2908,6 @@ export default function HomePage() {
         setSearchLoading(true);
         setError(null);
         setCopilotError(null);
-        setCopilotResponse(null);
         setRawResults([]);
         setResults([]);
         setNextOffset(null);
@@ -2275,6 +2956,7 @@ export default function HomePage() {
           setRawResults((prev) => [...prev, ...dedupedIncoming]);
           setSourceErrors((prev) => ({ ...prev, ...incomingSourceErrors }));
         } else {
+          resetCopilotConversation();
           setRawResults(dedupedIncoming);
           setSourceErrors(incomingSourceErrors);
           setActiveQuery(query);
@@ -2306,7 +2988,7 @@ export default function HomePage() {
         fetchInFlightRef.current = false;
       }
     },
-    [accessToken, buildSearchUrl],
+    [accessToken, buildSearchUrl, resetCopilotConversation],
   );
 
   function onUseMyLocation() {
@@ -2799,8 +3481,7 @@ export default function HomePage() {
     setSearchLoading(true);
     setLoadingMore(false);
     setError(null);
-    setCopilotError(null);
-    setCopilotResponse(null);
+    resetCopilotConversation();
     setRawResults([]);
     setResults([]);
     setNextOffset(null);
@@ -3197,27 +3878,240 @@ export default function HomePage() {
     }
   }
 
+  const openCopilot = useCallback(() => {
+    if (copilotLauncherDragMovedRef.current) {
+      copilotLauncherDragMovedRef.current = false;
+      return;
+    }
+    setCopilotOpen(true);
+    setCopilotError(null);
+  }, []);
+
+  const closeCopilot = useCallback(() => {
+    setCopilotOpen(false);
+  }, []);
+
+  const toggleCopilotSelectionMode = useCallback(() => {
+    setCopilotSelectionMode((prev) => !prev);
+  }, []);
+
+  const clearCopilotSelection = useCallback(() => {
+    setCopilotSelectedListingKeys([]);
+  }, []);
+
+  const removeListingFromCopilotSelection = useCallback((listingKey: string) => {
+    setCopilotSelectedListingKeys((prev) => prev.filter((candidate) => candidate !== listingKey));
+  }, []);
+
+  const onToggleListingSelection = useCallback((item: Listing) => {
+    const listingKey = getListingKey(item);
+    setCopilotOpen(true);
+    setCopilotError(null);
+    setCopilotSelectedListingKeys((prev) =>
+      prev.includes(listingKey)
+        ? prev.filter((candidate) => candidate !== listingKey)
+        : [...prev, listingKey],
+    );
+  }, []);
+
+  const onCopilotLauncherDragStart = useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      if (typeof window === "undefined" || window.innerWidth < COPILOT_DESKTOP_BREAKPOINT || event.button !== 0) {
+        return;
+      }
+
+      event.preventDefault();
+      copilotLauncherDragMovedRef.current = false;
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const startPosition = copilotLauncherPosition;
+      const originalUserSelect = document.body.style.userSelect;
+      document.body.style.userSelect = "none";
+
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        if (
+          !copilotLauncherDragMovedRef.current &&
+          (Math.abs(moveEvent.clientX - startX) > 4 || Math.abs(moveEvent.clientY - startY) > 4)
+        ) {
+          copilotLauncherDragMovedRef.current = true;
+        }
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        setCopilotLauncherPosition(
+          clampCopilotLauncherPosition(
+            {
+              x: startPosition.x + (moveEvent.clientX - startX),
+              y: startPosition.y + (moveEvent.clientY - startY),
+            },
+            viewportWidth,
+            viewportHeight,
+          ),
+        );
+      };
+
+      const handlePointerUp = () => {
+        document.body.style.userSelect = originalUserSelect;
+        window.removeEventListener("pointermove", handlePointerMove);
+        window.removeEventListener("pointerup", handlePointerUp);
+      };
+
+      window.addEventListener("pointermove", handlePointerMove);
+      window.addEventListener("pointerup", handlePointerUp);
+    },
+    [copilotLauncherPosition],
+  );
+
+  const onCopilotWindowDragStart = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (typeof window === "undefined" || window.innerWidth < COPILOT_DESKTOP_BREAKPOINT || event.button !== 0) {
+        return;
+      }
+
+      event.preventDefault();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const startRect = copilotWindowRect;
+      const originalUserSelect = document.body.style.userSelect;
+      document.body.style.userSelect = "none";
+
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        setCopilotWindowRect(
+          clampCopilotWindowRect(
+            {
+              ...startRect,
+              x: startRect.x + (moveEvent.clientX - startX),
+              y: startRect.y + (moveEvent.clientY - startY),
+            },
+            viewportWidth,
+            viewportHeight,
+          ),
+        );
+      };
+
+      const handlePointerUp = () => {
+        document.body.style.userSelect = originalUserSelect;
+        window.removeEventListener("pointermove", handlePointerMove);
+        window.removeEventListener("pointerup", handlePointerUp);
+      };
+
+      window.addEventListener("pointermove", handlePointerMove);
+      window.addEventListener("pointerup", handlePointerUp);
+    },
+    [copilotWindowRect],
+  );
+
+  const onCopilotResizeStart = useCallback(
+    (direction: CopilotResizeDirection, event: React.PointerEvent<HTMLDivElement>) => {
+      if (typeof window === "undefined" || window.innerWidth < COPILOT_DESKTOP_BREAKPOINT || event.button !== 0) {
+        return;
+      }
+
+      event.stopPropagation();
+      event.preventDefault();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const startRect = copilotWindowRect;
+      const startRight = startRect.x + startRect.width;
+      const startBottom = startRect.y + startRect.height;
+      const originalUserSelect = document.body.style.userSelect;
+      document.body.style.userSelect = "none";
+
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        const maxWidth = Math.max(
+          COPILOT_WINDOW_WIDTH_MIN,
+          Math.min(COPILOT_WINDOW_WIDTH_MAX, viewportWidth - COPILOT_FLOATING_MARGIN * 2),
+        );
+        const maxHeight = Math.max(
+          COPILOT_WINDOW_HEIGHT_MIN,
+          Math.min(COPILOT_WINDOW_HEIGHT_MAX, viewportHeight - COPILOT_FLOATING_MARGIN * 2),
+        );
+        let left = startRect.x;
+        let right = startRight;
+        let top = startRect.y;
+        let bottom = startBottom;
+
+        if (direction.includes("e")) {
+          right = clampNumber(
+            startRight + (moveEvent.clientX - startX),
+            left + COPILOT_WINDOW_WIDTH_MIN,
+            Math.min(viewportWidth - COPILOT_FLOATING_MARGIN, left + maxWidth),
+          );
+        }
+        if (direction.includes("w")) {
+          left = clampNumber(
+            startRect.x + (moveEvent.clientX - startX),
+            Math.max(COPILOT_FLOATING_MARGIN, right - maxWidth),
+            right - COPILOT_WINDOW_WIDTH_MIN,
+          );
+        }
+        if (direction.includes("s")) {
+          bottom = clampNumber(
+            startBottom + (moveEvent.clientY - startY),
+            top + COPILOT_WINDOW_HEIGHT_MIN,
+            Math.min(viewportHeight - COPILOT_FLOATING_MARGIN, top + maxHeight),
+          );
+        }
+        if (direction.includes("n")) {
+          top = clampNumber(
+            startRect.y + (moveEvent.clientY - startY),
+            Math.max(COPILOT_FLOATING_MARGIN, bottom - maxHeight),
+            bottom - COPILOT_WINDOW_HEIGHT_MIN,
+          );
+        }
+
+        setCopilotWindowRect({
+          x: left,
+          y: top,
+          width: right - left,
+          height: bottom - top,
+        });
+      };
+
+      const handlePointerUp = () => {
+        document.body.style.userSelect = originalUserSelect;
+        window.removeEventListener("pointermove", handlePointerMove);
+        window.removeEventListener("pointerup", handlePointerUp);
+      };
+
+      window.addEventListener("pointermove", handlePointerMove);
+      window.addEventListener("pointerup", handlePointerUp);
+    },
+    [copilotWindowRect],
+  );
+
   const onAskCopilot = useCallback(async (questionOverride?: string) => {
     const question = (questionOverride ?? copilotQuestion).trim();
     const query = (activeQuery || q).trim();
-    const listingContext = filteredResults.slice(0, 25).map((item) => ({
-      listing_key: getListingKey(item),
-      source: item.source,
-      source_listing_id: item.source_listing_id,
-      title: item.title,
-      price: item.price ?? null,
-      location: item.location ?? null,
-      snippet: item.snippet ?? null,
-      score: item.score ?? null,
-      valuation: item.valuation ?? null,
-      risk: item.risk ?? null,
-    }));
+    const listingMap = new Map(filteredResults.map((item) => [getListingKey(item), item]));
+    const selectedListings = copilotSelectedListingKeys
+      .map((listingKey) => listingMap.get(listingKey) ?? null)
+      .filter((item): item is Listing => item !== null);
+    const sourceListings =
+      (selectedListings.length > 0 ? selectedListings : filteredResults).slice(0, 25);
+    const listingContext = sourceListings.map(buildCopilotListingContext);
 
     if (!question || !query || listingContext.length === 0) {
-      setCopilotError("Run a search first, then ask about the visible listings.");
+      setCopilotError("Run a search first, then ask about the visible or selected listings.");
       return;
     }
 
+    const userMessage: CopilotMessage = {
+      id: createCopilotMessageId(),
+      role: "user",
+      content: question,
+    };
+    const conversationPayload: CopilotConversationPayload[] = copilotMessages
+      .slice(-12)
+      .map((message) => ({ role: message.role, content: message.content }));
+    const sessionVersion = copilotSessionVersionRef.current;
+
+    setCopilotOpen(true);
+    setCopilotMessages((prev) => [...prev, userMessage]);
+    setCopilotQuestion("");
     setCopilotLoading(true);
     setCopilotError(null);
     try {
@@ -3228,6 +4122,7 @@ export default function HomePage() {
           query,
           user_question: question,
           listings: listingContext,
+          conversation: conversationPayload,
         }),
       });
       if (!res.ok) {
@@ -3235,17 +4130,33 @@ export default function HomePage() {
         throw new Error(`POST /copilot/query failed (${res.status}): ${text}`);
       }
       const json = (await res.json()) as CopilotResponse;
-      setCopilotResponse(json);
+      if (copilotSessionVersionRef.current !== sessionVersion) return;
+      setLatestShortlist(json.shortlist);
+      setCopilotMessages((prev) => [
+        ...prev,
+        {
+          id: createCopilotMessageId(),
+          role: "assistant",
+          content: buildAssistantConversationContent(json),
+          answer: json.answer,
+          seller_questions: json.seller_questions,
+          red_flags: json.red_flags,
+          available: json.available,
+          error_message: json.error_message ?? null,
+        },
+      ]);
       if (!json.available && json.error_message) {
         setCopilotError(json.error_message);
       }
     } catch (err: unknown) {
-      setCopilotResponse(null);
+      if (copilotSessionVersionRef.current !== sessionVersion) return;
       setCopilotError(err instanceof Error ? err.message : "Failed to query copilot");
     } finally {
-      setCopilotLoading(false);
+      if (copilotSessionVersionRef.current === sessionVersion) {
+        setCopilotLoading(false);
+      }
     }
-  }, [API_BASE, activeQuery, copilotQuestion, filteredResults, q]);
+  }, [API_BASE, activeQuery, copilotMessages, copilotQuestion, copilotSelectedListingKeys, filteredResults, q]);
 
   const hasSourceErrorEntries = Object.keys(sourceErrors).length > 0;
   const summarySources = hasSearched && activeSources.length > 0 ? activeSources : sources;
@@ -3335,12 +4246,26 @@ export default function HomePage() {
       onFacebookCookieFileSelected={onFacebookCookieFileSelected}
       activeQuery={activeQuery}
       copilotOpen={copilotOpen}
-      toggleCopilotOpen={() => setCopilotOpen((prev) => !prev)}
+      openCopilot={openCopilot}
+      closeCopilot={closeCopilot}
       copilotQuestion={copilotQuestion}
       setCopilotQuestion={setCopilotQuestion}
       copilotLoading={copilotLoading}
       copilotError={copilotError}
-      copilotResponse={copilotResponse}
+      copilotMessages={copilotMessages}
+      latestShortlist={latestShortlist}
+      copilotSelectionMode={copilotSelectionMode}
+      toggleCopilotSelectionMode={toggleCopilotSelectionMode}
+      copilotSelectedListingKeys={copilotSelectedListingKeys}
+      clearCopilotSelection={clearCopilotSelection}
+      removeListingFromCopilotSelection={removeListingFromCopilotSelection}
+      onToggleListingSelection={onToggleListingSelection}
+      resetCopilotConversation={resetCopilotConversation}
+      copilotWindowRect={copilotWindowRect}
+      copilotLauncherPosition={copilotLauncherPosition}
+      onCopilotLauncherDragStart={onCopilotLauncherDragStart}
+      onCopilotWindowDragStart={onCopilotWindowDragStart}
+      onCopilotResizeStart={onCopilotResizeStart}
       onAskCopilot={onAskCopilot}
     />
   );

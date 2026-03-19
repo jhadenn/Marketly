@@ -150,7 +150,10 @@ def test_search_and_saved_search_run_include_insight_fields(monkeypatch):
 
 
 def test_copilot_query_returns_graceful_payload(monkeypatch):
+    captured: dict[str, object] = {}
+
     async def fake_generate_copilot_response(**kwargs):
+        captured.update(kwargs)
         return CopilotQueryResponse(
             available=True,
             answer="The best value looks like the road bike listing.",
@@ -180,9 +183,12 @@ def test_copilot_query_returns_graceful_payload(monkeypatch):
                     "source_listing_id": "listing-1",
                     "title": "Road bike listing",
                     "price": {"amount": 450, "currency": "CAD"},
+                    "url": "https://example.com/listing-1",
+                    "condition": "used",
                     "location": "Toronto",
                     "snippet": "Detailed seller description",
                     "score": 6.0,
+                    "score_reason": "Strong keyword match.",
                     "valuation": {
                         "verdict": "underpriced",
                         "estimated_low": 500,
@@ -201,6 +207,12 @@ def test_copilot_query_returns_graceful_payload(monkeypatch):
                     },
                 }
             ],
+            "conversation": [
+                {
+                    "role": "user",
+                    "content": "Which bike looks best so far?",
+                }
+            ],
         },
     )
 
@@ -208,3 +220,4 @@ def test_copilot_query_returns_graceful_payload(monkeypatch):
     payload = response.json()
     assert payload["available"] is True
     assert payload["shortlist"][0]["listing_key"] == "ebay:listing-1"
+    assert captured["conversation"] == [{"role": "user", "content": "Which bike looks best so far?"}]
