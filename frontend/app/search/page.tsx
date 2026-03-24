@@ -3,6 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkBreaks from "remark-breaks";
+import remarkGfm from "remark-gfm";
 import {
   ArrowUpRight,
   BellRing,
@@ -43,7 +46,7 @@ const SORT_OPTIONS = [
   { value: "relevance", label: "Relevance", disabled: false },
   { value: "price_asc", label: "Price: Low -> High", disabled: false },
   { value: "price_desc", label: "Price: High -> Low", disabled: false },
-  { value: "newest", label: "Newest (unavailable)", disabled: true },
+  { value: "newest", label: "Newest", disabled: false },
 ] as const;
 
 type PreviewListing = {
@@ -132,6 +135,7 @@ type Listing = {
   longitude?: number | null;
   condition?: string | null;
   snippet?: string | null;
+  posted_at?: string | null;
   score?: number;
   score_reason?: string | null;
   valuation?: Valuation | null;
@@ -202,6 +206,7 @@ type SavedSearchNotification = {
   saved_search_id: number;
   saved_search_query: string;
   summary: string;
+  new_count: number;
   created_at: string;
   read_at?: string | null;
   items: NotificationItem[];
@@ -420,6 +425,11 @@ function sortListingsLocal(listings: Listing[], sort: SortOption): Listing[] {
   }
 
   const indexed = listings.map((item, index) => ({ item, index }));
+  const postedAtTimestamp = (value: string | null | undefined) => {
+    if (!value) return null;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
 
   if (sort === "price_asc") {
     indexed.sort((a, b) => {
@@ -442,6 +452,21 @@ function sortListingsLocal(listings: Listing[], sort: SortOption): Listing[] {
       const aAmount = a.item.price?.amount ?? Number.NEGATIVE_INFINITY;
       const bAmount = b.item.price?.amount ?? Number.NEGATIVE_INFINITY;
       if (aAmount !== bAmount) return bAmount - aAmount;
+      return a.index - b.index;
+    });
+    return indexed.map((entry) => entry.item);
+  }
+
+  if (sort === "newest") {
+    indexed.sort((a, b) => {
+      const aTimestamp = postedAtTimestamp(a.item.posted_at);
+      const bTimestamp = postedAtTimestamp(b.item.posted_at);
+      const aMissing = aTimestamp === null;
+      const bMissing = bTimestamp === null;
+      if (aMissing !== bMissing) return aMissing ? 1 : -1;
+      if (aTimestamp !== null && bTimestamp !== null && aTimestamp !== bTimestamp) {
+        return bTimestamp - aTimestamp;
+      }
       return a.index - b.index;
     });
     return indexed.map((entry) => entry.item);
@@ -545,6 +570,81 @@ function formatTimestamp(value?: string | null) {
     minute: "2-digit",
   });
 }
+
+function formatNewListingsCount(count: number) {
+  return `${count} new ${count === 1 ? "listing" : "listings"}`;
+}
+
+function getSavedSearchAlertStatus(entry: SavedSearch) {
+  if (!entry.alerts_enabled) {
+    return "Alerts off";
+  }
+
+  if (!entry.last_alert_checked_at) {
+    return "Waiting for first alert check. The first check sets your baseline.";
+  }
+
+  const lastChecked = formatTimestamp(entry.last_alert_checked_at);
+  if (!entry.last_alert_notified_at) {
+    return `Last checked ${lastChecked}. No new listings since your baseline.`;
+  }
+
+  return `Last checked ${lastChecked}. Last alert ${formatTimestamp(entry.last_alert_notified_at)}.`;
+}
+
+function normalizeNotificationError(error: unknown, fallback: string) {
+  if (!(error instanceof Error)) return fallback;
+  const message = error.message.trim();
+  if (!message) return fallback;
+  if (/failed to fetch|load failed|networkerror/i.test(message)) {
+    return fallback;
+  }
+  return message;
+}
+
+const COPILOT_MARKDOWN_COMPONENTS: Components = {
+  p: ({ children }) => (
+    <p className="mt-3 text-sm leading-relaxed text-zinc-100 first:mt-0">{children}</p>
+  ),
+  ul: ({ children }) => (
+    <ul className="mt-3 list-disc space-y-1.5 pl-5 text-sm leading-relaxed text-zinc-100 first:mt-0">
+      {children}
+    </ul>
+  ),
+  ol: ({ children }) => (
+    <ol className="mt-3 list-decimal space-y-1.5 pl-5 text-sm leading-relaxed text-zinc-100 first:mt-0">
+      {children}
+    </ol>
+  ),
+  li: ({ children }) => <li className="pl-1">{children}</li>,
+  a: ({ children, href }) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="font-medium text-emerald-200 underline underline-offset-2 transition hover:text-emerald-100"
+    >
+      {children}
+    </a>
+  ),
+  strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
+  em: ({ children }) => <em className="italic text-zinc-100">{children}</em>,
+  code: ({ children }) => (
+    <code className="rounded bg-white/[0.08] px-1.5 py-0.5 font-mono text-[0.9em] text-zinc-100">
+      {children}
+    </code>
+  ),
+  pre: ({ children }) => (
+    <pre className="mt-3 overflow-x-auto rounded-xl border border-white/10 bg-black/30 p-3 text-sm text-zinc-100 first:mt-0">
+      {children}
+    </pre>
+  ),
+  blockquote: ({ children }) => (
+    <blockquote className="mt-3 border-l-2 border-white/15 pl-4 text-sm text-zinc-300 first:mt-0">
+      {children}
+    </blockquote>
+  ),
+};
 
 function haversineMiles(a: Coordinates, b: Coordinates) {
   const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
@@ -1253,7 +1353,7 @@ function SavedSearchRail(props: SavedSearchRailProps) {
                 : "Log in to view and run saved searches."}
           </p>
           <p className="mt-1 text-xs text-zinc-500">
-            Saved searches can auto-load a multi-query feed and feed the alert digest.
+            Saved searches can auto-load a multi-query feed and power saved search alerts.
           </p>
         </div>
       ) : (
@@ -1282,6 +1382,9 @@ function SavedSearchRail(props: SavedSearchRailProps) {
                       {entry.alerts_enabled ? "Alerts on" : "Alerts off"}
                     </span>
                   </div>
+                  <p className="mt-2 text-xs leading-relaxed text-zinc-500">
+                    {getSavedSearchAlertStatus(entry)}
+                  </p>
                 </div>
                 {props.activeSavedSearchId === entry.id ? (
                   <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-zinc-300">
@@ -1377,17 +1480,17 @@ function AlertsRail(props: AlertsRailProps) {
       {!props.user ? (
         <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-4">
           <p className="text-sm text-zinc-300">
-            {props.authLoading ? "Checking your account..." : "Log in to receive alert digests."}
+            {props.authLoading ? "Checking your account..." : "Log in to receive saved search alerts."}
           </p>
           <p className="mt-1 text-xs text-zinc-500">
-            Daily digests only include new high-confidence matches from alert-enabled saved searches.
+            Alerts appear when Marketly finds new listings for one of your alert-enabled saved searches.
           </p>
         </div>
       ) : props.notifications.length === 0 ? (
         <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-4">
-          <p className="text-sm text-zinc-300">No alert digests yet.</p>
+          <p className="text-sm text-zinc-300">No saved search alerts yet.</p>
           <p className="mt-1 text-xs text-zinc-500">
-            Enable alerts on a saved search and the next digest will show up here.
+            Enable alerts on a saved search and new-listing alerts will show up here.
           </p>
         </div>
       ) : (
@@ -1405,10 +1508,10 @@ function AlertsRail(props: AlertsRailProps) {
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <p className="line-clamp-2 text-sm font-medium text-zinc-100">
-                    {notification.summary}
+                    {notification.saved_search_query}
                   </p>
                   <p className="mt-1 text-[11px] text-zinc-500">
-                    {notification.saved_search_query} | {formatTimestamp(notification.created_at)}
+                    {formatNewListingsCount(notification.new_count)} | {formatTimestamp(notification.created_at)}
                   </p>
                 </div>
                 {!notification.read_at ? (
@@ -1425,29 +1528,6 @@ function AlertsRail(props: AlertsRailProps) {
                   </span>
                 )}
               </div>
-
-              <ul className="mt-3 space-y-1.5">
-                {notification.items.slice(0, 3).map((item) => (
-                  <li key={`${notification.id}-${item.listing_key}`}>
-                    <a
-                      href={item.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="block rounded-lg border border-white/10 bg-black/20 px-3 py-2 transition hover:border-white/20 hover:bg-white/[0.03]"
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <p className="line-clamp-1 text-xs font-medium text-zinc-100">{item.title}</p>
-                          <p className="mt-1 text-[11px] text-zinc-500">
-                            {formatSourceLabel(item.source)} | {Math.round(item.match_confidence * 100)}% match
-                          </p>
-                        </div>
-                        <span className="text-[11px] text-zinc-300">{formatPrice(item.price)}</span>
-                      </div>
-                    </a>
-                  </li>
-                ))}
-              </ul>
             </li>
           ))}
         </ul>
@@ -1713,8 +1793,8 @@ function EditSavedSearchModal(
 
           <label className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2.5">
             <div>
-              <p className="text-sm font-medium text-zinc-100">AI alerts</p>
-              <p className="text-xs text-zinc-500">Include this search in the daily alert digest.</p>
+              <p className="text-sm font-medium text-zinc-100">Saved search alerts</p>
+              <p className="text-xs text-zinc-500">Let me know when new listings appear for this search.</p>
             </div>
             <button
               type="button"
@@ -2167,9 +2247,14 @@ function CopilotTranscriptMessage({ message }: { message: CopilotMessage }) {
 
   return (
     <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
-      <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-100">
-        {message.answer ?? message.content}
-      </p>
+      <div className="text-sm leading-relaxed text-zinc-100">
+        <ReactMarkdown
+          components={COPILOT_MARKDOWN_COMPONENTS}
+          remarkPlugins={[remarkGfm, remarkBreaks]}
+        >
+          {(message.answer ?? message.content).replace(/\r\n/g, "\n")}
+        </ReactMarkdown>
+      </div>
       {message.seller_questions && message.seller_questions.length > 0 ? (
         <div className="mt-3">
           <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-500">
@@ -2358,44 +2443,44 @@ function CopilotWindow({
         }
       >
         <GlassPanel className="relative flex h-full w-full min-h-0 flex-col overflow-hidden">
-          <div className="flex items-start justify-between gap-3 border-b border-white/10 px-4 py-3">
+          <div className="border-b border-white/10 px-4 py-3">
             <div
               className={cn(
-                "flex min-w-0 flex-1 items-start gap-3",
+                "flex min-w-0 items-center justify-between gap-3",
                 isDesktop ? "cursor-move select-none" : "",
               )}
               onPointerDown={isDesktop ? onCopilotWindowDragStart : undefined}
             >
-              <div className="rounded-full border border-white/10 bg-white/[0.02] p-2 text-zinc-300">
-                <Bot className="size-4" />
+              <div className="flex min-w-0 flex-1 items-center gap-3">
+                <div className="rounded-full border border-white/10 bg-white/[0.02] p-2 text-zinc-300">
+                  <Bot className="size-4" />
+                </div>
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+                  <p className="font-mono text-xs uppercase tracking-[0.18em] text-zinc-500">Copilot</p>
+                  <button
+                    type="button"
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={toggleCopilotSelectionMode}
+                    className={cn(
+                      "rounded-full border px-3 py-2 text-xs font-medium uppercase tracking-[0.14em] transition",
+                      copilotSelectionMode
+                        ? "border-emerald-300/30 bg-emerald-400/10 text-emerald-100"
+                        : "border-white/10 bg-white/[0.02] text-zinc-300 hover:border-white/20 hover:bg-white/[0.05]",
+                    )}
+                  >
+                    {copilotSelectionMode ? "Selecting listings" : "Select listings"}
+                  </button>
+                  <button
+                    type="button"
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={resetCopilotConversation}
+                    className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05]"
+                  >
+                    <RefreshCw className="size-3.5" />
+                    New chat
+                  </button>
+                </div>
               </div>
-              <div className="min-w-0">
-                <p className="font-mono text-xs uppercase tracking-[0.18em] text-zinc-500">Copilot</p>
-              </div>
-            </div>
-            <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-              <button
-                type="button"
-                onPointerDown={(event) => event.stopPropagation()}
-                onClick={toggleCopilotSelectionMode}
-                className={cn(
-                  "rounded-full border px-3 py-2 text-xs font-medium uppercase tracking-[0.14em] transition",
-                  copilotSelectionMode
-                    ? "border-emerald-300/30 bg-emerald-400/10 text-emerald-100"
-                    : "border-white/10 bg-white/[0.02] text-zinc-300 hover:border-white/20 hover:bg-white/[0.05]",
-                )}
-              >
-                {copilotSelectionMode ? "Selecting listings" : "Select listings"}
-              </button>
-              <button
-                type="button"
-                onPointerDown={(event) => event.stopPropagation()}
-                onClick={resetCopilotConversation}
-                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05]"
-              >
-                <RefreshCw className="size-3.5" />
-                New chat
-              </button>
               <button
                 type="button"
                 onPointerDown={(event) => event.stopPropagation()}
@@ -2893,6 +2978,7 @@ export default function HomePage() {
     (
       query: string,
       selectedSources: SourceOption[],
+      selectedSort: SortOption,
       selectedLimit: number,
       offset: number,
     ) => {
@@ -2901,7 +2987,7 @@ export default function HomePage() {
       for (const source of selectedSources) {
         params.append("sources", source);
       }
-      params.set("sort", "relevance");
+      params.set("sort", selectedSort);
       params.set("limit", String(selectedLimit));
       params.set("offset", String(offset));
       if (deviceCoords) {
@@ -2951,7 +3037,7 @@ export default function HomePage() {
       }
 
       try {
-        const url = buildSearchUrl(query, sourceList, selectedLimit, offset);
+        const url = buildSearchUrl(query, sourceList, selectedSort, selectedLimit, offset);
         const res = await fetch(url, {
           cache: "no-store",
           headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
@@ -3284,7 +3370,12 @@ export default function HomePage() {
       setNotifications(json);
       return json;
     } catch (err: unknown) {
-      setNotificationsError(err instanceof Error ? err.message : "Failed to load notifications");
+      setNotificationsError(
+        normalizeNotificationError(
+          err,
+          "Unable to load saved search alerts right now. Please try again.",
+        ),
+      );
       return null;
     } finally {
       setNotificationsLoading(false);
@@ -3295,16 +3386,18 @@ export default function HomePage() {
     entry: SavedSearch | SavedBatchPaginationEntry,
     {
       selectedLimit,
+      selectedSort,
       offset,
     }: {
       selectedLimit: number;
+      selectedSort: SortOption;
       offset: number;
     },
   ): Promise<SearchResponse> => {
     if (!accessToken) throw new Error("Please log in again.");
 
     const params = new URLSearchParams();
-    params.set("sort", "relevance");
+    params.set("sort", selectedSort);
     params.set("limit", String(selectedLimit));
     params.set("offset", String(offset));
     if (deviceCoords) {
@@ -3351,6 +3444,7 @@ export default function HomePage() {
         entryId: entry.id,
         payload: await fetchSavedSearchPage(entry, {
           selectedLimit: savedBatchPagination.selectedLimit,
+          selectedSort: savedBatchPagination.selectedSort,
           offset: entry.nextOffset ?? 0,
         }),
       }));
@@ -3532,6 +3626,7 @@ export default function HomePage() {
         entry,
         payload: await fetchSavedSearchPage(entry, {
           selectedLimit,
+          selectedSort,
           offset: 0,
         }),
       }));
@@ -3690,6 +3785,7 @@ export default function HomePage() {
       }
 
       await fetchSavedSearches();
+      await fetchNotifications();
     } catch (err: unknown) {
       setSavedError(err instanceof Error ? err.message : "Failed to save search");
     }
@@ -3711,10 +3807,12 @@ export default function HomePage() {
         throw new Error(`DELETE /saved-searches/${id} failed (${res.status}): ${text}`);
       }
 
+      setNotifications((prev) => prev.filter((entry) => entry.saved_search_id !== id));
       if (activeSavedSearchId === id) {
         setActiveSavedSearchId(null);
       }
       await fetchSavedSearches();
+      await fetchNotifications();
     } catch (err: unknown) {
       setSavedError(err instanceof Error ? err.message : "Failed to delete saved search");
     }
@@ -3778,6 +3876,7 @@ export default function HomePage() {
   }
 
   async function onChangeSort(nextSort: SortOption) {
+    const currentSort = sortBy;
     setSortBy(nextSort);
     setActiveSort(nextSort);
     setSavedBatchPagination((prev) =>
@@ -3788,6 +3887,29 @@ export default function HomePage() {
           }
         : prev,
     );
+
+    const rerunForServerSortedResults =
+      hasSearched && (currentSort === "newest" || nextSort === "newest");
+    if (!rerunForServerSortedResults) {
+      return;
+    }
+
+    if (resultMode === "saved_batch") {
+      await runAllSavedSearches(saved, {
+        selectedSort: nextSort,
+        selectedLimit: activeLimit,
+      });
+      return;
+    }
+
+    await runSearch({
+      query: activeQuery,
+      sourceList: activeSources,
+      selectedSort: nextSort,
+      selectedLimit: activeLimit,
+      offset: 0,
+      append: false,
+    });
   }
 
   function toggleSource(source: SourceOption) {
@@ -3862,6 +3984,7 @@ export default function HomePage() {
 
       const updated = (await res.json()) as SavedSearch;
       setSaved((prev) => prev.map((entry) => (entry.id === updated.id ? updated : entry)));
+      await fetchNotifications();
 
       if (activeSavedSearchId === updated.id) {
         const normalizedSources = updated.sources.filter(isSourceOption);
@@ -3907,7 +4030,12 @@ export default function HomePage() {
       const updated = (await res.json()) as SavedSearchNotification;
       setNotifications((prev) => prev.map((entry) => (entry.id === updated.id ? updated : entry)));
     } catch (err: unknown) {
-      setNotificationsError(err instanceof Error ? err.message : "Failed to mark notification as read");
+      setNotificationsError(
+        normalizeNotificationError(
+          err,
+          "Unable to update this alert right now. Please try again.",
+        ),
+      );
     }
   }
 

@@ -49,3 +49,4 @@ def test_normalizer_treats_just_listed_as_age_not_title() -> None:
     assert listing is not None
     assert listing.title == "iPhone 14 Pro"
     assert listing.age_hint == "Just listed"
+    assert listing.posted_at is not None

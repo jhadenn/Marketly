@@ -4,13 +4,14 @@ from app.models.listing import Listing
 from app.services import search_service
 
 
-def _listing(idx: int, *, source: str = "ebay") -> Listing:
+def _listing(idx: int, *, source: str = "ebay", posted_at: str | None = None) -> Listing:
     return Listing(
         source=source,
         source_listing_id=str(idx),
         title=f"item {idx}",
         url=f"https://example.com/{source}/{idx}",
         image_urls=[],
+        posted_at=posted_at,
     )
 
 
@@ -28,7 +29,7 @@ def test_unified_search_multi_source_keeps_fetch_window_stable(monkeypatch):
     )
     fetch_limits: list[int] = []
 
-    async def fake_fetch_and_score(query, sources, fetch_limit):
+    async def fake_fetch_and_score(query, sources, fetch_limit, sort):
         fetch_limits.append(fetch_limit)
         if fetch_limit <= limit:
             return (
@@ -108,7 +109,7 @@ def test_unified_search_multi_source_skips_expansion_when_facebook_guard_enabled
     base_pool = [_listing(idx) for idx in range(limit * 2)]
     fetch_limits: list[int] = []
 
-    async def fake_fetch_and_score(query, sources, fetch_limit):
+    async def fake_fetch_and_score(query, sources, fetch_limit, sort):
         fetch_limits.append(fetch_limit)
         return (
             base_pool[:fetch_limit],
@@ -138,7 +139,7 @@ def test_unified_search_multi_source_skips_expansion_when_facebook_guard_enabled
 def test_unified_search_single_source_still_expands_fetch_window(monkeypatch):
     fetch_limits: list[int] = []
 
-    async def fake_fetch_and_score(query, sources, fetch_limit):
+    async def fake_fetch_and_score(query, sources, fetch_limit, sort):
         fetch_limits.append(fetch_limit)
         return [_listing(idx) for idx in range(fetch_limit)], {}, {"ebay": fetch_limit}
 
@@ -161,7 +162,7 @@ def test_unified_search_single_source_first_page_keeps_next_offset(monkeypatch):
     limit = 24
     fetch_limits: list[int] = []
 
-    async def fake_fetch_and_score(query, sources, fetch_limit):
+    async def fake_fetch_and_score(query, sources, fetch_limit, sort):
         fetch_limits.append(fetch_limit)
         pool_size = min(fetch_limit, 50)
         return [_listing(idx) for idx in range(pool_size)], {}, {"ebay": pool_size}
@@ -213,7 +214,7 @@ def test_unified_search_multi_source_balances_sources_for_relevance(monkeypatch)
     monkeypatch.setattr(search_service.settings, "MARKETLY_BALANCE_MULTI_SOURCE_RESULTS", True)
     monkeypatch.setattr(search_service.settings, "MARKETLY_DISABLE_FACEBOOK_MULTI_SOURCE_EXPANSION", True)
 
-    async def fake_fetch_and_score(query, sources, fetch_limit):
+    async def fake_fetch_and_score(query, sources, fetch_limit, sort):
         results = [
             _listing(1, source="ebay"),
             _listing(2, source="ebay"),
@@ -237,6 +238,19 @@ def test_unified_search_multi_source_balances_sources_for_relevance(monkeypatch)
     )
 
     assert [item.source for item in page] == ["ebay", "facebook", "ebay", "facebook"]
+
+
+def test_sort_results_newest_prefers_timestamps_and_pushes_missing_to_bottom():
+    items = [
+        _listing(1, posted_at="2026-03-20T10:00:00Z"),
+        _listing(2),
+        _listing(3, posted_at="2026-03-24T12:00:00Z"),
+        _listing(4, posted_at="2026-03-24T12:00:00Z"),
+    ]
+
+    ordered = search_service._sort_results(items, sort="newest")
+
+    assert [item.source_listing_id for item in ordered] == ["3", "4", "1", "2"]
 
 
 def test_fetch_source_facebook_requires_auth(monkeypatch):

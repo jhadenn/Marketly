@@ -13,7 +13,6 @@ from app.models.saved_search import SavedSearch
 from app.models.saved_search_notification import SavedSearchNotification
 from app.schemas.notifications import SavedSearchNotificationOut
 from app.services.facebook_credentials import decrypt_cookie_payload, get_user_facebook_credential
-from app.services.gemini_client import generate_alert_summary
 from app.services.listing_insights import enrich_listings_with_insights, listing_fingerprint, listing_key
 from app.services.listing_snapshots import persist_listing_snapshots, previously_seen_fingerprints
 from app.services.search_service import FacebookRuntimeContext, unified_search
@@ -128,15 +127,29 @@ def _notification_item_from_listing(item: Listing, confidence: float, why_matche
     }
 
 
+def _notification_new_count(items_json: object) -> int:
+    if not isinstance(items_json, list):
+        return 0
+    return len(items_json)
+
+
+def build_notification_summary(query: str, new_count: int) -> str:
+    listing_label = "listing" if new_count == 1 else "listings"
+    return f"{new_count} new {listing_label} for {query}"
+
+
 def serialize_notification(row: SavedSearchNotification) -> SavedSearchNotificationOut:
+    items = row.items_json if isinstance(row.items_json, list) else []
+    new_count = _notification_new_count(items)
     return SavedSearchNotificationOut(
         id=row.id,
         saved_search_id=row.saved_search_id,
         saved_search_query=row.saved_search_query,
-        summary=row.summary_text,
+        summary=build_notification_summary(row.saved_search_query, new_count),
+        new_count=new_count,
         created_at=str(row.created_at),
         read_at=str(row.read_at) if row.read_at is not None else None,
-        items=row.items_json or [],
+        items=items,
     )
 
 
@@ -195,6 +208,7 @@ async def refresh_saved_search_alerts_for_user(
             user_id=user_id,
         )
     except Exception as exc:
+        db.rollback()
         logger.warning("saved search alert refresh failed for user %s: %s", user_id, exc)
         if refresh_window_seconds > 0:
             _alerts_refresh_limiter.delete(cache_key)
@@ -222,15 +236,19 @@ async def run_saved_search_alert_job(
 
     for saved_search in saved_searches:
         checked += 1
-        source_list = _split_sources(saved_search.sources)
-        if not source_list:
-            continue
-
-        facebook_runtime_context = None
-        if "facebook" in source_list:
-            facebook_runtime_context = _facebook_runtime_context(db, saved_search.user_id)
+        saved_search_id_value = saved_search.id
+        saved_search_user_id = saved_search.user_id
+        saved_search_query = saved_search.query
 
         try:
+            source_list = _split_sources(saved_search.sources)
+            if not source_list:
+                continue
+
+            facebook_runtime_context = None
+            if "facebook" in source_list:
+                facebook_runtime_context = _facebook_runtime_context(db, saved_search.user_id)
+
             results, _, _, _ = await unified_search(
                 query=saved_search.query,
                 sources=source_list,
@@ -240,65 +258,74 @@ async def run_saved_search_alert_job(
                 facebook_runtime_context=facebook_runtime_context,
             )
             enrich_listings_with_insights(db, saved_search.query, results)
-        except Exception as exc:
-            logger.warning("saved search alert run failed id=%s error=%s", saved_search.id, exc)
-            continue
+            now = _utc_now()
+            seen_before = _as_utc(saved_search.last_alert_checked_at)
+            if seen_before is None:
+                persist_listing_snapshots(
+                    query=saved_search.query,
+                    listings=results,
+                    user_id=saved_search.user_id,
+                    saved_search_id=saved_search.id,
+                )
+                saved_search.last_alert_checked_at = now
+                db.commit()
+                continue
 
-        now = _utc_now()
-        seen_before = _as_utc(saved_search.last_alert_checked_at)
-        if seen_before is None:
+            fingerprints = [listing_fingerprint(item) for item in results]
+            seen_fingerprints = previously_seen_fingerprints(
+                db,
+                saved_search_id=saved_search.id,
+                listing_fingerprints=fingerprints,
+                seen_before=seen_before,
+            )
+
             persist_listing_snapshots(
                 query=saved_search.query,
                 listings=results,
                 user_id=saved_search.user_id,
                 saved_search_id=saved_search.id,
             )
+
+            matched_items: list[dict] = []
+            for item in results:
+                fingerprint = listing_fingerprint(item)
+                if fingerprint in seen_fingerprints:
+                    continue
+
+                confidence, why_matched = compute_match_confidence(item)
+                if confidence < ALERT_CONFIDENCE_THRESHOLD:
+                    continue
+                matched_items.append(_notification_item_from_listing(item, confidence, why_matched))
+
             saved_search.last_alert_checked_at = now
-            db.commit()
-            continue
-
-        fingerprints = [listing_fingerprint(item) for item in results]
-        seen_fingerprints = previously_seen_fingerprints(
-            db,
-            saved_search_id=saved_search.id,
-            listing_fingerprints=fingerprints,
-            seen_before=seen_before,
-        )
-
-        persist_listing_snapshots(
-            query=saved_search.query,
-            listings=results,
-            user_id=saved_search.user_id,
-            saved_search_id=saved_search.id,
-        )
-
-        matched_items: list[dict] = []
-        for item in results:
-            fingerprint = listing_fingerprint(item)
-            if fingerprint in seen_fingerprints:
-                continue
-
-            confidence, why_matched = compute_match_confidence(item)
-            if confidence < ALERT_CONFIDENCE_THRESHOLD:
-                continue
-            matched_items.append(_notification_item_from_listing(item, confidence, why_matched))
-
-        saved_search.last_alert_checked_at = now
-        if matched_items:
-            summary_text = await generate_alert_summary(saved_search.query, matched_items)
-            db.add(
-                SavedSearchNotification(
-                    user_id=saved_search.user_id or "",
-                    saved_search_id=saved_search.id,
-                    saved_search_query=saved_search.query,
-                    summary_text=summary_text,
-                    items_json=matched_items,
+            created_notification = False
+            if matched_items:
+                new_count = len(matched_items)
+                db.add(
+                    SavedSearchNotification(
+                        user_id=saved_search.user_id or "",
+                        saved_search_id=saved_search.id,
+                        saved_search_query=saved_search.query,
+                        summary_text=build_notification_summary(saved_search.query, new_count),
+                        items_json=matched_items,
+                    )
                 )
-            )
-            saved_search.last_alert_notified_at = now
-            notifications_created += 1
+                saved_search.last_alert_notified_at = now
+                created_notification = True
 
-        db.commit()
+            db.commit()
+            if created_notification:
+                notifications_created += 1
+        except Exception as exc:
+            db.rollback()
+            logger.warning(
+                "saved search alert run failed id=%s user_id=%s query=%s error=%s",
+                saved_search_id_value,
+                saved_search_user_id,
+                saved_search_query,
+                exc,
+            )
+            continue
 
     return {
         "checked": checked,
@@ -312,6 +339,10 @@ def list_notifications(
     user_id: str,
     limit: int = 25,
 ) -> list[SavedSearchNotificationOut]:
+    stale_count = purge_stale_notifications(db, user_id=user_id)
+    if stale_count > 0:
+        db.commit()
+
     rows = (
         db.query(SavedSearchNotification)
         .filter(SavedSearchNotification.user_id == user_id)
@@ -320,6 +351,64 @@ def list_notifications(
         .all()
     )
     return [serialize_notification(row) for row in rows]
+
+
+def delete_notifications_for_saved_search(
+    db: Session,
+    *,
+    user_id: str,
+    saved_search_id: int,
+) -> int:
+    deleted = (
+        db.query(SavedSearchNotification)
+        .filter(
+            SavedSearchNotification.user_id == user_id,
+            SavedSearchNotification.saved_search_id == saved_search_id,
+        )
+        .delete(synchronize_session=False)
+    )
+    return int(deleted or 0)
+
+
+def purge_stale_notifications(
+    db: Session,
+    *,
+    user_id: str,
+) -> int:
+    saved_search_rows = (
+        db.query(SavedSearch.id, SavedSearch.query)
+        .filter(SavedSearch.user_id == user_id)
+        .all()
+    )
+    active_queries_by_id = {int(row.id): str(row.query) for row in saved_search_rows}
+
+    notification_rows = (
+        db.query(
+            SavedSearchNotification.id,
+            SavedSearchNotification.saved_search_id,
+            SavedSearchNotification.saved_search_query,
+        )
+        .filter(SavedSearchNotification.user_id == user_id)
+        .all()
+    )
+
+    stale_ids = [
+        int(row.id)
+        for row in notification_rows
+        if active_queries_by_id.get(int(row.saved_search_id)) != str(row.saved_search_query)
+    ]
+    if not stale_ids:
+        return 0
+
+    deleted = (
+        db.query(SavedSearchNotification)
+        .filter(
+            SavedSearchNotification.user_id == user_id,
+            SavedSearchNotification.id.in_(stale_ids),
+        )
+        .delete(synchronize_session=False)
+    )
+    return int(deleted or 0)
 
 
 def mark_notification_read(

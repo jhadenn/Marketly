@@ -81,11 +81,13 @@ def test_saved_search_and_notification_endpoints_include_alert_fields(monkeypatc
     assert notifications_res.status_code == 200
     notifications = notifications_res.json()
     assert len(notifications) == 1
-    assert notifications[0]["summary"] == "1 new match for road bike"
+    assert notifications[0]["summary"] == "1 new listing for road bike"
+    assert notifications[0]["new_count"] == 1
 
     read_res = client.post(f"/me/notifications/{notifications[0]['id']}/read")
     assert read_res.status_code == 200
     assert read_res.json()["read_at"] is not None
+    assert read_res.json()["new_count"] == 1
 
     app.dependency_overrides.clear()
     engine.dispose()
@@ -271,13 +273,36 @@ def test_notifications_endpoint_refreshes_alerts_before_listing(monkeypatch):
 
     db = session_factory()
     try:
+        saved_search = SavedSearch(
+            user_id="user-123",
+            query="road bike",
+            sources="ebay",
+            alerts_enabled=True,
+        )
+        db.add(saved_search)
+        db.commit()
+        db.refresh(saved_search)
         db.add(
             SavedSearchNotification(
                 user_id="user-123",
-                saved_search_id=1,
+                saved_search_id=saved_search.id,
                 saved_search_query="road bike",
                 summary_text="1 new match for road bike",
-                items_json=[],
+                items_json=[
+                    {
+                        "listing_key": "ebay:listing-1",
+                        "source": "ebay",
+                        "source_listing_id": "listing-1",
+                        "title": "Road bike listing",
+                        "url": "https://example.com/listing-1",
+                        "price": {"amount": 450, "currency": "CAD"},
+                        "location": "Toronto",
+                        "match_confidence": 0.91,
+                        "why_matched": ["Strong keyword match to the saved search."],
+                        "valuation": None,
+                        "risk": None,
+                    }
+                ],
             )
         )
         db.commit()
@@ -289,6 +314,82 @@ def test_notifications_endpoint_refreshes_alerts_before_listing(monkeypatch):
     assert notifications_res.status_code == 200
     assert called == {"user_id": "user-123"}
     assert len(notifications_res.json()) == 1
+    assert notifications_res.json()[0]["summary"] == "1 new listing for road bike"
+    assert notifications_res.json()[0]["new_count"] == 1
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_notifications_endpoint_returns_existing_rows_when_refresh_session_is_poisoned(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+
+    async def fake_refresh_saved_search_alerts_for_user(db, *, user_id):
+        db.add(
+            SavedSearchNotification(
+                user_id=None,
+                saved_search_id=999,
+                saved_search_query="broken",
+                summary_text="broken",
+                items_json=[],
+            )
+        )
+        try:
+            db.commit()
+        except Exception:
+            return False
+        return True
+
+    monkeypatch.setattr("app.main.refresh_saved_search_alerts_for_user", fake_refresh_saved_search_alerts_for_user)
+
+    db = session_factory()
+    try:
+        saved_search = SavedSearch(
+            user_id="user-123",
+            query="road bike",
+            sources="ebay",
+            alerts_enabled=True,
+        )
+        db.add(saved_search)
+        db.commit()
+        db.refresh(saved_search)
+        db.add(
+            SavedSearchNotification(
+                user_id="user-123",
+                saved_search_id=saved_search.id,
+                saved_search_query="road bike",
+                summary_text="legacy summary",
+                items_json=[
+                    {
+                        "listing_key": "ebay:listing-1",
+                        "source": "ebay",
+                        "source_listing_id": "listing-1",
+                        "title": "Road bike listing",
+                        "url": "https://example.com/listing-1",
+                        "price": {"amount": 450, "currency": "CAD"},
+                        "location": "Toronto",
+                        "match_confidence": 0.91,
+                        "why_matched": ["Strong keyword match to the saved search."],
+                        "valuation": None,
+                        "risk": None,
+                    }
+                ],
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    notifications_res = client.get("/me/notifications")
+
+    assert notifications_res.status_code == 200
+    payload = notifications_res.json()
+    assert len(payload) == 1
+    assert payload[0]["saved_search_query"] == "road bike"
+    assert payload[0]["summary"] == "1 new listing for road bike"
+    assert payload[0]["new_count"] == 1
 
     app.dependency_overrides.clear()
     engine.dispose()
@@ -313,6 +414,16 @@ def test_update_saved_search_resets_alert_baseline_when_query_changes():
         db.commit()
         db.refresh(saved_search)
         saved_search_id = saved_search.id
+        db.add(
+            SavedSearchNotification(
+                user_id="user-123",
+                saved_search_id=saved_search_id,
+                saved_search_query="road bike",
+                summary_text="1 new listing for road bike",
+                items_json=[],
+            )
+        )
+        db.commit()
     finally:
         db.close()
 
@@ -326,9 +437,15 @@ def test_update_saved_search_resets_alert_baseline_when_query_changes():
     db = session_factory()
     try:
         updated = db.query(SavedSearch).filter(SavedSearch.id == saved_search_id).first()
+        notifications = (
+            db.query(SavedSearchNotification)
+            .filter(SavedSearchNotification.saved_search_id == saved_search_id)
+            .all()
+        )
         assert updated is not None
         assert updated.last_alert_checked_at is None
         assert updated.last_alert_notified_at is None
+        assert notifications == []
     finally:
         db.close()
 
@@ -374,6 +491,171 @@ def test_update_saved_search_resets_alert_baseline_when_reenabled():
         assert updated.last_alert_notified_at is None
     finally:
         db.close()
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_delete_saved_search_removes_notifications():
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+
+    db = session_factory()
+    try:
+        saved_search = SavedSearch(
+            user_id="user-123",
+            query="acura rsx",
+            sources="ebay",
+            alerts_enabled=True,
+        )
+        db.add(saved_search)
+        db.commit()
+        db.refresh(saved_search)
+        saved_search_id = saved_search.id
+        db.add(
+            SavedSearchNotification(
+                user_id="user-123",
+                saved_search_id=saved_search_id,
+                saved_search_query="acura rsx",
+                summary_text="1 new listing for acura rsx",
+                items_json=[],
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.delete(f"/saved-searches/{saved_search_id}")
+
+    assert response.status_code == 200
+
+    notifications_res = client.get("/me/notifications")
+    assert notifications_res.status_code == 200
+    assert notifications_res.json() == []
+
+    db = session_factory()
+    try:
+        notifications = db.query(SavedSearchNotification).all()
+        assert notifications == []
+    finally:
+        db.close()
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_notifications_endpoint_prunes_orphaned_and_renamed_rows(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+
+    async def fake_refresh_saved_search_alerts_for_user(db, *, user_id):
+        return False
+
+    monkeypatch.setattr(
+        "app.main.refresh_saved_search_alerts_for_user",
+        fake_refresh_saved_search_alerts_for_user,
+    )
+
+    db = session_factory()
+    try:
+        saved_search = SavedSearch(
+            user_id="user-123",
+            query="mazda miata",
+            sources="ebay",
+            alerts_enabled=True,
+        )
+        db.add(saved_search)
+        db.commit()
+        db.refresh(saved_search)
+
+        db.add_all(
+            [
+                SavedSearchNotification(
+                    user_id="user-123",
+                    saved_search_id=saved_search.id,
+                    saved_search_query="mazda miata",
+                    summary_text="valid",
+                    items_json=[],
+                ),
+                SavedSearchNotification(
+                    user_id="user-123",
+                    saved_search_id=saved_search.id,
+                    saved_search_query="acura rsx",
+                    summary_text="renamed",
+                    items_json=[],
+                ),
+                SavedSearchNotification(
+                    user_id="user-123",
+                    saved_search_id=9999,
+                    saved_search_query="ghost",
+                    summary_text="orphaned",
+                    items_json=[],
+                ),
+            ]
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    notifications_res = client.get("/me/notifications")
+
+    assert notifications_res.status_code == 200
+    payload = notifications_res.json()
+    assert len(payload) == 1
+    assert payload[0]["saved_search_query"] == "mazda miata"
+
+    db = session_factory()
+    try:
+        remaining = (
+            db.query(SavedSearchNotification)
+            .filter(SavedSearchNotification.user_id == "user-123")
+            .all()
+        )
+        assert len(remaining) == 1
+        assert remaining[0].saved_search_query == "mazda miata"
+    finally:
+        db.close()
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_saved_search_run_passes_newest_sort(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+
+    db = session_factory()
+    try:
+        saved_search = SavedSearch(
+            user_id="user-123",
+            query="road bike",
+            sources="ebay",
+            alerts_enabled=True,
+        )
+        db.add(saved_search)
+        db.commit()
+        db.refresh(saved_search)
+        saved_search_id = saved_search.id
+    finally:
+        db.close()
+
+    captured: dict[str, object] = {}
+
+    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance", **kwargs):
+        captured["sort"] = sort
+        return ([_sample_listing()], 1, None, {})
+
+    monkeypatch.setattr("app.main.unified_search", fake_unified_search)
+    monkeypatch.setattr("app.main._enrich_results", lambda db, *, query, results: results)
+    monkeypatch.setattr("app.main.persist_listing_snapshots", lambda **kwargs: 1)
+
+    response = client.get(f"/saved-searches/{saved_search_id}/run", params={"sort": "newest"})
+
+    assert response.status_code == 200
+    assert captured["sort"] == "newest"
 
     app.dependency_overrides.clear()
     engine.dispose()

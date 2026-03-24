@@ -18,7 +18,7 @@ from app.connectors.facebook_marketplace.models import (
     FacebookSearchRequest,
 )
 from app.core.config import settings
-from app.models.listing import Listing, Money
+from app.models.listing import Listing, Money, SearchSort
 
 QUERY_TOKEN_RE = re.compile(r"[a-z0-9]+")
 PRICE_TEXT_RE = re.compile(
@@ -123,6 +123,7 @@ def _to_listing(item: FacebookNormalizedListing) -> Listing:
         longitude=item.longitude,
         condition=None,
         snippet=snippet,
+        posted_at=item.posted_at,
     )
 
 
@@ -215,6 +216,7 @@ class FacebookUnifiedConnector(MarketplaceConnector):
         query: str,
         limit: int = 20,
         *,
+        sort: SearchSort = "relevance",
         auth_mode: str | None = None,
         cookie_payload: object | None = None,
         latitude: float | None = None,
@@ -274,6 +276,7 @@ class FacebookUnifiedConnector(MarketplaceConnector):
         request = FacebookSearchRequest(
             query=query,
             limit=scrape_limit,
+            sort="newest" if sort == "newest" else "relevance",
             auth_mode=effective_auth_mode,
             cookie_path=cookie_path,
             cookie_payload=cookie_payload,

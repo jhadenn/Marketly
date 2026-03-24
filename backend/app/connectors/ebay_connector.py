@@ -5,8 +5,9 @@ import time
 import httpx
 
 from app.connectors.base import MarketplaceConnector
+from app.core.time_utils import normalize_timestamp_to_utc_iso
 from app.core.config import settings
-from app.models.listing import Listing, Money
+from app.models.listing import Listing, Money, SearchSort
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,19 @@ class EbayConnector(MarketplaceConnector):
         return loc or None
 
     @staticmethod
+    def _extract_posted_at(item: dict) -> str | None:
+        for field_name in (
+            "itemOriginDate",
+            "itemCreationDate",
+            "listingDate",
+            "startDate",
+        ):
+            normalized = normalize_timestamp_to_utc_iso(item.get(field_name))
+            if normalized is not None:
+                return normalized
+        return None
+
+    @staticmethod
     def _to_listing(item: dict) -> Listing | None:
         item_id = item.get("itemId")
         title = item.get("title")
@@ -116,15 +130,24 @@ class EbayConnector(MarketplaceConnector):
             location=EbayConnector._build_location(item.get("itemLocation")),
             condition=item.get("condition"),
             snippet=item.get("shortDescription") or item.get("subtitle"),
+            posted_at=EbayConnector._extract_posted_at(item),
         )
 
-    async def _search_api(self, query: str, limit: int) -> list[Listing]:
+    async def _search_api(
+        self,
+        query: str,
+        limit: int,
+        *,
+        sort: SearchSort,
+    ) -> list[Listing]:
         token = await self._get_access_token()
         url = f"{self._api_base()}/buy/browse/v1/item_summary/search"
         params = {
             "q": query,
             "limit": str(max(1, min(limit, 200))),
         }
+        if sort == "newest":
+            params["sort"] = "newlyListed"
         headers = {
             "Authorization": f"Bearer {token}",
             "X-EBAY-C-MARKETPLACE-ID": self.marketplace_id,
@@ -144,13 +167,19 @@ class EbayConnector(MarketplaceConnector):
                 results.append(listing)
         return results[:limit]
 
-    async def search(self, query: str, limit: int = 20) -> list[Listing]:
+    async def search(
+        self,
+        query: str,
+        limit: int = 20,
+        *,
+        sort: SearchSort = "relevance",
+    ) -> list[Listing]:
         if not self.client_id or not self.client_secret:
             logger.warning("eBay credentials missing, returning no eBay results")
             return []
 
         try:
-            return await self._search_api(query=query, limit=limit)
+            return await self._search_api(query=query, limit=limit, sort=sort)
         except Exception as exc:
             logger.warning("eBay API search failed, returning no eBay results: %s", exc)
             return []

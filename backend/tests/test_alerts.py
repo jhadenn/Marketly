@@ -109,13 +109,9 @@ def test_run_saved_search_alert_job_creates_digest_for_new_high_confidence_listi
     async def fake_unified_search(**kwargs):
         return [seen_listing, new_listing], None, None, {}
 
-    async def fake_generate_alert_summary(query, items):
-        return f"{len(items)} new match for {query}"
-
     monkeypatch.setattr("app.services.alerts.unified_search", fake_unified_search)
     monkeypatch.setattr("app.services.alerts.enrich_listings_with_insights", lambda db, query, results: results)
     monkeypatch.setattr("app.services.alerts.persist_listing_snapshots", lambda **kwargs: len(kwargs["listings"]))
-    monkeypatch.setattr("app.services.alerts.generate_alert_summary", fake_generate_alert_summary)
 
     result = asyncio.run(
         run_saved_search_alert_job(
@@ -132,6 +128,7 @@ def test_run_saved_search_alert_job_creates_digest_for_new_high_confidence_listi
     assert result["notifications_created"] == 1
     assert len(notifications) == 1
     assert notifications[0].saved_search_id == saved_search.id
+    assert notifications[0].summary_text == "1 new listing for road bike"
     assert notifications[0].items_json[0]["source_listing_id"] == "new-1"
     assert saved_search.last_alert_notified_at is not None
     assert saved_search.last_alert_checked_at is not None
@@ -165,13 +162,9 @@ def test_run_saved_search_alert_job_baselines_first_check_without_creating_diges
     async def fake_unified_search(**kwargs):
         return [fresh_listing], None, None, {}
 
-    async def fake_generate_alert_summary(query, items):
-        return f"{len(items)} new match for {query}"
-
     monkeypatch.setattr("app.services.alerts.unified_search", fake_unified_search)
     monkeypatch.setattr("app.services.alerts.enrich_listings_with_insights", lambda db, query, results: results)
     monkeypatch.setattr("app.services.alerts.persist_listing_snapshots", lambda **kwargs: len(kwargs["listings"]))
-    monkeypatch.setattr("app.services.alerts.generate_alert_summary", fake_generate_alert_summary)
 
     result = asyncio.run(
         run_saved_search_alert_job(
@@ -229,6 +222,89 @@ def test_refresh_saved_search_alerts_for_user_runs_only_when_stale(monkeypatch):
     assert refreshed is True
     assert refreshed_again is False
     assert calls == [(12, "user-refresh")]
+
+    db.close()
+    engine.dispose()
+
+
+def test_run_saved_search_alert_job_rolls_back_failed_search_and_continues(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    db = session_factory()
+    now = datetime.now(timezone.utc)
+
+    failing_search = SavedSearch(
+        user_id="user-continue",
+        query="failing search",
+        sources="ebay",
+        alerts_enabled=True,
+        last_alert_checked_at=now - timedelta(days=1),
+        created_at=now,
+    )
+    succeeding_search = SavedSearch(
+        user_id="user-continue",
+        query="working search",
+        sources="ebay",
+        alerts_enabled=True,
+        last_alert_checked_at=now - timedelta(days=1),
+        created_at=now - timedelta(seconds=1),
+    )
+    db.add_all([failing_search, succeeding_search])
+    db.commit()
+    db.refresh(failing_search)
+    db.refresh(succeeding_search)
+
+    async def fake_unified_search(**kwargs):
+        query = kwargs["query"]
+        if query == "failing search":
+            return [_build_listing(source_listing_id="fail-1", title="Fail listing", price_amount=410, snippet="Broken path.")], None, None, {}
+        return [_build_listing(source_listing_id="work-1", title="Working listing", price_amount=390, snippet="Good path.")], None, None, {}
+
+    def fake_previously_seen_fingerprints(db, *, saved_search_id, listing_fingerprints, seen_before):
+        if saved_search_id == failing_search.id:
+            db.add(
+                SavedSearchNotification(
+                    user_id=None,
+                    saved_search_id=saved_search_id,
+                    saved_search_query="broken",
+                    summary_text="broken",
+                    items_json=[],
+                )
+            )
+            db.commit()
+        return set()
+
+    monkeypatch.setattr("app.services.alerts.unified_search", fake_unified_search)
+    monkeypatch.setattr("app.services.alerts.enrich_listings_with_insights", lambda db, query, results: results)
+    monkeypatch.setattr("app.services.alerts.persist_listing_snapshots", lambda **kwargs: len(kwargs["listings"]))
+    monkeypatch.setattr(
+        "app.services.alerts.previously_seen_fingerprints",
+        fake_previously_seen_fingerprints,
+    )
+
+    result = asyncio.run(
+        run_saved_search_alert_job(
+            db,
+            limit_per_search=20,
+            user_id="user-continue",
+        )
+    )
+
+    notifications = (
+        db.query(SavedSearchNotification)
+        .filter(SavedSearchNotification.user_id == "user-continue")
+        .order_by(SavedSearchNotification.created_at.asc())
+        .all()
+    )
+    db.refresh(failing_search)
+    db.refresh(succeeding_search)
+
+    assert result["checked"] == 2
+    assert result["notifications_created"] == 1
+    assert len(notifications) == 1
+    assert notifications[0].saved_search_id == succeeding_search.id
+    assert notifications[0].summary_text == "1 new listing for working search"
+    assert failing_search.last_alert_notified_at is None
+    assert succeeding_search.last_alert_notified_at is not None
 
     db.close()
     engine.dispose()

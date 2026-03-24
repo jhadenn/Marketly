@@ -12,6 +12,7 @@ from app.connectors.facebook_marketplace.features import (
     extract_title_keywords,
 )
 from app.connectors.facebook_marketplace.models import FacebookNormalizedListing
+from app.core.time_utils import parse_relative_age_to_utc_iso
 
 PRICE_RE = re.compile(
     r"(?P<symbol>[$\u00a3\u20ac])\s*(?P<amount>\d[\d,]*(?:\.\d{1,2})?)",
@@ -238,6 +239,7 @@ def normalize_marketplace_card(
 
     if age_hint is None:
         age_hint = extract_age_hint(text)
+    posted_at = parse_relative_age_to_utc_iso(age_hint)
 
     # Drop obvious placeholder cards that don't carry a usable listing title.
     if _is_generic_title(title) and (used_fallback_title or not images):
@@ -266,7 +268,7 @@ def normalize_marketplace_card(
         image_urls=images,
         listing_url=listing_url,
         seller_name=_extract_seller(lines),
-        posted_at=None,
+        posted_at=posted_at,
         raw=card,
         price_bucket=compute_price_bucket(price_value),
         title_keywords=extract_title_keywords(title),

@@ -22,6 +22,7 @@ class SavedSearchNotificationOut(BaseModel):
     saved_search_id: int
     saved_search_query: str
     summary: str
+    new_count: int = Field(ge=0)
     created_at: str
     read_at: str | None = None
     items: list[NotificationItem] = Field(default_factory=list)

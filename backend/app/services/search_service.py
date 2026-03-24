@@ -7,6 +7,7 @@ from app.connectors import CONNECTORS
 from app.connectors.facebook_marketplace import FacebookConnectorError, FacebookConnectorErrorCode
 from app.core.cache import TTLCache
 from app.core.config import settings
+from app.core.time_utils import parse_iso_datetime
 from app.models.listing import Listing, SearchSort, SourceError
 from app.services.scoring import score_listing
 
@@ -52,10 +53,11 @@ def _cache_key(
     query: str,
     sources: list[str],
     fetch_limit: int,
+    sort: SearchSort,
     facebook_runtime_context: FacebookRuntimeContext | None = None,
 ) -> str:
     raw = (
-        f"{query}|{','.join(sorted(sources))}|{fetch_limit}|"
+        f"{query}|{','.join(sorted(sources))}|{fetch_limit}|sort={sort}|"
         f"facebook_enabled={settings.MARKETLY_ENABLE_FACEBOOK}"
         f"{_facebook_cache_fragment(sources, facebook_runtime_context)}"
     )
@@ -175,7 +177,17 @@ def _sort_results(items: list[Listing], sort: SearchSort) -> list[Listing]:
             ),
         )
     if sort == "newest":
-        logger.info("newest sort requested but listing timestamps are unavailable; falling back to relevance")
+        parsed_posted_at = {
+            id(item): parse_iso_datetime(item.posted_at)
+            for item in items
+        }
+        return sorted(
+            items,
+            key=lambda x: (
+                parsed_posted_at[id(x)] is None,
+                -(parsed_posted_at[id(x)].timestamp() if parsed_posted_at[id(x)] is not None else 0.0),
+            ),
+        )
     return sorted(items, key=lambda x: x.score, reverse=True)
 
 
@@ -208,6 +220,7 @@ async def _fetch_source(
     src: str,
     query: str,
     fetch_limit: int,
+    sort: SearchSort,
     facebook_runtime_context: FacebookRuntimeContext | None = None,
     is_multi_source: bool = False,
 ) -> tuple[str, list[Listing], SourceError | None]:
@@ -274,6 +287,7 @@ async def _fetch_source(
                 connector.search(
                     query=query,
                     limit=facebook_fetch_limit,
+                    sort=sort,
                     auth_mode="cookie",
                     cookie_payload=facebook_runtime_context.cookie_payload if facebook_runtime_context else None,
                     latitude=facebook_runtime_context.latitude if facebook_runtime_context else None,
@@ -285,7 +299,7 @@ async def _fetch_source(
             )
         else:
             listings = await _run_with_timeout(
-                connector.search(query=query, limit=fetch_limit), timeout_seconds
+                connector.search(query=query, limit=fetch_limit, sort=sort), timeout_seconds
             )
         return src, listings, None
     except asyncio.TimeoutError:
@@ -323,9 +337,10 @@ async def _fetch_and_score(
     query: str,
     sources: list[str],
     fetch_limit: int,
+    sort: SearchSort,
     facebook_runtime_context: FacebookRuntimeContext | None = None,
 ) -> tuple[list[Listing], dict[str, SourceError], dict[str, int]]:
-    key = _cache_key(query, sources, fetch_limit, facebook_runtime_context)
+    key = _cache_key(query, sources, fetch_limit, sort, facebook_runtime_context)
     cached = _cache.get(key)
     if cached is not None:
         # Backward-compatible with old cache entries that only stored 2 fields.
@@ -339,6 +354,7 @@ async def _fetch_and_score(
             src=src,
             query=query,
             fetch_limit=fetch_limit,
+            sort=sort,
             facebook_runtime_context=facebook_runtime_context,
             is_multi_source=len(sources) > 1,
         )
@@ -401,12 +417,14 @@ async def unified_search(
                     query=query,
                     sources=sources,
                     fetch_limit=fetch_limit,
+                    sort=sort,
                 )
             else:
                 scored, source_errors, source_counts = await _fetch_and_score(
                     query=query,
                     sources=sources,
                     fetch_limit=fetch_limit,
+                    sort=sort,
                     facebook_runtime_context=facebook_runtime_context,
                 )
             ordered = _sort_results(scored, sort=sort)
@@ -440,12 +458,14 @@ async def unified_search(
                     query=query,
                     sources=sources,
                     fetch_limit=fetch_limit,
+                    sort=sort,
                 )
             else:
                 scored, source_errors, source_counts = await _fetch_and_score(
                     query=query,
                     sources=sources,
                     fetch_limit=fetch_limit,
+                    sort=sort,
                     facebook_runtime_context=facebook_runtime_context,
                 )
             ordered = _sort_results(scored, sort=sort)
@@ -485,12 +505,14 @@ async def unified_search(
                     query=query,
                     sources=sources,
                     fetch_limit=next_fetch_limit,
+                    sort=sort,
                 )
             else:
                 scored, incoming_source_errors, source_counts = await _fetch_and_score(
                     query=query,
                     sources=sources,
                     fetch_limit=next_fetch_limit,
+                    sort=sort,
                     facebook_runtime_context=facebook_runtime_context,
                 )
             expanded_ordered = _sort_results(scored, sort=sort)
@@ -550,12 +572,14 @@ async def unified_search(
             query=query,
             sources=sources,
             fetch_limit=fetch_limit,
+            sort=sort,
         )
     else:
         scored, source_errors, _ = await _fetch_and_score(
             query=query,
             sources=sources,
             fetch_limit=fetch_limit,
+            sort=sort,
             facebook_runtime_context=facebook_runtime_context,
         )
     ordered = _sort_results(scored, sort=sort)

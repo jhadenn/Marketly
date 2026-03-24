@@ -54,6 +54,7 @@ class Listing(BaseModel):
     longitude: Optional[float] = None
     condition: Optional[str] = None
     snippet: Optional[str] = None
+    posted_at: Optional[str] = None
 
     # Ranking metadata
     score: float = Field(default=0.0, description="Relevance score (higher is better)")

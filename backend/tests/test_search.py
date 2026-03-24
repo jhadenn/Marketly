@@ -86,6 +86,24 @@ def test_search_keeps_comma_separated_sources_compatibility(monkeypatch):
     assert captured["sources"] == ["ebay", "kijiji"]
 
 
+def test_search_propagates_newest_sort(monkeypatch):
+    captured = {}
+
+    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance", **kwargs):
+        captured["sort"] = sort
+        return ([_sample_listing("ebay", "1")], 1, None, {})
+
+    monkeypatch.setattr("app.main.unified_search", fake_unified_search)
+
+    response = client.get(
+        "/search",
+        params={"q": "iphone", "sources": "ebay", "sort": "newest"},
+    )
+
+    assert response.status_code == 200
+    assert captured["sort"] == "newest"
+
+
 def test_search_can_include_facebook_and_pass_source_errors(monkeypatch):
     captured = {}
 

@@ -66,17 +66,13 @@ def previously_seen_fingerprints(
     if not listing_fingerprints:
         return set()
 
-    try:
-        query = (
-            db.query(ListingSnapshot.listing_fingerprint)
-            .filter(ListingSnapshot.saved_search_id == saved_search_id)
-            .filter(ListingSnapshot.listing_fingerprint.in_(listing_fingerprints))
-        )
-        if seen_before is not None:
-            query = query.filter(ListingSnapshot.observed_at <= seen_before)
-        rows = query.distinct().all()
-    except Exception as exc:
-        logger.warning("listing snapshot seen lookup failed: %s", exc)
-        return set()
+    query = (
+        db.query(ListingSnapshot.listing_fingerprint)
+        .filter(ListingSnapshot.saved_search_id == saved_search_id)
+        .filter(ListingSnapshot.listing_fingerprint.in_(listing_fingerprints))
+    )
+    if seen_before is not None:
+        query = query.filter(ListingSnapshot.observed_at <= seen_before)
+    rows = query.distinct().all()
 
     return {str(row[0]) for row in rows if row and row[0]}

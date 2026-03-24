@@ -4,7 +4,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Header, Qu
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth import get_current_user_id, try_get_current_user_id_from_authorization
 from app.connectors import CONNECTORS
@@ -47,6 +47,7 @@ from app.services.response_cache import (
     set_cached_search_response,
 )
 from app.services.alerts import (
+    delete_notifications_for_saved_search,
     list_notifications,
     mark_notification_read,
     refresh_saved_search_alerts_for_user,
@@ -651,6 +652,7 @@ def delete_saved_search(
     )
     if not row:
         raise HTTPException(status_code=404, detail="Saved search not found")
+    delete_notifications_for_saved_search(db, user_id=user_id, saved_search_id=row.id)
     db.delete(row)
     db.commit()
     return {"deleted": True, "id": search_id}
@@ -688,6 +690,8 @@ def update_saved_search(
     row.query = payload.query
     row.sources = next_sources
     row.alerts_enabled = payload.alerts_enabled
+    if query_changed or sources_changed:
+        delete_notifications_for_saved_search(db, user_id=user_id, saved_search_id=row.id)
     if query_changed or sources_changed or re_enabled:
         _reset_saved_search_alert_baseline(row)
 
@@ -794,7 +798,15 @@ async def get_notifications(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    await refresh_saved_search_alerts_for_user(db, user_id=user_id)
+    refresh_session_factory = sessionmaker(bind=db.get_bind(), autoflush=False, autocommit=False)
+    refresh_db = refresh_session_factory()
+    try:
+        await refresh_saved_search_alerts_for_user(refresh_db, user_id=user_id)
+    except Exception as exc:
+        refresh_db.rollback()
+        logger.warning("saved search alert refresh request failed for user %s: %s", user_id, exc)
+    finally:
+        refresh_db.close()
     return list_notifications(db, user_id=user_id, limit=limit)
 
 

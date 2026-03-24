@@ -1,11 +1,13 @@
 import re
+from datetime import datetime
 from urllib.parse import quote_plus, urljoin
 
 import httpx
 from bs4 import BeautifulSoup
 
 from app.connectors.base import MarketplaceConnector
-from app.models.listing import Listing, Money
+from app.core.time_utils import parse_absolute_date_to_utc_iso, parse_relative_age_to_utc_iso
+from app.models.listing import Listing, Money, SearchSort
 
 BASE = "https://www.kijiji.ca"
 
@@ -14,6 +16,14 @@ BASE = "https://www.kijiji.ca"
 LISTING_HREF_RE = re.compile(r"^/v-[^/]+/.+/\d+/?$")
 
 PRICE_RE = re.compile(r"\$\s*([\d,]+(?:\.\d{1,2})?)")
+RELATIVE_POSTED_RE = re.compile(
+    r"\b(?:posted|updated)?\s*(just listed|\d+\s+(?:minute|hour|day|week|month|year)s?\s+ago|today|yesterday)\b",
+    re.IGNORECASE,
+)
+ABSOLUTE_POSTED_RE = re.compile(
+    r"\b(?:posted|updated)(?:\s+on)?\s+([A-Za-z]+\s+\d{1,2},\s+\d{4}|\d{4}[-/]\d{2}[-/]\d{2})\b",
+    re.IGNORECASE,
+)
 
 
 class KijijiScrapeConnector(MarketplaceConnector):
@@ -29,11 +39,18 @@ class KijijiScrapeConnector(MarketplaceConnector):
             "Accept-Language": "en-CA,en;q=0.9",
         }
 
-    def _build_search_url(self, query: str, page: int = 1) -> str:
+    def _build_search_url(
+        self,
+        query: str,
+        page: int = 1,
+        *,
+        sort: SearchSort = "relevance",
+    ) -> str:
         q = quote_plus(query.strip())
+        sort_fragment = "&sortByName=dateDesc" if sort == "newest" else ""
         if page <= 1:
-            return f"{BASE}/b-canada/{q}/k0l0?dc=true&view=list"
-        return f"{BASE}/b-canada/{q}/page-{page}/k0l0?dc=true&view=list"
+            return f"{BASE}/b-canada/{q}/k0l0?dc=true&view=list{sort_fragment}"
+        return f"{BASE}/b-canada/{q}/page-{page}/k0l0?dc=true&view=list{sort_fragment}"
 
     def _abs_url(self, href: str) -> str:
         return urljoin(BASE, href)
@@ -85,6 +102,20 @@ class KijijiScrapeConnector(MarketplaceConnector):
             return None
         city = city_slug.replace("-", " ").title()
         return city or None
+
+    def _extract_posted_at(self, blob: str, *, now: datetime | None = None) -> str | None:
+        if not blob:
+            return None
+
+        relative_match = RELATIVE_POSTED_RE.search(blob)
+        if relative_match:
+            return parse_relative_age_to_utc_iso(relative_match.group(1), now=now)
+
+        absolute_match = ABSOLUTE_POSTED_RE.search(blob)
+        if absolute_match:
+            return parse_absolute_date_to_utc_iso(absolute_match.group(1), now=now)
+
+        return None
 
     def _extract_candidates(
         self,
@@ -146,7 +177,13 @@ class KijijiScrapeConnector(MarketplaceConnector):
 
         return candidates
 
-    async def search(self, query: str, limit: int = 20) -> list[Listing]:
+    async def search(
+        self,
+        query: str,
+        limit: int = 20,
+        *,
+        sort: SearchSort = "relevance",
+    ) -> list[Listing]:
         safe_limit = max(1, int(limit))
         max_pages = max(1, min(10, (safe_limit // 24) + 2))
         all_candidates: list[tuple[int, str, str, str, list[str]]] = []
@@ -158,7 +195,7 @@ class KijijiScrapeConnector(MarketplaceConnector):
             follow_redirects=True,
         ) as client:
             for page in range(1, max_pages + 1):
-                url = self._build_search_url(query, page=page)
+                url = self._build_search_url(query, page=page, sort=sort)
                 try:
                     response = await client.get(url)
                     response.raise_for_status()
@@ -180,7 +217,8 @@ class KijijiScrapeConnector(MarketplaceConnector):
                 if len(all_candidates) >= safe_limit * 2:
                     break
 
-        all_candidates.sort(key=lambda item: item[0], reverse=True)
+        if sort == "relevance":
+            all_candidates.sort(key=lambda item: item[0], reverse=True)
 
         results: list[Listing] = []
         for score, listing_url, title, blob, image_urls in all_candidates:
@@ -201,6 +239,7 @@ class KijijiScrapeConnector(MarketplaceConnector):
                     location=self._extract_location_from_listing_url(listing_url),
                     condition=None,
                     snippet=self._clean_snippet(title, blob),
+                    posted_at=self._extract_posted_at(blob),
                 )
             )
 
