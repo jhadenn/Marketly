@@ -78,3 +78,14 @@ def test_kijiji_connector_extracts_relative_posted_at_and_newest_url():
 
     assert posted_at is not None
     assert "sortByName=dateDesc" in newest_url
+
+
+def test_kijiji_connector_prefers_visible_canadian_location_text_over_url_slug():
+    connector = KijijiScrapeConnector()
+
+    location = connector._extract_location(
+        "Vintage road bike | Toronto, ON | Posted today",
+        "https://www.kijiji.ca/v-road-bike/calgary/item-123",
+    )
+
+    assert location == "Toronto, ON"

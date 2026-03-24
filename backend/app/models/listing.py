@@ -55,6 +55,8 @@ class Listing(BaseModel):
     condition: Optional[str] = None
     snippet: Optional[str] = None
     posted_at: Optional[str] = None
+    distance_km: Optional[float] = None
+    distance_is_approximate: bool = False
 
     # Ranking metadata
     score: float = Field(default=0.0, description="Relevance score (higher is better)")

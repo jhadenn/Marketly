@@ -2,11 +2,20 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
+from app.auth import get_current_user_id
 from app.core.cache import TTLCache
+from app.db import get_db
 from app.main import app
 from app.models.listing import Listing, Money
+from app.models.saved_search import SavedSearch
+
+from .utils import build_test_session_factory, db_override_factory
 
 client = TestClient(app)
+
+
+def _override_auth():
+    return "user-123"
 
 
 def _sample_listing(source: str, listing_id: str) -> Listing:
@@ -65,7 +74,7 @@ def test_search_supports_pagination_and_sort(monkeypatch):
         "limit": 20,
         "offset": 0,
         "sort": "price_asc",
-        "kwargs": {},
+        "kwargs": {"search_location_context": None},
     }
 
 
@@ -177,6 +186,8 @@ def test_search_facebook_only_keeps_pagination_alive(monkeypatch):
 
 def test_search_passes_facebook_runtime_context_and_location(monkeypatch):
     captured = {}
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
 
     class FakeContext:
         def __init__(self):
@@ -212,9 +223,82 @@ def test_search_passes_facebook_runtime_context_and_location(monkeypatch):
 
     assert response.status_code == 200
     assert "facebook_runtime_context" in captured["unified_kwargs"]
+    assert captured["unified_kwargs"]["search_location_context"].display_name == "Toronto, ON"
+    assert captured["unified_kwargs"]["search_location_context"].mode == "gps"
     assert captured["context_build_kwargs"]["latitude"] == 43.6532
     assert captured["context_build_kwargs"]["longitude"] == -79.3832
     assert captured["context_build_kwargs"]["radius_km"] == 25
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_location_resolve_endpoint_manual_city():
+    response = client.post(
+        "/location/resolve",
+        json={"city": "Toronto", "province": "Ontario"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["display_name"] == "Toronto, ON"
+    assert payload["province_code"] == "ON"
+    assert payload["country_code"] == "CA"
+    assert payload["mode"] == "manual"
+
+
+def test_me_location_crud_and_saved_search_run_use_stored_location(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+
+    db = session_factory()
+    saved_search = SavedSearch(
+        user_id="user-123",
+        query="road bike",
+        sources="kijiji,ebay",
+        alerts_enabled=True,
+    )
+    db.add(saved_search)
+    db.commit()
+    db.refresh(saved_search)
+    db.close()
+
+    captured: dict[str, object] = {}
+
+    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance", **kwargs):
+        captured["query"] = query
+        captured["sources"] = sources
+        captured["kwargs"] = kwargs
+        return ([_sample_listing("kijiji", "1")], 1, None, {})
+
+    monkeypatch.setattr("app.main.unified_search", fake_unified_search)
+
+    put_response = client.put(
+        "/me/location",
+        json={"city": "Toronto", "province": "ON"},
+    )
+    get_response = client.get("/me/location")
+    run_response = client.get(f"/saved-searches/{saved_search.id}/run")
+    delete_response = client.delete("/me/location")
+    get_after_delete = client.get("/me/location")
+
+    assert put_response.status_code == 200
+    assert get_response.status_code == 200
+    assert get_response.json()["display_name"] == "Toronto, ON"
+    assert run_response.status_code == 200
+    assert captured["query"] == "road bike"
+    assert captured["sources"] == ["kijiji", "ebay"]
+    search_location_context = captured["kwargs"]["search_location_context"]
+    assert search_location_context is not None
+    assert search_location_context.display_name == "Toronto, ON"
+    assert delete_response.status_code == 200
+    assert delete_response.json()["deleted"] is True
+    assert get_after_delete.status_code == 200
+    assert get_after_delete.json() is None
+
+    app.dependency_overrides.clear()
+    engine.dispose()
 
 
 def test_search_cache_hit_returns_header(monkeypatch):

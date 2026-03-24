@@ -42,11 +42,27 @@ const COPILOT_WINDOW_HEIGHT_MAX = 920;
 const COPILOT_WINDOW_WIDTH_STORAGE_KEY = "marketly:copilot-window-width";
 const COPILOT_WINDOW_RECT_STORAGE_KEY = "marketly:copilot-window-rect";
 const COPILOT_LAUNCHER_POSITION_STORAGE_KEY = "marketly:copilot-launcher-position";
+const SEARCH_LOCATION_STORAGE_KEY = "marketly:search-location";
 const SORT_OPTIONS = [
   { value: "relevance", label: "Relevance", disabled: false },
   { value: "price_asc", label: "Price: Low -> High", disabled: false },
   { value: "price_desc", label: "Price: High -> Low", disabled: false },
   { value: "newest", label: "Newest", disabled: false },
+] as const;
+const PROVINCE_OPTIONS = [
+  { code: "AB", label: "Alberta" },
+  { code: "BC", label: "British Columbia" },
+  { code: "MB", label: "Manitoba" },
+  { code: "NB", label: "New Brunswick" },
+  { code: "NL", label: "Newfoundland and Labrador" },
+  { code: "NS", label: "Nova Scotia" },
+  { code: "NT", label: "Northwest Territories" },
+  { code: "NU", label: "Nunavut" },
+  { code: "ON", label: "Ontario" },
+  { code: "PE", label: "Prince Edward Island" },
+  { code: "QC", label: "Quebec" },
+  { code: "SK", label: "Saskatchewan" },
+  { code: "YT", label: "Yukon" },
 ] as const;
 
 type PreviewListing = {
@@ -136,11 +152,40 @@ type Listing = {
   condition?: string | null;
   snippet?: string | null;
   posted_at?: string | null;
+  distance_km?: number | null;
+  distance_is_approximate?: boolean;
   score?: number;
   score_reason?: string | null;
   valuation?: Valuation | null;
   risk?: Risk | null;
 };
+
+type ResolvedLocation = {
+  display_name: string;
+  city: string;
+  province_code: string;
+  province_name: string;
+  country_code: string;
+  latitude: number;
+  longitude: number;
+  mode: "manual" | "gps";
+};
+
+type LocationResolveRequest = {
+  city?: string;
+  province?: string;
+  latitude?: number;
+  longitude?: number;
+};
+
+type LocationCitySuggestion = {
+  city: string;
+  province_code: string;
+  province_name: string;
+  display_name: string;
+};
+
+type LocationPersistence = "browser" | "account";
 
 type SearchResponse = {
   query: string;
@@ -279,7 +324,6 @@ type SavedBatchPaginationState = {
 };
 
 type ResultMode = "single" | "saved_batch";
-type Coordinates = { latitude: number; longitude: number };
 type SavedSearchResultBucket = { items: Listing[] };
 type InterleavedSavedSearchBucketResult = {
   orderedItems: Listing[];
@@ -289,6 +333,55 @@ type InterleavedSavedSearchBucketResult = {
 
 function isSourceOption(value: string): value is SourceOption {
   return SOURCE_OPTIONS.includes(value as SourceOption);
+}
+
+function isResolvedLocation(value: unknown): value is ResolvedLocation {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<ResolvedLocation>;
+  return (
+    typeof candidate.display_name === "string" &&
+    typeof candidate.city === "string" &&
+    typeof candidate.province_code === "string" &&
+    typeof candidate.province_name === "string" &&
+    typeof candidate.country_code === "string" &&
+    typeof candidate.latitude === "number" &&
+    typeof candidate.longitude === "number" &&
+    (candidate.mode === "manual" || candidate.mode === "gps")
+  );
+}
+
+function readStoredResolvedLocation(): ResolvedLocation | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.localStorage.getItem(SEARCH_LOCATION_STORAGE_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return isResolvedLocation(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredResolvedLocation(location: ResolvedLocation | null) {
+  if (typeof window === "undefined") return;
+  if (location) {
+    window.localStorage.setItem(SEARCH_LOCATION_STORAGE_KEY, JSON.stringify(location));
+    return;
+  }
+  window.localStorage.removeItem(SEARCH_LOCATION_STORAGE_KEY);
+}
+
+function toLocationResolveRequest(location: ResolvedLocation): LocationResolveRequest {
+  if (location.mode === "gps") {
+    return {
+      latitude: location.latitude,
+      longitude: location.longitude,
+    };
+  }
+  return {
+    city: location.city,
+    province: location.province_code,
+  };
 }
 
 function formatPrice(price?: Money | null) {
@@ -602,6 +695,11 @@ function normalizeNotificationError(error: unknown, fallback: string) {
   return message;
 }
 
+function isLikelyNetworkError(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  return /failed to fetch|load failed|networkerror/i.test(error.message);
+}
+
 const COPILOT_MARKDOWN_COMPONENTS: Components = {
   p: ({ children }) => (
     <p className="mt-3 text-sm leading-relaxed text-zinc-100 first:mt-0">{children}</p>
@@ -646,22 +744,6 @@ const COPILOT_MARKDOWN_COMPONENTS: Components = {
   ),
 };
 
-function haversineMiles(a: Coordinates, b: Coordinates) {
-  const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
-  const earthRadiusMiles = 3958.8;
-  const latDelta = toRadians(b.latitude - a.latitude);
-  const lonDelta = toRadians(b.longitude - a.longitude);
-  const lat1 = toRadians(a.latitude);
-  const lat2 = toRadians(b.latitude);
-
-  const sinLat = Math.sin(latDelta / 2);
-  const sinLon = Math.sin(lonDelta / 2);
-  const value =
-    sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLon * sinLon;
-  const arc = 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
-  return earthRadiusMiles * arc;
-}
-
 type SearchPageViewProps = {
   authLoading: boolean;
   user: { email?: string | null } | null;
@@ -678,19 +760,18 @@ type SearchPageViewProps = {
   onSearch: (e: React.FormEvent) => Promise<void>;
   onSaveCurrentSearch: () => Promise<void>;
   limit: number;
-  locationFilterText: string;
-  setLocationFilterText: React.Dispatch<React.SetStateAction<string>>;
+  locationProvince: string;
+  setLocationProvince: React.Dispatch<React.SetStateAction<string>>;
+  locationCityInput: string;
+  setLocationCityInput: React.Dispatch<React.SetStateAction<string>>;
+  currentLocation: ResolvedLocation | null;
+  locationPersistence: LocationPersistence | null;
+  locationSuggestions: LocationCitySuggestion[];
+  onApplyManualLocation: () => Promise<void>;
   onUseMyLocation: () => void;
-  onClearMyLocation: () => void;
-  locatingDevice: boolean;
-  deviceCoords: Coordinates | null;
-  locationFilterError: string | null;
-  travelRangeMilesInput: string;
-  setTravelRangeMilesInput: React.Dispatch<React.SetStateAction<string>>;
-  hideUnknownDistance: boolean;
-  setHideUnknownDistance: React.Dispatch<React.SetStateAction<boolean>>;
-  distanceFilterPendingLocation: boolean;
-  distanceFilterActive: boolean;
+  onClearLocation: () => Promise<void>;
+  locationBusy: boolean;
+  locationError: string | null;
   error: string | null;
   sourceErrors: Record<string, SourceErrorEntry>;
   hasSourceErrorEntries: boolean;
@@ -803,19 +884,18 @@ type SearchControlsRailProps = Pick<
   | "sortBy"
   | "sortApplying"
   | "onChangeSort"
-  | "locationFilterText"
-  | "setLocationFilterText"
+  | "locationProvince"
+  | "setLocationProvince"
+  | "locationCityInput"
+  | "setLocationCityInput"
+  | "currentLocation"
+  | "locationPersistence"
+  | "locationSuggestions"
+  | "onApplyManualLocation"
   | "onUseMyLocation"
-  | "onClearMyLocation"
-  | "locatingDevice"
-  | "deviceCoords"
-  | "locationFilterError"
-  | "travelRangeMilesInput"
-  | "setTravelRangeMilesInput"
-  | "hideUnknownDistance"
-  | "setHideUnknownDistance"
-  | "distanceFilterPendingLocation"
-  | "distanceFilterActive"
+  | "onClearLocation"
+  | "locationBusy"
+  | "locationError"
   | "authLoading"
   | "user"
   | "facebookConfigStatus"
@@ -878,7 +958,6 @@ type ResultsPanelProps = Pick<
   | "sourceErrors"
   | "hasSourceErrorEntries"
   | "error"
-  | "deviceCoords"
   | "sentinelRef"
   | "loadingMore"
   | "hasMore"
@@ -1012,7 +1091,7 @@ function SearchPageView(props: SearchPageViewProps) {
                 </span>
                 {props.hasActiveClientFilters ? (
                   <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-3 py-1 text-xs text-amber-100">
-                    Location filters active
+                    Location ranking active
                   </span>
                 ) : null}
               </div>
@@ -1028,7 +1107,7 @@ function SearchPageView(props: SearchPageViewProps) {
               <StatTile
                 label="Showing"
                 value={String(props.filteredResults.length)}
-                sub={props.hasActiveClientFilters ? `${props.filteredOutCount} filtered out` : "No client filters"}
+                sub={props.hasActiveClientFilters ? "Nearby results ranked first" : "No location ranking"}
               />
               <StatTile label="Sources" value={String((props.summarySources.length > 0 ? props.summarySources : props.sources).length)} sub="Selected" />
             </div>
@@ -1206,89 +1285,92 @@ function SearchControlsRail(props: SearchControlsRailProps) {
 
           <div className="space-y-2">
             <label className="block text-xs font-medium uppercase tracking-[0.14em] text-zinc-400">
-              Location text filter
+              Your location
             </label>
+            <select
+              className="w-full rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2.5 text-sm text-zinc-100 focus:border-white/20 focus:outline-none"
+              value={props.locationProvince}
+              onChange={(e) => props.setLocationProvince(e.target.value)}
+            >
+              <option value="" className="bg-black text-white">
+                Select province
+              </option>
+              {PROVINCE_OPTIONS.map((province) => (
+                <option key={province.code} value={province.code} className="bg-black text-white">
+                  {province.label}
+                </option>
+              ))}
+            </select>
             <div className="relative">
               <MapPin className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-zinc-500" />
               <input
+                list="marketly-location-suggestions"
                 className="w-full rounded-xl border border-white/10 bg-white/[0.02] py-2.5 pl-9 pr-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-white/20 focus:outline-none"
-                value={props.locationFilterText}
-                onChange={(e) => props.setLocationFilterText(e.target.value)}
-                placeholder="City, state, neighborhood..."
+                value={props.locationCityInput}
+                onChange={(e) => props.setLocationCityInput(e.target.value)}
+                placeholder="City in Canada"
               />
             </div>
+            <datalist id="marketly-location-suggestions">
+              {props.locationSuggestions.map((suggestion) => (
+                <option key={suggestion.display_name} value={suggestion.city}>
+                  {suggestion.display_name}
+                </option>
+              ))}
+            </datalist>
           </div>
 
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <button
+              type="button"
+              onClick={() => void props.onApplyManualLocation()}
+              disabled={props.locationBusy || !props.locationProvince || !props.locationCityInput.trim()}
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-white px-3 py-2.5 text-sm font-medium text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {props.locationBusy ? <Loader2 className="size-4 animate-spin" /> : <MapPin className="size-4" />}
+              {props.locationBusy ? "Saving..." : "Set location"}
+            </button>
             <button
               type="button"
               onClick={props.onUseMyLocation}
-              disabled={props.locatingDevice}
+              disabled={props.locationBusy}
               className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2.5 text-sm text-zinc-100 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {props.locatingDevice ? (
+              {props.locationBusy ? (
                 <Loader2 className="size-4 animate-spin" />
               ) : (
                 <LocateFixed className="size-4" />
               )}
-              {props.locatingDevice ? "Locating..." : "Use GPS"}
+              {props.locationBusy ? "Locating..." : "Use GPS"}
             </button>
 
             <button
               type="button"
-              onClick={props.onClearMyLocation}
-              disabled={!props.deviceCoords}
+              onClick={() => void props.onClearLocation()}
+              disabled={props.locationBusy && !props.currentLocation}
               className="rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2.5 text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-40"
             >
-              Clear GPS
+              Clear
             </button>
           </div>
-
-          <div className="space-y-2">
-            <label className="block text-xs font-medium uppercase tracking-[0.14em] text-zinc-400">
-              Range (miles)
-            </label>
-            <input
-              className="w-full rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-white/20 focus:outline-none"
-              type="number"
-              min={1}
-              max={500}
-              value={props.travelRangeMilesInput}
-              onChange={(e) => props.setTravelRangeMilesInput(e.target.value)}
-              placeholder="Off"
-            />
-          </div>
-
-          <label className="flex items-start gap-2 rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-zinc-300">
-            <input
-              type="checkbox"
-              className="mt-0.5 rounded border-white/20 bg-black"
-              checked={props.hideUnknownDistance}
-              onChange={(e) => props.setHideUnknownDistance(e.target.checked)}
-            />
-            <span>Hide listings without distance data when range filtering is enabled.</span>
-          </label>
 
           {props.sources.length === 0 ? (
             <p className="text-xs text-red-300">Select at least one source to search.</p>
           ) : null}
-          {props.deviceCoords ? (
+          {props.currentLocation ? (
             <p className="text-xs text-zinc-500">
-              GPS ready: {props.deviceCoords.latitude.toFixed(3)}, {props.deviceCoords.longitude.toFixed(3)}
+              Active location: {props.currentLocation.display_name}
+              {props.locationPersistence === "account"
+                ? " | synced to account"
+                : " | saved in this browser"}
             </p>
           ) : null}
-          {props.locationFilterError ? (
-            <p className="text-xs text-red-300">{props.locationFilterError}</p>
+          {props.locationError ? (
+            <p className="text-xs text-red-300">{props.locationError}</p>
           ) : null}
-          {props.distanceFilterPendingLocation ? (
-            <p className="text-xs text-amber-200">
-              Range is set, but GPS is not enabled yet. Tap &quot;Use GPS&quot; to apply distance
-              filtering.
-            </p>
-          ) : null}
-          {props.distanceFilterActive ? (
+          {props.currentLocation ? (
             <p className="text-xs text-zinc-400">
-              Distance filtering is active. Facebook listings usually have the best coordinate support.
+              Nearby Canadian Kijiji and Facebook listings will rank first. Distances display in kilometers.
             </p>
           ) : null}
         </div>
@@ -1541,7 +1623,6 @@ function ResultsPanel({
   sourceErrors,
   hasSourceErrorEntries,
   error,
-  deviceCoords,
   sentinelRef,
   loadingMore,
   hasMore,
@@ -1632,7 +1713,7 @@ function ResultsPanel({
           {filteredResults.length === 0 ? (
             <GlassPanel className="p-5 text-sm text-zinc-300">
               {results.length > 0 && hasActiveClientFilters
-                ? "No listings match your location filters."
+                ? "No listings are available for the selected location ranking."
                 : "No results found for this search."}
             </GlassPanel>
           ) : (
@@ -1643,7 +1724,6 @@ function ResultsPanel({
                   <MarketplaceResultCard
                     key={cardKey}
                     item={item}
-                    deviceCoords={deviceCoords}
                     selectionMode={copilotSelectionMode}
                     copilotSelected={selectedListingKeys.has(cardKey)}
                     onToggleSelection={onToggleListingSelection}
@@ -2029,20 +2109,23 @@ function valuationLabel(valuation?: Valuation | null) {
   return `Value: ${valuation.verdict.replace("_", " ")}`;
 }
 
+function formatDistanceKm(distanceKm?: number | null, approximate = false) {
+  if (typeof distanceKm !== "number" || !Number.isFinite(distanceKm)) return null;
+  if (distanceKm < 10) {
+    return `${approximate ? "~" : ""}${distanceKm.toFixed(1)} km away`;
+  }
+  return `${approximate ? "~" : ""}${Math.round(distanceKm)} km away`;
+}
+
 function ListingCardBody({
   item,
-  deviceCoords,
   titleClassName,
 }: {
   item: Listing;
-  deviceCoords: Coordinates | null;
   titleClassName?: string;
 }) {
   const imageUrl = item.image_urls?.[0];
-  const listingCoords = deviceCoords ? getListingCoordinates(item) : null;
-  const distanceMiles =
-    deviceCoords && listingCoords ? haversineMiles(deviceCoords, listingCoords) : null;
-  const distanceLabel = distanceMiles !== null ? formatDistanceMiles(distanceMiles) : null;
+  const distanceLabel = formatDistanceKm(item.distance_km, item.distance_is_approximate);
 
   return (
     <>
@@ -2125,18 +2208,16 @@ function ListingCardBody({
 
 function MarketplaceResultCard({
   item,
-  deviceCoords,
   selectionMode,
   copilotSelected,
   onToggleSelection,
 }: {
   item: Listing;
-  deviceCoords: Coordinates | null;
   selectionMode: boolean;
   copilotSelected: boolean;
   onToggleSelection: (item: Listing) => void;
 }) {
-  const content = <ListingCardBody item={item} deviceCoords={deviceCoords} />;
+  const content = <ListingCardBody item={item} />;
 
   return (
     <li className="h-full">
@@ -2170,21 +2251,19 @@ function MarketplaceResultCard({
 function CopilotShortlistCard({
   item,
   reason,
-  deviceCoords,
   selectionMode,
   copilotSelected,
   onToggleSelection,
 }: {
   item: Listing;
   reason: string;
-  deviceCoords: Coordinates | null;
   selectionMode: boolean;
   copilotSelected: boolean;
   onToggleSelection: (item: Listing) => void;
 }) {
   const body = (
     <div className="flex flex-1 flex-col">
-      <ListingCardBody item={item} deviceCoords={deviceCoords} titleClassName="text-[15px]" />
+      <ListingCardBody item={item} titleClassName="text-[15px]" />
     </div>
   );
 
@@ -2314,7 +2393,6 @@ function CopilotSelectedListingCard({
 function CopilotWindow({
   activeQuery,
   filteredResults,
-  deviceCoords,
   copilotOpen,
   closeCopilot,
   copilotQuestion,
@@ -2338,7 +2416,6 @@ function CopilotWindow({
   SearchPageViewProps,
   | "activeQuery"
   | "filteredResults"
-  | "deviceCoords"
   | "copilotOpen"
   | "closeCopilot"
   | "copilotQuestion"
@@ -2598,7 +2675,6 @@ function CopilotWindow({
                         key={entry.listing_key}
                         item={linkedListing}
                         reason={entry.reason}
-                        deviceCoords={deviceCoords}
                         selectionMode={copilotSelectionMode}
                         copilotSelected={selectedListingKeySet.has(entry.listing_key)}
                         onToggleSelection={onToggleListingSelection}
@@ -2717,23 +2793,6 @@ function CopilotWindow({
   );
 }
 
-function getListingCoordinates(listing: Listing): Coordinates | null {
-  if (typeof listing.latitude !== "number" || typeof listing.longitude !== "number") {
-    return null;
-  }
-
-  return {
-    latitude: listing.latitude,
-    longitude: listing.longitude,
-  };
-}
-
-function formatDistanceMiles(distanceMiles: number) {
-  if (!Number.isFinite(distanceMiles)) return null;
-  if (distanceMiles < 10) return `${distanceMiles.toFixed(1)} mi away`;
-  return `${Math.round(distanceMiles)} mi away`;
-}
-
 export default function HomePage() {
   const { user, loading: authLoading, signOut, accessToken } = useAuth();
   const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
@@ -2768,12 +2827,15 @@ export default function HomePage() {
   const [notificationsLoading, setNotificationsLoading] = useState(false);
   const [notificationsError, setNotificationsError] = useState<string | null>(null);
   const [activeSavedSearchId, setActiveSavedSearchId] = useState<number | null>(null);
-  const [locationFilterText, setLocationFilterText] = useState("");
-  const [travelRangeMilesInput, setTravelRangeMilesInput] = useState("");
-  const [deviceCoords, setDeviceCoords] = useState<Coordinates | null>(null);
-  const [locatingDevice, setLocatingDevice] = useState(false);
-  const [locationFilterError, setLocationFilterError] = useState<string | null>(null);
-  const [hideUnknownDistance, setHideUnknownDistance] = useState(true);
+  const [locationProvince, setLocationProvince] = useState("");
+  const [locationCityInput, setLocationCityInput] = useState("");
+  const [currentLocation, setCurrentLocation] = useState<ResolvedLocation | null>(null);
+  const [locationPersistence, setLocationPersistence] = useState<LocationPersistence | null>(null);
+  const [locationSuggestions, setLocationSuggestions] = useState<LocationCitySuggestion[]>([]);
+  const [locationBusy, setLocationBusy] = useState(false);
+  const [locationError, setLocationError] = useState<string | null>(null);
+  const [locationHydrated, setLocationHydrated] = useState(false);
+  const [accountLocationReady, setAccountLocationReady] = useState(false);
 
   const [editing, setEditing] = useState<SavedSearch | null>(null);
   const [editQuery, setEditQuery] = useState("");
@@ -2808,9 +2870,11 @@ export default function HomePage() {
   const [facebookCookieJsonText, setFacebookCookieJsonText] = useState("");
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const currentLocationRef = useRef<ResolvedLocation | null>(null);
   const seenKeysRef = useRef<Set<string>>(new Set());
   const fetchInFlightRef = useRef(false);
   const autoLoadedSavedForUserRef = useRef<string | null>(null);
+  const initializedLocationUserRef = useRef<string | null>(null);
   const savedBatchLaneStartRef = useRef(0);
   const copilotSessionVersionRef = useRef(0);
   const copilotLauncherDragMovedRef = useRef(false);
@@ -2822,16 +2886,6 @@ export default function HomePage() {
   const hasMore =
     hasSearched &&
     (resultMode === "saved_batch" ? savedBatchHasMore : nextOffset !== null);
-  const normalizedLocationFilterText = locationFilterText.trim().toLowerCase();
-  const parsedTravelRangeMiles = Number(travelRangeMilesInput);
-  const travelRangeMiles =
-    travelRangeMilesInput.trim() !== "" &&
-    Number.isFinite(parsedTravelRangeMiles) &&
-    parsedTravelRangeMiles > 0
-      ? parsedTravelRangeMiles
-      : null;
-  const distanceFilterActive = deviceCoords !== null && travelRangeMiles !== null;
-  const distanceFilterPendingLocation = deviceCoords === null && travelRangeMiles !== null;
 
   useEffect(() => {
     const viewportWidth = window.innerWidth;
@@ -2890,6 +2944,19 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
+    const storedLocation = readStoredResolvedLocation();
+    if (storedLocation) {
+      currentLocationRef.current = storedLocation;
+      setCurrentLocation(storedLocation);
+      setLocationPersistence("browser");
+      setLocationProvince(storedLocation.province_code);
+      setLocationCityInput(storedLocation.city);
+    }
+    setLocationHydrated(true);
+    setAccountLocationReady(false);
+  }, []);
+
+  useEffect(() => {
     window.localStorage.setItem(COPILOT_WINDOW_RECT_STORAGE_KEY, JSON.stringify(copilotWindowRect));
   }, [copilotWindowRect]);
 
@@ -2933,37 +3000,7 @@ export default function HomePage() {
     return () => window.clearTimeout(timeout);
   }, [rawResults, sortBy]);
 
-  const filteredResults = useMemo(() => {
-    return results.filter((item) => {
-      if (normalizedLocationFilterText) {
-        const listingLocation = (item.location ?? "").toLowerCase();
-        if (!listingLocation.includes(normalizedLocationFilterText)) {
-          return false;
-        }
-      }
-
-      if (distanceFilterActive && deviceCoords && travelRangeMiles !== null) {
-        const listingCoords = getListingCoordinates(item);
-        if (!listingCoords) {
-          return !hideUnknownDistance;
-        }
-
-        const distanceMiles = haversineMiles(deviceCoords, listingCoords);
-        if (!Number.isFinite(distanceMiles) || distanceMiles > travelRangeMiles) {
-          return false;
-        }
-      }
-
-      return true;
-    });
-  }, [
-    deviceCoords,
-    distanceFilterActive,
-    hideUnknownDistance,
-    normalizedLocationFilterText,
-    results,
-    travelRangeMiles,
-  ]);
+  const filteredResults = results;
 
   useEffect(() => {
     const visibleKeys = new Set(filteredResults.map((item) => getListingKey(item)));
@@ -2984,9 +3021,8 @@ export default function HomePage() {
     setCopilotSelectedListingKeys([]);
   }, []);
 
-  const hasActiveClientFilters =
-    normalizedLocationFilterText.length > 0 || distanceFilterActive;
-  const filteredOutCount = Math.max(0, results.length - filteredResults.length);
+  const hasActiveClientFilters = currentLocation !== null;
+  const filteredOutCount = 0;
 
   const buildSearchUrl = useCallback(
     (
@@ -2996,6 +3032,7 @@ export default function HomePage() {
       selectedLimit: number,
       offset: number,
     ) => {
+      const searchLocation = currentLocationRef.current;
       const params = new URLSearchParams();
       params.set("q", query);
       for (const source of selectedSources) {
@@ -3004,17 +3041,29 @@ export default function HomePage() {
       params.set("sort", selectedSort);
       params.set("limit", String(selectedLimit));
       params.set("offset", String(offset));
-      if (deviceCoords) {
-        params.set("latitude", String(deviceCoords.latitude));
-        params.set("longitude", String(deviceCoords.longitude));
-      }
-      if (travelRangeMiles !== null) {
-        params.set("radius_km", String(Math.max(1, Math.round(travelRangeMiles * 1.60934))));
+      if (searchLocation) {
+        params.set("latitude", String(searchLocation.latitude));
+        params.set("longitude", String(searchLocation.longitude));
       }
       return `${API_BASE}/search?${params.toString()}`;
     },
-    [API_BASE, deviceCoords, travelRangeMiles],
+    [API_BASE],
   );
+
+  const fetchWithRetry = useCallback(async (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    try {
+      return await fetch(input, init);
+    } catch (error: unknown) {
+      if (!isLikelyNetworkError(error)) {
+        throw error;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+      return fetch(input, init);
+    }
+  }, []);
 
   const runSearch = useCallback(
     async ({
@@ -3034,6 +3083,23 @@ export default function HomePage() {
     }) => {
       if (fetchInFlightRef.current) return;
       fetchInFlightRef.current = true;
+      const previousState = append
+        ? null
+        : {
+            rawResults,
+            results,
+            nextOffset,
+            total,
+            sourceErrors,
+            savedBatchPagination,
+            hasSearched,
+            resultMode,
+            activeQuery,
+            activeSources,
+            activeSort,
+            activeLimit,
+            seenKeys: new Set(seenKeysRef.current),
+          };
 
       if (append) {
         setLoadingMore(true);
@@ -3052,7 +3118,7 @@ export default function HomePage() {
 
       try {
         const url = buildSearchUrl(query, sourceList, selectedSort, selectedLimit, offset);
-        const res = await fetch(url, {
+        const res = await fetchWithRetry(url, {
           cache: "no-store",
           headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
         });
@@ -3112,6 +3178,21 @@ export default function HomePage() {
         }
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : "Unknown error");
+        if (previousState) {
+          setRawResults(previousState.rawResults);
+          setResults(previousState.results);
+          setNextOffset(previousState.nextOffset);
+          setTotal(previousState.total);
+          setSourceErrors(previousState.sourceErrors);
+          setSavedBatchPagination(previousState.savedBatchPagination);
+          setHasSearched(previousState.hasSearched);
+          setResultMode(previousState.resultMode);
+          setActiveQuery(previousState.activeQuery);
+          setActiveSources(previousState.activeSources);
+          setActiveSort(previousState.activeSort);
+          setActiveLimit(previousState.activeLimit);
+          seenKeysRef.current = previousState.seenKeys;
+        }
       } finally {
         if (append) {
           setLoadingMore(false);
@@ -3121,42 +3202,25 @@ export default function HomePage() {
         fetchInFlightRef.current = false;
       }
     },
-    [accessToken, buildSearchUrl, resetCopilotConversation],
+    [
+      accessToken,
+      activeLimit,
+      activeQuery,
+      activeSort,
+      activeSources,
+      buildSearchUrl,
+      fetchWithRetry,
+      hasSearched,
+      nextOffset,
+      rawResults,
+      resetCopilotConversation,
+      resultMode,
+      results,
+      savedBatchPagination,
+      sourceErrors,
+      total,
+    ],
   );
-
-  function onUseMyLocation() {
-    if (typeof navigator === "undefined" || !navigator.geolocation) {
-      setLocationFilterError("Browser location is not available.");
-      return;
-    }
-
-    setLocatingDevice(true);
-    setLocationFilterError(null);
-
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        setDeviceCoords({
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude,
-        });
-        setLocatingDevice(false);
-      },
-      (geoError) => {
-        setLocationFilterError(geoError.message || "Unable to get your location.");
-        setLocatingDevice(false);
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 10000,
-        maximumAge: 5 * 60 * 1000,
-      },
-    );
-  }
-
-  function onClearMyLocation() {
-    setDeviceCoords(null);
-    setLocationFilterError(null);
-  }
 
   const parseApiError = useCallback(async (res: Response, fallback: string) => {
     const text = await res.text();
@@ -3181,6 +3245,156 @@ export default function HomePage() {
     }
     return fallback;
   }, []);
+
+  const applyResolvedLocation = useCallback((location: ResolvedLocation | null) => {
+    currentLocationRef.current = location;
+    setCurrentLocation(location);
+    setLocationProvince(location?.province_code ?? "");
+    setLocationCityInput(location?.city ?? "");
+    writeStoredResolvedLocation(location);
+  }, []);
+
+  const resolveLocationPayload = useCallback(async (
+    payload: LocationResolveRequest,
+  ): Promise<ResolvedLocation> => {
+    const res = await fetchWithRetry(`${API_BASE}/location/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      throw new Error(await parseApiError(res, "Unable to resolve that Canadian location."));
+    }
+    return (await res.json()) as ResolvedLocation;
+  }, [API_BASE, fetchWithRetry, parseApiError]);
+
+  const fetchMyLocation = useCallback(async (): Promise<ResolvedLocation | null> => {
+    if (!accessToken) return null;
+    const res = await fetchWithRetry(`${API_BASE}/me/location`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      throw new Error(await parseApiError(res, "Failed to load your saved location."));
+    }
+    return (await res.json()) as ResolvedLocation | null;
+  }, [API_BASE, accessToken, fetchWithRetry, parseApiError]);
+
+  const syncLocationToAccount = useCallback(async (
+    location: ResolvedLocation | null,
+  ): Promise<ResolvedLocation | null> => {
+    if (!accessToken) return location;
+
+    if (location === null) {
+      const res = await fetchWithRetry(`${API_BASE}/me/location`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!res.ok) {
+        throw new Error(await parseApiError(res, "Failed to clear your account location."));
+      }
+      return null;
+    }
+
+    const res = await fetchWithRetry(`${API_BASE}/me/location`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(toLocationResolveRequest(location)),
+    });
+    if (!res.ok) {
+      throw new Error(await parseApiError(res, "Failed to save your account location."));
+    }
+    return (await res.json()) as ResolvedLocation;
+  }, [API_BASE, accessToken, fetchWithRetry, parseApiError]);
+
+  useEffect(() => {
+    if (!locationHydrated) return;
+    if (!locationProvince) {
+      setLocationSuggestions([]);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const params = new URLSearchParams();
+          params.set("province", locationProvince);
+          params.set("limit", "20");
+          if (locationCityInput.trim()) {
+            params.set("q", locationCityInput.trim());
+          }
+
+          const res = await fetch(`${API_BASE}/location/cities?${params.toString()}`, {
+            cache: "no-store",
+            signal: controller.signal,
+          });
+          if (!res.ok) {
+            throw new Error(await parseApiError(res, "Failed to load city suggestions."));
+          }
+          const payload = (await res.json()) as LocationCitySuggestion[];
+          setLocationSuggestions(payload);
+        } catch {
+          if (!controller.signal.aborted) {
+            setLocationSuggestions([]);
+          }
+        }
+      })();
+    }, 120);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timeout);
+    };
+  }, [API_BASE, locationCityInput, locationHydrated, locationProvince, parseApiError]);
+
+  useEffect(() => {
+    if (!locationHydrated) return;
+    if (!accessToken || !user?.id) {
+      initializedLocationUserRef.current = null;
+      setAccountLocationReady(true);
+      return;
+    }
+    if (initializedLocationUserRef.current === user.id) return;
+
+    initializedLocationUserRef.current = user.id;
+    setAccountLocationReady(false);
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const accountLocation = await fetchMyLocation();
+        if (cancelled) return;
+
+        if (accountLocation) {
+          applyResolvedLocation(accountLocation);
+          setLocationPersistence("account");
+          setLocationError(null);
+        }
+      } catch (error: unknown) {
+        if (!cancelled && !currentLocationRef.current) {
+          setLocationPersistence(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setAccountLocationReady(true);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    accessToken,
+    applyResolvedLocation,
+    fetchMyLocation,
+    locationHydrated,
+    user?.id,
+  ]);
 
   const fetchFacebookConfigStatus = useCallback(async (): Promise<FacebookConnectorStatus | null> => {
     if (!accessToken) {
@@ -3339,7 +3553,7 @@ export default function HomePage() {
         return [];
       }
 
-      const res = await fetch(`${API_BASE}/saved-searches`, {
+      const res = await fetchWithRetry(`${API_BASE}/saved-searches`, {
         headers: { Authorization: `Bearer ${accessToken}` },
         cache: "no-store",
       });
@@ -3370,7 +3584,7 @@ export default function HomePage() {
         return [];
       }
 
-      const res = await fetch(`${API_BASE}/me/notifications`, {
+      const res = await fetchWithRetry(`${API_BASE}/me/notifications`, {
         headers: { Authorization: `Bearer ${accessToken}` },
         cache: "no-store",
       });
@@ -3414,15 +3628,13 @@ export default function HomePage() {
     params.set("sort", selectedSort);
     params.set("limit", String(selectedLimit));
     params.set("offset", String(offset));
-    if (deviceCoords) {
-      params.set("latitude", String(deviceCoords.latitude));
-      params.set("longitude", String(deviceCoords.longitude));
-    }
-    if (travelRangeMiles !== null) {
-      params.set("radius_km", String(Math.max(1, Math.round(travelRangeMiles * 1.60934))));
+    const searchLocation = currentLocationRef.current;
+    if (searchLocation) {
+      params.set("latitude", String(searchLocation.latitude));
+      params.set("longitude", String(searchLocation.longitude));
     }
 
-    const res = await fetch(`${API_BASE}/saved-searches/${entry.id}/run?${params.toString()}`, {
+    const res = await fetchWithRetry(`${API_BASE}/saved-searches/${entry.id}/run?${params.toString()}`, {
       headers: { Authorization: `Bearer ${accessToken}` },
       cache: "no-store",
     });
@@ -3433,7 +3645,7 @@ export default function HomePage() {
     }
 
     return (await res.json()) as SearchResponse;
-  }, [API_BASE, accessToken, deviceCoords, travelRangeMiles]);
+  }, [API_BASE, accessToken, fetchWithRetry]);
 
   const loadMoreSavedBatch = useCallback(async () => {
     if (
@@ -3454,42 +3666,36 @@ export default function HomePage() {
     setLoadingMore(true);
 
     try {
-      const requests = pendingEntries.map(async (entry) => ({
-        entryId: entry.id,
-        payload: await fetchSavedSearchPage(entry, {
-          selectedLimit: savedBatchPagination.selectedLimit,
-          selectedSort: savedBatchPagination.selectedSort,
-          offset: entry.nextOffset ?? 0,
-        }),
-      }));
-
-      const settled = await Promise.allSettled(requests);
       const failures: string[] = [];
       const mergedSourceErrors: Record<string, SourceErrorEntry> = {};
       const nextOffsetsById = new Map<number, number | null>();
       const dedupedIncoming: Listing[] = [];
       const incomingBuckets: SavedSearchResultBucket[] = [];
 
-      for (const outcome of settled) {
-        if (outcome.status === "rejected") {
-          failures.push(outcome.reason instanceof Error ? outcome.reason.message : "Unknown error");
-          continue;
-        }
+      for (const entry of pendingEntries) {
+        try {
+          const payload = await fetchSavedSearchPage(entry, {
+            selectedLimit: savedBatchPagination.selectedLimit,
+            selectedSort: savedBatchPagination.selectedSort,
+            offset: entry.nextOffset ?? 0,
+          });
+          nextOffsetsById.set(entry.id, payload.next_offset ?? null);
+          Object.assign(mergedSourceErrors, payload.source_errors ?? {});
 
-        const { entryId, payload } = outcome.value;
-        nextOffsetsById.set(entryId, payload.next_offset ?? null);
-        Object.assign(mergedSourceErrors, payload.source_errors ?? {});
-
-        const incomingItems = payload.results ?? [];
-        if (savedBatchPagination.selectedSort === "relevance") {
-          incomingBuckets.push({ items: incomingItems });
-        } else {
-          for (const item of incomingItems) {
-            const listingKey = getListingKey(item);
-            if (seenKeysRef.current.has(listingKey)) continue;
-            seenKeysRef.current.add(listingKey);
-            dedupedIncoming.push(item);
+          const incomingItems = payload.results ?? [];
+          if (savedBatchPagination.selectedSort === "relevance") {
+            incomingBuckets.push({ items: incomingItems });
+          } else {
+            for (const item of incomingItems) {
+              const listingKey = getListingKey(item);
+              if (seenKeysRef.current.has(listingKey)) continue;
+              seenKeysRef.current.add(listingKey);
+              dedupedIncoming.push(item);
+            }
           }
+        } catch (error: unknown) {
+          failures.push(error instanceof Error ? error.message : "Unknown error");
+          continue;
         }
       }
 
@@ -3504,7 +3710,7 @@ export default function HomePage() {
         savedBatchLaneStartRef.current = interleaved.nextLaneStart;
       }
 
-      if (settled.length > 0 && failures.length === settled.length) {
+      if (pendingEntries.length > 0 && failures.length === pendingEntries.length) {
         throw new Error(`Failed to load more saved-search results: ${failures[0]}`);
       }
 
@@ -3534,7 +3740,7 @@ export default function HomePage() {
       setTotal(batchHasMore ? null : results.length + dedupedIncoming.length);
 
       if (failures.length > 0) {
-        setError(`Some saved searches failed to load more (${failures.length}/${settled.length}).`);
+        setError(`Some saved searches failed to load more (${failures.length}/${pendingEntries.length}).`);
       } else {
         setError(null);
       }
@@ -3618,6 +3824,23 @@ export default function HomePage() {
   ) {
     if (!accessToken || savedSearches.length === 0 || fetchInFlightRef.current) return;
 
+    const previousState = {
+      rawResults,
+      results,
+      nextOffset,
+      total,
+      sourceErrors,
+      savedBatchPagination,
+      hasSearched,
+      resultMode,
+      activeSavedSearchId,
+      activeQuery,
+      activeSources,
+      activeSort,
+      activeLimit,
+      seenKeys: new Set(seenKeysRef.current),
+      laneStart: savedBatchLaneStartRef.current,
+    };
     fetchInFlightRef.current = true;
     setSearchLoading(true);
     setLoadingMore(false);
@@ -3636,16 +3859,6 @@ export default function HomePage() {
     savedBatchLaneStartRef.current = seededLaneStart;
 
     try {
-      const requests = savedSearches.map(async (entry) => ({
-        entry,
-        payload: await fetchSavedSearchPage(entry, {
-          selectedLimit,
-          selectedSort,
-          offset: 0,
-        }),
-      }));
-
-      const settled = await Promise.allSettled(requests);
       const dedupedResults: Listing[] = [];
       const mergedSourceErrors: Record<string, SourceErrorEntry> = {};
       const seenKeys = new Set<string>();
@@ -3653,33 +3866,37 @@ export default function HomePage() {
       const paginationEntries: SavedBatchPaginationEntry[] = [];
       const initialBuckets: SavedSearchResultBucket[] = [];
 
-      for (const outcome of settled) {
-        if (outcome.status === "rejected") {
-          failures.push(outcome.reason instanceof Error ? outcome.reason.message : "Unknown error");
+      for (const entry of savedSearches) {
+        try {
+          const payload = await fetchSavedSearchPage(entry, {
+            selectedLimit,
+            selectedSort,
+            offset: 0,
+          });
+          const normalizedSources = entry.sources.filter(isSourceOption);
+          paginationEntries.push({
+            id: entry.id,
+            query: entry.query,
+            sources: normalizedSources,
+            nextOffset: payload.next_offset ?? null,
+          });
+
+          const initialItems = payload.results ?? [];
+          initialBuckets.push({ items: initialItems });
+          if (selectedSort !== "relevance") {
+            for (const item of initialItems) {
+              const listingKey = getListingKey(item);
+              if (seenKeys.has(listingKey)) continue;
+              seenKeys.add(listingKey);
+              dedupedResults.push(item);
+            }
+          }
+
+          Object.assign(mergedSourceErrors, payload.source_errors ?? {});
+        } catch (error: unknown) {
+          failures.push(error instanceof Error ? error.message : "Unknown error");
           continue;
         }
-
-        const { entry, payload } = outcome.value;
-        const normalizedSources = entry.sources.filter(isSourceOption);
-        paginationEntries.push({
-          id: entry.id,
-          query: entry.query,
-          sources: normalizedSources,
-          nextOffset: payload.next_offset ?? null,
-        });
-
-        const initialItems = payload.results ?? [];
-        initialBuckets.push({ items: initialItems });
-        if (selectedSort !== "relevance") {
-          for (const item of initialItems) {
-            const listingKey = getListingKey(item);
-            if (seenKeys.has(listingKey)) continue;
-            seenKeys.add(listingKey);
-            dedupedResults.push(item);
-          }
-        }
-
-        Object.assign(mergedSourceErrors, payload.source_errors ?? {});
       }
 
       if (selectedSort === "relevance") {
@@ -3695,12 +3912,12 @@ export default function HomePage() {
         seenKeysRef.current = seenKeys;
       }
 
-      if (settled.length > 0 && failures.length === settled.length) {
+      if (savedSearches.length > 0 && failures.length === savedSearches.length) {
         throw new Error(`Failed to auto-load saved searches: ${failures[0]}`);
       }
 
       if (failures.length > 0) {
-        setError(`Some saved searches failed to load (${failures.length}/${settled.length}).`);
+        setError(`Some saved searches failed to load (${failures.length}/${savedSearches.length}).`);
       }
 
       setRawResults(dedupedResults);
@@ -3726,13 +3943,192 @@ export default function HomePage() {
       setHasSearched(true);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to auto-load saved searches");
+      if (previousState.hasSearched) {
+        setRawResults(previousState.rawResults);
+        setResults(previousState.results);
+        setNextOffset(previousState.nextOffset);
+        setTotal(previousState.total);
+        setSourceErrors(previousState.sourceErrors);
+        setSavedBatchPagination(previousState.savedBatchPagination);
+        setHasSearched(previousState.hasSearched);
+        setResultMode(previousState.resultMode);
+        setActiveSavedSearchId(previousState.activeSavedSearchId);
+        setActiveQuery(previousState.activeQuery);
+        setActiveSources(previousState.activeSources);
+        setActiveSort(previousState.activeSort);
+        setActiveLimit(previousState.activeLimit);
+        seenKeysRef.current = previousState.seenKeys;
+        savedBatchLaneStartRef.current = previousState.laneStart;
+      }
     } finally {
       setSearchLoading(false);
       fetchInFlightRef.current = false;
     }
   }
 
+  const rerunActiveSearchWithLocation = useCallback(async () => {
+    if (!hasSearched) return;
+
+    if (resultMode === "saved_batch") {
+      await runAllSavedSearches(saved, {
+        selectedSort: activeSort,
+        selectedLimit: activeLimit,
+      });
+      return;
+    }
+
+    const query = activeQuery.trim() || q.trim();
+    const sourceList = activeSources.length > 0 ? activeSources : sources;
+    if (!query || sourceList.length === 0) return;
+
+    await runSearch({
+      query,
+      sourceList,
+      selectedSort: activeSort,
+      selectedLimit: activeLimit,
+      offset: 0,
+      append: false,
+    });
+  }, [
+    activeLimit,
+    activeQuery,
+    activeSort,
+    activeSources,
+    hasSearched,
+    q,
+    resultMode,
+    runAllSavedSearches,
+    runSearch,
+    saved,
+    sources,
+  ]);
+
+  async function onApplyManualLocation() {
+    if (!locationProvince || !locationCityInput.trim()) {
+      setLocationError("Select a province and city in Canada.");
+      return;
+    }
+
+    setLocationBusy(true);
+    setLocationError(null);
+    try {
+      const resolved = await resolveLocationPayload({
+        city: locationCityInput.trim(),
+        province: locationProvince,
+      });
+      applyResolvedLocation(resolved);
+      setLocationPersistence("browser");
+
+      if (accessToken) {
+        try {
+          const syncedLocation = await syncLocationToAccount(resolved);
+          if (syncedLocation) {
+            applyResolvedLocation(syncedLocation);
+            setLocationPersistence("account");
+          }
+        } catch (error: unknown) {
+          setLocationError(
+            error instanceof Error
+              ? `${error.message} Using the browser-saved location for now.`
+              : "Failed to sync your account location. Using the browser-saved location for now.",
+          );
+        }
+      }
+
+      await rerunActiveSearchWithLocation();
+    } catch (error: unknown) {
+      setLocationError(
+        error instanceof Error ? error.message : "Unable to set that Canadian location.",
+      );
+    } finally {
+      setLocationBusy(false);
+    }
+  }
+
+  function onUseMyLocation() {
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      setLocationError("Browser location is not available.");
+      return;
+    }
+
+    setLocationBusy(true);
+    setLocationError(null);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        void (async () => {
+          try {
+            const resolved = await resolveLocationPayload({
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude,
+            });
+            applyResolvedLocation(resolved);
+            setLocationPersistence("browser");
+
+            if (accessToken) {
+              try {
+                const syncedLocation = await syncLocationToAccount(resolved);
+                if (syncedLocation) {
+                  applyResolvedLocation(syncedLocation);
+                  setLocationPersistence("account");
+                }
+              } catch (error: unknown) {
+                setLocationError(
+                  error instanceof Error
+                    ? `${error.message} Using the browser-saved location for now.`
+                    : "Failed to sync your account location. Using the browser-saved location for now.",
+                );
+              }
+            }
+
+            await rerunActiveSearchWithLocation();
+          } catch (error: unknown) {
+            setLocationError(
+              error instanceof Error ? error.message : "Unable to resolve your current location.",
+            );
+          } finally {
+            setLocationBusy(false);
+          }
+        })();
+      },
+      (geoError) => {
+        setLocationError(geoError.message || "Unable to get your current location.");
+        setLocationBusy(false);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 5 * 60 * 1000,
+      },
+    );
+  }
+
+  async function onClearLocation() {
+    setLocationBusy(true);
+    setLocationError(null);
+    try {
+      applyResolvedLocation(null);
+      setLocationPersistence(null);
+
+      if (accessToken) {
+        try {
+          await syncLocationToAccount(null);
+        } catch (error: unknown) {
+          setLocationError(
+            error instanceof Error
+              ? `${error.message} The location was cleared in this browser only.`
+              : "Failed to clear your account location. The location was cleared in this browser only.",
+          );
+        }
+      }
+
+      await rerunActiveSearchWithLocation();
+    } finally {
+      setLocationBusy(false);
+    }
+  }
+
   useEffect(() => {
+    if (!accountLocationReady) return;
     if (user) {
       void (async () => {
         const fetched = await fetchSavedSearches();
@@ -3752,7 +4148,7 @@ export default function HomePage() {
       setNotifications([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user, accessToken]);
+  }, [accessToken, accountLocationReady, user]);
 
   async function onSearch(e: React.FormEvent) {
     e.preventDefault();
@@ -4360,19 +4756,18 @@ export default function HomePage() {
       onSearch={onSearch}
       onSaveCurrentSearch={onSaveCurrentSearch}
       limit={limit}
-      locationFilterText={locationFilterText}
-      setLocationFilterText={setLocationFilterText}
+      locationProvince={locationProvince}
+      setLocationProvince={setLocationProvince}
+      locationCityInput={locationCityInput}
+      setLocationCityInput={setLocationCityInput}
+      currentLocation={currentLocation}
+      locationPersistence={locationPersistence}
+      locationSuggestions={locationSuggestions}
+      onApplyManualLocation={onApplyManualLocation}
       onUseMyLocation={onUseMyLocation}
-      onClearMyLocation={onClearMyLocation}
-      locatingDevice={locatingDevice}
-      deviceCoords={deviceCoords}
-      locationFilterError={locationFilterError}
-      travelRangeMilesInput={travelRangeMilesInput}
-      setTravelRangeMilesInput={setTravelRangeMilesInput}
-      hideUnknownDistance={hideUnknownDistance}
-      setHideUnknownDistance={setHideUnknownDistance}
-      distanceFilterPendingLocation={distanceFilterPendingLocation}
-      distanceFilterActive={distanceFilterActive}
+      onClearLocation={onClearLocation}
+      locationBusy={locationBusy}
+      locationError={locationError}
       error={error}
       sourceErrors={sourceErrors}
       hasSourceErrorEntries={hasSourceErrorEntries}

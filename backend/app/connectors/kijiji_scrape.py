@@ -24,6 +24,10 @@ ABSOLUTE_POSTED_RE = re.compile(
     r"\b(?:posted|updated)(?:\s+on)?\s+([A-Za-z]+\s+\d{1,2},\s+\d{4}|\d{4}[-/]\d{2}[-/]\d{2})\b",
     re.IGNORECASE,
 )
+CANADA_PROVINCE_RE = re.compile(
+    r"\b(?P<city>[A-Za-zÀ-ÿ0-9' .-]{2,60}),\s*"
+    r"(?P<province>AB|BC|MB|NB|NL|NS|NT|NU|ON|PE|QC|SK|YT)\b"
+)
 
 
 class KijijiScrapeConnector(MarketplaceConnector):
@@ -102,6 +106,17 @@ class KijijiScrapeConnector(MarketplaceConnector):
             return None
         city = city_slug.replace("-", " ").title()
         return city or None
+
+    def _extract_location(self, blob: str, listing_url: str) -> str | None:
+        compact_blob = " ".join((blob or "").split())
+        if compact_blob:
+            location_match = CANADA_PROVINCE_RE.search(compact_blob)
+            if location_match:
+                city = location_match.group("city").strip(" -|:")
+                province = location_match.group("province").upper()
+                if city:
+                    return f"{city}, {province}"
+        return self._extract_location_from_listing_url(listing_url)
 
     def _extract_posted_at(self, blob: str, *, now: datetime | None = None) -> str | None:
         if not blob:
@@ -236,7 +251,7 @@ class KijijiScrapeConnector(MarketplaceConnector):
                     price=Money(amount=price_val or 0.0, currency="CAD"),
                     url=listing_url,
                     image_urls=image_urls,
-                    location=self._extract_location_from_listing_url(listing_url),
+                    location=self._extract_location(blob, listing_url),
                     condition=None,
                     snippet=self._clean_snippet(title, blob),
                     posted_at=self._extract_posted_at(blob),

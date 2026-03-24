@@ -21,8 +21,10 @@ from app.core.logging import setup_logging
 from app.db import get_db
 from app.models.listing import SearchResponse, SearchSort, Source
 from app.models.saved_search import SavedSearch
+from app.models.user_location_preference import UserLocationPreference
 from app.schemas.copilot import CopilotQueryRequest, CopilotQueryResponse
 from app.models.user_facebook_credential import UserFacebookCredential
+from app.schemas.location import LocationCitySuggestion, LocationResolveRequest, ResolvedLocation
 from app.schemas.notifications import SavedSearchNotificationOut
 from app.schemas.facebook_credentials import (
     FacebookConnectorStatusResponse,
@@ -55,6 +57,14 @@ from app.services.alerts import (
 from app.services.gemini_client import generate_copilot_response
 from app.services.listing_insights import enrich_listings_with_insights
 from app.services.listing_snapshots import persist_listing_snapshots
+from app.services.location import (
+    delete_user_location_preference,
+    get_user_location_preference,
+    list_city_suggestions,
+    resolve_city_province,
+    resolve_coordinates,
+    upsert_user_location_preference,
+)
 from app.services.search_service import FacebookRuntimeContext, unified_search
 from app.services.supabase_ingestion import upsert_facebook_records
 
@@ -172,6 +182,50 @@ def _saved_search_out(row: SavedSearch) -> SavedSearchOut:
     )
 
 
+def _resolved_location_from_row(row: UserLocationPreference | None) -> ResolvedLocation | None:
+    if row is None:
+        return None
+    return ResolvedLocation(
+        display_name=row.display_name,
+        city=row.city,
+        province_code=row.province_code,
+        province_name=row.province_name,
+        country_code=row.country_code,
+        latitude=row.latitude,
+        longitude=row.longitude,
+        mode=(row.mode if row.mode in {"manual", "gps"} else "manual"),
+    )
+
+
+def _resolve_location_payload(payload: LocationResolveRequest) -> ResolvedLocation:
+    if payload.latitude is not None and payload.longitude is not None:
+        resolved = resolve_coordinates(payload.latitude, payload.longitude)
+    else:
+        resolved = resolve_city_province(payload.city or "", payload.province or "")
+
+    if resolved is None:
+        raise HTTPException(status_code=422, detail="Location could not be resolved to a Canadian city.")
+    return resolved
+
+
+def _effective_search_location(
+    *,
+    db: Session,
+    user_id: str | None,
+    latitude: float | None,
+    longitude: float | None,
+) -> tuple[ResolvedLocation | None, float | None, float | None]:
+    if latitude is not None and longitude is not None:
+        return resolve_coordinates(latitude, longitude), latitude, longitude
+    if not user_id:
+        return None, None, None
+    row = get_user_location_preference(db, user_id)
+    resolved = _resolved_location_from_row(row)
+    if resolved is None:
+        return None, None, None
+    return resolved, resolved.latitude, resolved.longitude
+
+
 def _enrich_results(
     db: Session,
     *,
@@ -256,6 +310,48 @@ def sources():
     return {"sources": sorted(CONNECTORS.keys())}
 
 
+@app.get("/location/cities", response_model=list[LocationCitySuggestion])
+def location_city_suggestions(
+    province: str = Query(min_length=2, max_length=80),
+    q: str | None = Query(default=None, max_length=120),
+    limit: int = Query(default=20, ge=1, le=50),
+):
+    return list_city_suggestions(province_code=province, query=q, limit=limit)
+
+
+@app.post("/location/resolve", response_model=ResolvedLocation)
+def resolve_location(payload: LocationResolveRequest):
+    return _resolve_location_payload(payload)
+
+
+@app.get("/me/location", response_model=ResolvedLocation | None)
+def get_my_location(
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    return _resolved_location_from_row(get_user_location_preference(db, user_id))
+
+
+@app.put("/me/location", response_model=ResolvedLocation)
+def put_my_location(
+    payload: LocationResolveRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    resolved = _resolve_location_payload(payload)
+    upsert_user_location_preference(db, user_id=user_id, resolved=resolved)
+    return resolved
+
+
+@app.delete("/me/location")
+def delete_my_location(
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    deleted = delete_user_location_preference(db, user_id)
+    return {"deleted": deleted}
+
+
 @app.get("/search", response_model=SearchResponse)
 async def search(
     request: Request,
@@ -286,6 +382,12 @@ async def search(
             raise HTTPException(status_code=400, detail=f"Unknown source: {source_name}")
 
     optional_user_id = try_get_current_user_id_from_authorization(authorization)
+    search_location_context, effective_latitude, effective_longitude = _effective_search_location(
+        db=db,
+        user_id=optional_user_id,
+        latitude=latitude,
+        longitude=longitude,
+    )
     client_ip = get_client_ip(request)
     limited = _apply_rate_limit(
         bucket="search_ip",
@@ -310,8 +412,8 @@ async def search(
         facebook_runtime_context = _build_facebook_runtime_context(
             db=db,
             user_id=optional_user_id,
-            latitude=latitude,
-            longitude=longitude,
+            latitude=effective_latitude,
+            longitude=effective_longitude,
             radius_km=radius_km,
         )
 
@@ -322,6 +424,7 @@ async def search(
         offset=offset,
         sort=sort,
         facebook_runtime_context=facebook_runtime_context,
+        search_location_context=search_location_context,
     )
     cache_active = is_search_response_cache_active()
     cached_payload = get_cached_search_response(cache_key) if cache_active else None
@@ -343,6 +446,7 @@ async def search(
             limit=limit,
             offset=offset,
             sort=sort,
+            search_location_context=search_location_context,
         )
     else:
         results, total, next_offset, source_errors = await unified_search(
@@ -352,6 +456,7 @@ async def search(
             offset=offset,
             sort=sort,
             facebook_runtime_context=facebook_runtime_context,
+            search_location_context=search_location_context,
         )
 
     _enrich_results(db, query=q, results=results)
@@ -743,13 +848,19 @@ async def run_saved_search(
         if source_name not in CONNECTORS:
             raise HTTPException(status_code=400, detail=f"Unknown source: {source_name}")
 
+    search_location_context, effective_latitude, effective_longitude = _effective_search_location(
+        db=db,
+        user_id=user_id,
+        latitude=latitude,
+        longitude=longitude,
+    )
     facebook_runtime_context = None
     if "facebook" in source_list:
         facebook_runtime_context = _build_facebook_runtime_context(
             db=db,
             user_id=user_id,
-            latitude=latitude,
-            longitude=longitude,
+            latitude=effective_latitude,
+            longitude=effective_longitude,
             radius_km=radius_km,
         )
 
@@ -760,6 +871,7 @@ async def run_saved_search(
             limit=limit,
             offset=offset,
             sort=sort,
+            search_location_context=search_location_context,
         )
     else:
         results, total, next_offset, source_errors = await unified_search(
@@ -769,6 +881,7 @@ async def run_saved_search(
             offset=offset,
             sort=sort,
             facebook_runtime_context=facebook_runtime_context,
+            search_location_context=search_location_context,
         )
 
     _enrich_results(db, query=row.query, results=results)

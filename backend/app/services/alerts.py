@@ -11,8 +11,10 @@ from app.core.config import settings
 from app.models.listing import Listing
 from app.models.saved_search import SavedSearch
 from app.models.saved_search_notification import SavedSearchNotification
+from app.schemas.location import ResolvedLocation
 from app.schemas.notifications import SavedSearchNotificationOut
 from app.services.facebook_credentials import decrypt_cookie_payload, get_user_facebook_credential
+from app.services.location import get_user_location_preference
 from app.services.listing_insights import enrich_listings_with_insights, listing_fingerprint, listing_key
 from app.services.listing_snapshots import persist_listing_snapshots, previously_seen_fingerprints
 from app.services.search_service import FacebookRuntimeContext, unified_search
@@ -43,20 +45,64 @@ def _facebook_runtime_context(db: Session, user_id: str | None) -> FacebookRunti
     if not user_id:
         return None
 
+    location_row = get_user_location_preference(db, user_id)
+    location = (
+        ResolvedLocation(
+            display_name=location_row.display_name,
+            city=location_row.city,
+            province_code=location_row.province_code,
+            province_name=location_row.province_name,
+            country_code=location_row.country_code,
+            latitude=location_row.latitude,
+            longitude=location_row.longitude,
+            mode=(location_row.mode if location_row.mode in {"manual", "gps"} else "manual"),
+        )
+        if location_row is not None
+        else None
+    )
+
     row = get_user_facebook_credential(db, user_id)
     if row is None:
-        return FacebookRuntimeContext(user_id=user_id)
+        return FacebookRuntimeContext(
+            user_id=user_id,
+            latitude=location.latitude if location is not None else None,
+            longitude=location.longitude if location is not None else None,
+        )
 
     try:
         cookie_payload = decrypt_cookie_payload(row.encrypted_cookie_json)
     except Exception as exc:
         logger.warning("alert job facebook decrypt failed for user %s: %s", user_id, exc)
-        return FacebookRuntimeContext(user_id=user_id)
+        return FacebookRuntimeContext(
+            user_id=user_id,
+            latitude=location.latitude if location is not None else None,
+            longitude=location.longitude if location is not None else None,
+        )
 
     return FacebookRuntimeContext(
         user_id=user_id,
         cookie_payload=cookie_payload,
         credential_fingerprint_sha256=row.cookie_fingerprint_sha256,
+        latitude=location.latitude if location is not None else None,
+        longitude=location.longitude if location is not None else None,
+    )
+
+
+def _search_location_context(db: Session, user_id: str | None) -> ResolvedLocation | None:
+    if not user_id:
+        return None
+    row = get_user_location_preference(db, user_id)
+    if row is None:
+        return None
+    return ResolvedLocation(
+        display_name=row.display_name,
+        city=row.city,
+        province_code=row.province_code,
+        province_name=row.province_name,
+        country_code=row.country_code,
+        latitude=row.latitude,
+        longitude=row.longitude,
+        mode=(row.mode if row.mode in {"manual", "gps"} else "manual"),
     )
 
 
@@ -246,6 +292,7 @@ async def run_saved_search_alert_job(
                 continue
 
             facebook_runtime_context = None
+            search_location_context = _search_location_context(db, saved_search.user_id)
             if "facebook" in source_list:
                 facebook_runtime_context = _facebook_runtime_context(db, saved_search.user_id)
 
@@ -256,6 +303,7 @@ async def run_saved_search_alert_job(
                 offset=0,
                 sort="relevance",
                 facebook_runtime_context=facebook_runtime_context,
+                search_location_context=search_location_context,
             )
             enrich_listings_with_insights(db, saved_search.query, results)
             now = _utc_now()

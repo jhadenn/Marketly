@@ -6,6 +6,7 @@ from app.models.listing import Listing, ListingRisk, ListingValuation, Money
 from app.models.listing_snapshot import ListingSnapshot
 from app.models.saved_search import SavedSearch
 from app.models.saved_search_notification import SavedSearchNotification
+from app.models.user_location_preference import UserLocationPreference
 from app.services.alerts import refresh_saved_search_alerts_for_user, run_saved_search_alert_job
 from app.services.listing_insights import listing_fingerprint
 
@@ -305,6 +306,61 @@ def test_run_saved_search_alert_job_rolls_back_failed_search_and_continues(monke
     assert notifications[0].summary_text == "1 new listing for working search"
     assert failing_search.last_alert_notified_at is None
     assert succeeding_search.last_alert_notified_at is not None
+
+    db.close()
+    engine.dispose()
+
+
+def test_run_saved_search_alert_job_uses_stored_user_location(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    db = session_factory()
+
+    saved_search = SavedSearch(
+        user_id="user-location",
+        query="road bike",
+        sources="kijiji,facebook",
+        alerts_enabled=True,
+        last_alert_checked_at=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    db.add(saved_search)
+    db.add(
+        UserLocationPreference(
+            user_id="user-location",
+            display_name="Toronto, ON",
+            city="Toronto",
+            province_code="ON",
+            province_name="Ontario",
+            country_code="CA",
+            latitude=43.6532,
+            longitude=-79.3832,
+            mode="manual",
+        )
+    )
+    db.commit()
+
+    captured: dict[str, object] = {}
+
+    async def fake_unified_search(**kwargs):
+        captured.update(kwargs)
+        return [], 0, None, {}
+
+    monkeypatch.setattr("app.services.alerts.unified_search", fake_unified_search)
+    monkeypatch.setattr("app.services.alerts.enrich_listings_with_insights", lambda db, query, results: results)
+    monkeypatch.setattr("app.services.alerts.persist_listing_snapshots", lambda **kwargs: 0)
+
+    result = asyncio.run(
+        run_saved_search_alert_job(
+            db,
+            limit_per_search=20,
+            user_id="user-location",
+        )
+    )
+
+    assert result["checked"] == 1
+    assert captured["query"] == "road bike"
+    search_location_context = captured["search_location_context"]
+    assert search_location_context is not None
+    assert search_location_context.display_name == "Toronto, ON"
 
     db.close()
     engine.dispose()

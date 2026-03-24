@@ -402,8 +402,6 @@ class FacebookMarketplaceConnector:
             normalized = self._normalize_cards(
                 raw_cards,
                 limit=request.limit,
-                fallback_latitude=request.latitude,
-                fallback_longitude=request.longitude,
             )
 
             if not normalized:
@@ -541,18 +539,12 @@ class FacebookMarketplaceConnector:
         cards: list[dict[str, Any]],
         *,
         limit: int,
-        fallback_latitude: float | None = None,
-        fallback_longitude: float | None = None,
     ) -> list[FacebookNormalizedListing]:
         dedupe: set[str] = set()
         records: list[FacebookNormalizedListing] = []
         skipped = 0
 
         for card in cards:
-            if fallback_latitude is not None and "latitude" not in card:
-                card["latitude"] = fallback_latitude
-            if fallback_longitude is not None and "longitude" not in card:
-                card["longitude"] = fallback_longitude
             listing = normalize_marketplace_card(card)
             if listing is None:
                 skipped += 1
