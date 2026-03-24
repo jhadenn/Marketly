@@ -929,10 +929,6 @@ function SearchPageView(props: SearchPageViewProps) {
             >
               <span className="font-mono text-sm text-zinc-100">Marketly</span>
             </Link>
-            <span className="hidden items-center gap-2 rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-zinc-300 md:inline-flex">
-              <Sparkles className="size-3.5 text-zinc-400" />
-              Marketplace Search
-            </span>
           </div>
 
           <div className="flex items-center gap-2">
@@ -2405,6 +2401,7 @@ function CopilotWindow({
           ? "What should I ask before buying one?"
           : `What should I ask before buying ${itemLabel}?`,
       ];
+  const [showPresetPrompts, setShowPresetPrompts] = useState(true);
   const [isDesktop, setIsDesktop] = useState(false);
 
   useEffect(() => {
@@ -2419,6 +2416,22 @@ function CopilotWindow({
     if (!scrollContentRef.current) return;
     scrollContentRef.current.scrollTop = scrollContentRef.current.scrollHeight;
   }, [copilotLoading, copilotMessages, copilotSelectedListingKeys.length, latestShortlist]);
+
+  const handleAskCopilot = useCallback(
+    (questionOverride?: string) => {
+      const question = (questionOverride ?? copilotQuestion).trim();
+      if (question) {
+        setShowPresetPrompts(false);
+      }
+      void onAskCopilot(questionOverride);
+    },
+    [copilotQuestion, onAskCopilot],
+  );
+
+  const handleResetCopilotConversation = useCallback(() => {
+    setShowPresetPrompts(true);
+    resetCopilotConversation();
+  }, [resetCopilotConversation]);
 
   if (!copilotOpen) {
     return null;
@@ -2446,50 +2459,52 @@ function CopilotWindow({
           <div className="border-b border-white/10 px-4 py-3">
             <div
               className={cn(
-                "flex min-w-0 items-center justify-between gap-3",
+                "space-y-3",
                 isDesktop ? "cursor-move select-none" : "",
               )}
               onPointerDown={isDesktop ? onCopilotWindowDragStart : undefined}
             >
-              <div className="flex min-w-0 flex-1 items-center gap-3">
-                <div className="rounded-full border border-white/10 bg-white/[0.02] p-2 text-zinc-300">
-                  <Bot className="size-4" />
-                </div>
-                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+              <div className="flex min-w-0 items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="rounded-full border border-white/10 bg-white/[0.02] p-2 text-zinc-300">
+                    <Bot className="size-4" />
+                  </div>
                   <p className="font-mono text-xs uppercase tracking-[0.18em] text-zinc-500">Copilot</p>
-                  <button
-                    type="button"
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onClick={toggleCopilotSelectionMode}
-                    className={cn(
-                      "rounded-full border px-3 py-2 text-xs font-medium uppercase tracking-[0.14em] transition",
-                      copilotSelectionMode
-                        ? "border-emerald-300/30 bg-emerald-400/10 text-emerald-100"
-                        : "border-white/10 bg-white/[0.02] text-zinc-300 hover:border-white/20 hover:bg-white/[0.05]",
-                    )}
-                  >
-                    {copilotSelectionMode ? "Selecting listings" : "Select listings"}
-                  </button>
-                  <button
-                    type="button"
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onClick={resetCopilotConversation}
-                    className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05]"
-                  >
-                    <RefreshCw className="size-3.5" />
-                    New chat
-                  </button>
                 </div>
+                <button
+                  type="button"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={closeCopilot}
+                  className="shrink-0 rounded-full border border-white/10 bg-white/[0.02] p-2 text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05]"
+                  aria-label="Close copilot"
+                >
+                  <X className="size-4" />
+                </button>
               </div>
-              <button
-                type="button"
-                onPointerDown={(event) => event.stopPropagation()}
-                onClick={closeCopilot}
-                className="rounded-full border border-white/10 bg-white/[0.02] p-2 text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05]"
-                aria-label="Close copilot"
-              >
-                <X className="size-4" />
-              </button>
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={toggleCopilotSelectionMode}
+                  className={cn(
+                    "inline-flex whitespace-nowrap rounded-full border px-3 py-2 text-xs font-medium uppercase tracking-[0.14em] transition",
+                    copilotSelectionMode
+                      ? "border-emerald-300/30 bg-emerald-400/10 text-emerald-100"
+                      : "border-white/10 bg-white/[0.02] text-zinc-300 hover:border-white/20 hover:bg-white/[0.05]",
+                  )}
+                >
+                  {copilotSelectionMode ? "Selecting listings" : "Select listings"}
+                </button>
+                <button
+                  type="button"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={handleResetCopilotConversation}
+                  className="inline-flex items-center gap-2 whitespace-nowrap rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05]"
+                >
+                  <RefreshCw className="size-3.5" />
+                  New chat
+                </button>
+              </div>
             </div>
           </div>
 
@@ -2596,22 +2611,21 @@ function CopilotWindow({
           </div>
 
           <div className="space-y-3 border-t border-white/10 bg-black/20 px-4 py-4">
-            <div className="flex flex-wrap gap-2">
-              {presets.map((preset) => (
-                <button
-                  key={preset}
-                  type="button"
-                  className="rounded-full border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
-                  onClick={() => {
-                    setCopilotQuestion(preset);
-                    void onAskCopilot(preset);
-                  }}
-                  disabled={copilotLoading}
-                >
-                  {preset}
-                </button>
-              ))}
-            </div>
+            {showPresetPrompts ? (
+              <div className="flex flex-wrap gap-2">
+                {presets.map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    className="rounded-full border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
+                    onClick={() => handleAskCopilot(preset)}
+                    disabled={copilotLoading}
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
+            ) : null}
 
             <div className="space-y-2">
               <textarea
@@ -2637,7 +2651,7 @@ function CopilotWindow({
                 <button
                   type="button"
                   className="inline-flex items-center gap-2 rounded-xl bg-white px-4 py-2 text-sm font-medium text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
-                  onClick={() => void onAskCopilot()}
+                  onClick={() => handleAskCopilot()}
                   disabled={copilotLoading || !copilotQuestion.trim()}
                 >
                   {copilotLoading ? <Loader2 className="size-4 animate-spin" /> : <Bot className="size-4" />}
