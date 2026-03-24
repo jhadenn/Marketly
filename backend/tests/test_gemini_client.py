@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from app.core.config import settings
 from app.services.gemini_client import (
@@ -132,6 +133,192 @@ def test_generate_copilot_response_surfaces_generation_errors(monkeypatch):
     assert result.error_message == "Gemini quota exhausted"
 
 
+def test_generate_copilot_response_supports_general_item_questions_without_listings(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_request(**kwargs):
+        captured.update(kwargs)
+        return {
+            "answer": "The Acura RSX is a sporty compact coupe. Check maintenance history, rust, and transmission condition before buying.",
+            "shortlist": [
+                {
+                    "listing_key": "ebay:1",
+                    "title": "Should be ignored without listings",
+                    "reason": "No live listing context was supplied.",
+                }
+            ],
+            "seller_questions": [],
+            "red_flags": [],
+        }
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setattr("app.services.gemini_client.request_gemini_structured_json", fake_request)
+
+    result = asyncio.run(
+        generate_copilot_response(
+            query=None,
+            user_question="What can you tell me about the Acura RSX?",
+            listings=[],
+        )
+    )
+
+    prompt_payload = json.loads(str(captured["prompt"]))
+    assert result.available is True
+    assert result.shortlist == []
+    assert prompt_payload["query"] is None
+    assert prompt_payload["has_listing_context"] is False
+    assert prompt_payload["listings"] == []
+    assert "refuse requests that are unrelated" in str(captured["instructions"]).lower()
+    assert "rough estimates" in str(captured["instructions"]).lower()
+
+
+def test_generate_copilot_response_refuses_off_topic_questions(monkeypatch):
+    async def fake_request(**kwargs):
+        return {
+            "answer": "I can help with marketplace items and listing research, but I can't help with unrelated requests like that.",
+            "shortlist": [],
+            "seller_questions": [],
+            "red_flags": [],
+        }
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setattr("app.services.gemini_client.request_gemini_structured_json", fake_request)
+
+    result = asyncio.run(
+        generate_copilot_response(
+            query=None,
+            user_question="Write me a haiku about the weather.",
+            listings=[],
+        )
+    )
+
+    assert result.available is True
+    assert "marketplace items" in result.answer.lower()
+    assert result.shortlist == []
+    assert result.seller_questions == []
+    assert result.red_flags == []
+
+
+def test_generate_copilot_response_drops_stale_search_context_for_new_marketplace_topic(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_request(**kwargs):
+        captured.update(kwargs)
+        return {
+            "answer": "I can help compare badminton rackets, explain what to look for, and suggest seller questions.",
+            "shortlist": [],
+            "seller_questions": [],
+            "red_flags": [],
+        }
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setattr("app.services.gemini_client.request_gemini_structured_json", fake_request)
+
+    result = asyncio.run(
+        generate_copilot_response(
+            query="acura rsx",
+            user_question="what about badminton racket shopping",
+            listings=[{"listing_key": "fb:1", "title": "2003 Acura RSX Base"}],
+            conversation=[
+                {"role": "user", "content": "Which is the best value?"},
+                {
+                    "role": "assistant",
+                    "content": "The 2003 Acura RSX Base is the best value.",
+                },
+                {"role": "user", "content": "can you help me answer math homework"},
+                {
+                    "role": "assistant",
+                    "content": "I cannot help with math homework. Is there anything related to car shopping I can help you with?",
+                },
+            ],
+        )
+    )
+
+    prompt_payload = json.loads(str(captured["prompt"]))
+    assert result.available is True
+    assert prompt_payload["query"] is None
+    assert prompt_payload["listings"] == []
+    assert prompt_payload["context_mode"] == "fresh_topic"
+    assert prompt_payload["conversation"] == []
+
+
+def test_generate_copilot_response_keeps_active_listing_context_for_best_value_questions(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_request(**kwargs):
+        captured.update(kwargs)
+        return {
+            "answer": "The first listing is the strongest value.",
+            "shortlist": [
+                {
+                    "listing_key": "ebay:1",
+                    "title": "Road bike",
+                    "reason": "Priced below comparable listings.",
+                }
+            ],
+            "seller_questions": [],
+            "red_flags": [],
+        }
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setattr("app.services.gemini_client.request_gemini_structured_json", fake_request)
+
+    result = asyncio.run(
+        generate_copilot_response(
+            query="road bike",
+            user_question="Which is the best value?",
+            listings=[{"listing_key": "ebay:1", "title": "Road bike"}],
+        )
+    )
+
+    prompt_payload = json.loads(str(captured["prompt"]))
+    assert result.available is True
+    assert prompt_payload["query"] == "road bike"
+    assert prompt_payload["has_listing_context"] is True
+    assert prompt_payload["listings"] == [{"listing_key": "ebay:1", "title": "Road bike"}]
+    assert prompt_payload["context_mode"] == "active_search"
+
+
+def test_generate_copilot_response_strips_ui_sections_from_assistant_history(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_request(**kwargs):
+        captured.update(kwargs)
+        return {
+            "answer": "Ask for the battery health details.",
+            "shortlist": [],
+            "seller_questions": [],
+            "red_flags": [],
+        }
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setattr("app.services.gemini_client.request_gemini_structured_json", fake_request)
+
+    result = asyncio.run(
+        generate_copilot_response(
+            query="iphone 15",
+            user_question="What should I ask next?",
+            listings=[{"listing_key": "fb:1", "title": "iPhone 15"}],
+            conversation=[
+                {
+                    "role": "assistant",
+                    "content": (
+                        "Ask about battery health and repair history.\n\n"
+                        "Seller questions:\n- What is the battery health?\n\n"
+                        "Red flags:\n- Missing IMEI photo."
+                    ),
+                }
+            ],
+        )
+    )
+
+    prompt_payload = json.loads(str(captured["prompt"]))
+    assert result.available is True
+    assert prompt_payload["conversation"] == [
+        {"role": "assistant", "content": "Ask about battery health and repair history."}
+    ]
+
+
 def test_generate_copilot_response_clears_seller_questions_and_red_flags_when_not_requested(
     monkeypatch,
 ):
@@ -164,6 +351,7 @@ def test_generate_copilot_response_clears_seller_questions_and_red_flags_when_no
     assert result.available is True
     assert result.seller_questions == []
     assert result.red_flags == []
+    assert result.shortlist[0].listing_key == "ebay:1"
 
 
 def test_generate_copilot_response_keeps_seller_questions_when_requested(monkeypatch):
@@ -190,6 +378,35 @@ def test_generate_copilot_response_keeps_seller_questions_when_requested(monkeyp
     assert result.red_flags == []
 
 
+def test_generate_copilot_response_keeps_seller_questions_for_general_item_questions(monkeypatch):
+    async def fake_request(**kwargs):
+        return {
+            "answer": "Ask about rust, maintenance history, clutch wear, and title status.",
+            "shortlist": [],
+            "seller_questions": [
+                "Has the clutch ever been replaced?",
+                "Do you have maintenance records?",
+            ],
+            "red_flags": [],
+        }
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setattr("app.services.gemini_client.request_gemini_structured_json", fake_request)
+
+    result = asyncio.run(
+        generate_copilot_response(
+            query=None,
+            user_question="What should I ask before buying an Acura RSX?",
+            listings=[],
+        )
+    )
+
+    assert result.seller_questions == [
+        "Has the clutch ever been replaced?",
+        "Do you have maintenance records?",
+    ]
+
+
 def test_generate_copilot_response_keeps_red_flags_when_requested(monkeypatch):
     async def fake_request(**kwargs):
         return {
@@ -212,6 +429,35 @@ def test_generate_copilot_response_keeps_red_flags_when_requested(monkeypatch):
 
     assert result.seller_questions == []
     assert result.red_flags == ["The price is unusually low."]
+
+
+def test_generate_copilot_response_keeps_red_flags_for_general_item_questions(monkeypatch):
+    async def fake_request(**kwargs):
+        return {
+            "answer": "Watch for rust, transmission issues, and signs of poor modifications.",
+            "shortlist": [],
+            "seller_questions": [],
+            "red_flags": [
+                "Rust around the rear wheel arches can be expensive to fix.",
+                "Grinding gears can point to transmission wear.",
+            ],
+        }
+
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setattr("app.services.gemini_client.request_gemini_structured_json", fake_request)
+
+    result = asyncio.run(
+        generate_copilot_response(
+            query=None,
+            user_question="What should I watch out for with an Acura RSX?",
+            listings=[],
+        )
+    )
+
+    assert result.red_flags == [
+        "Rust around the rear wheel arches can be expensive to fix.",
+        "Grinding gears can point to transmission wear.",
+    ]
 
 
 def test_generate_copilot_response_clears_shortlist_when_not_requested(monkeypatch):
@@ -258,4 +504,4 @@ def test_generate_copilot_response_handles_small_talk_without_shortlist(monkeypa
     assert result.shortlist == []
     assert result.seller_questions == []
     assert result.red_flags == []
-    assert "compare listings" in result.answer.lower()
+    assert "marketplace items" in result.answer.lower()

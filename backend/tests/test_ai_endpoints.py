@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from fastapi.testclient import TestClient
 
 from app.auth import get_current_user_id
@@ -221,3 +223,157 @@ def test_copilot_query_returns_graceful_payload(monkeypatch):
     assert payload["available"] is True
     assert payload["shortlist"][0]["listing_key"] == "ebay:listing-1"
     assert captured["conversation"] == [{"role": "user", "content": "Which bike looks best so far?"}]
+
+
+def test_copilot_query_allows_missing_query_and_empty_listings(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_generate_copilot_response(**kwargs):
+        captured.update(kwargs)
+        return CopilotQueryResponse(
+            available=True,
+            answer="The Acura RSX is a sporty compact coupe with good aftermarket support.",
+            shortlist=[],
+            seller_questions=[],
+            red_flags=[],
+            error_message=None,
+        )
+
+    monkeypatch.setattr("app.main.generate_copilot_response", fake_generate_copilot_response)
+
+    response = client.post(
+        "/copilot/query",
+        json={
+            "user_question": "What can you tell me about the Acura RSX?",
+            "listings": [],
+            "conversation": [],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["available"] is True
+    assert captured["query"] is None
+    assert captured["listings"] == []
+
+
+def test_notifications_endpoint_refreshes_alerts_before_listing(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+
+    called: dict[str, object] = {}
+
+    async def fake_refresh_saved_search_alerts_for_user(db, *, user_id):
+        called["user_id"] = user_id
+        return True
+
+    monkeypatch.setattr("app.main.refresh_saved_search_alerts_for_user", fake_refresh_saved_search_alerts_for_user)
+
+    db = session_factory()
+    try:
+        db.add(
+            SavedSearchNotification(
+                user_id="user-123",
+                saved_search_id=1,
+                saved_search_query="road bike",
+                summary_text="1 new match for road bike",
+                items_json=[],
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    notifications_res = client.get("/me/notifications")
+
+    assert notifications_res.status_code == 200
+    assert called == {"user_id": "user-123"}
+    assert len(notifications_res.json()) == 1
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_update_saved_search_resets_alert_baseline_when_query_changes():
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+
+    db = session_factory()
+    try:
+        saved_search = SavedSearch(
+            user_id="user-123",
+            query="road bike",
+            sources="ebay",
+            alerts_enabled=True,
+            last_alert_checked_at=datetime.now(timezone.utc) - timedelta(days=1),
+            last_alert_notified_at=datetime.now(timezone.utc) - timedelta(hours=8),
+        )
+        db.add(saved_search)
+        db.commit()
+        db.refresh(saved_search)
+        saved_search_id = saved_search.id
+    finally:
+        db.close()
+
+    response = client.patch(
+        f"/saved-searches/{saved_search_id}",
+        json={"query": "acura rsx", "sources": ["ebay"], "alerts_enabled": True},
+    )
+
+    assert response.status_code == 200
+
+    db = session_factory()
+    try:
+        updated = db.query(SavedSearch).filter(SavedSearch.id == saved_search_id).first()
+        assert updated is not None
+        assert updated.last_alert_checked_at is None
+        assert updated.last_alert_notified_at is None
+    finally:
+        db.close()
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_update_saved_search_resets_alert_baseline_when_reenabled():
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+
+    db = session_factory()
+    try:
+        saved_search = SavedSearch(
+            user_id="user-123",
+            query="acura rsx",
+            sources="ebay",
+            alerts_enabled=False,
+            last_alert_checked_at=datetime.now(timezone.utc) - timedelta(days=3),
+            last_alert_notified_at=datetime.now(timezone.utc) - timedelta(days=2),
+        )
+        db.add(saved_search)
+        db.commit()
+        db.refresh(saved_search)
+        saved_search_id = saved_search.id
+    finally:
+        db.close()
+
+    response = client.patch(
+        f"/saved-searches/{saved_search_id}",
+        json={"query": "acura rsx", "sources": ["ebay"], "alerts_enabled": True},
+    )
+
+    assert response.status_code == 200
+
+    db = session_factory()
+    try:
+        updated = db.query(SavedSearch).filter(SavedSearch.id == saved_search_id).first()
+        assert updated is not None
+        assert updated.alerts_enabled is True
+        assert updated.last_alert_checked_at is None
+        assert updated.last_alert_notified_at is None
+    finally:
+        db.close()
+
+    app.dependency_overrides.clear()
+    engine.dispose()

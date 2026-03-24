@@ -25,7 +25,7 @@ class CopilotListingContext(BaseModel):
 
 
 class CopilotQueryRequest(BaseModel):
-    query: str = Field(min_length=1, max_length=200)
+    query: str | None = Field(default=None, min_length=1, max_length=200)
     user_question: str = Field(min_length=1, max_length=500)
     listings: list[CopilotListingContext] = Field(default_factory=list, max_length=25)
     conversation: list[CopilotConversationMessage] = Field(default_factory=list, max_length=20)

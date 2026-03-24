@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
 from app.connectors import CONNECTORS
+from app.core.cache import TTLCache
+from app.core.config import settings
 from app.models.listing import Listing
 from app.models.saved_search import SavedSearch
 from app.models.saved_search_notification import SavedSearchNotification
@@ -19,6 +21,7 @@ from app.services.search_service import FacebookRuntimeContext, unified_search
 logger = logging.getLogger(__name__)
 
 ALERT_CONFIDENCE_THRESHOLD = 0.65
+_alerts_refresh_limiter = TTLCache(max_items=2048)
 
 
 def _split_sources(raw_sources: str) -> list[str]:
@@ -137,6 +140,69 @@ def serialize_notification(row: SavedSearchNotification) -> SavedSearchNotificat
     )
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _saved_search_is_stale(saved_search: SavedSearch, *, now: datetime) -> bool:
+    last_checked_at = _as_utc(getattr(saved_search, "last_alert_checked_at", None))
+    if last_checked_at is None:
+        return True
+
+    stale_after_seconds = max(1, int(settings.MARKETLY_ALERTS_STALE_AFTER_SECONDS))
+    return last_checked_at <= now - timedelta(seconds=stale_after_seconds)
+
+
+async def refresh_saved_search_alerts_for_user(
+    db: Session,
+    *,
+    user_id: str,
+) -> bool:
+    saved_searches = (
+        db.query(SavedSearch)
+        .filter(
+            SavedSearch.user_id == user_id,
+            SavedSearch.alerts_enabled.is_(True),
+        )
+        .all()
+    )
+    if not saved_searches:
+        return False
+
+    now = _utc_now()
+    if not any(_saved_search_is_stale(row, now=now) for row in saved_searches):
+        return False
+
+    refresh_window_seconds = max(0, int(settings.MARKETLY_ALERTS_AUTO_REFRESH_WINDOW_SECONDS))
+    cache_key = f"saved-search-alert-refresh:{user_id}"
+    if refresh_window_seconds > 0 and _alerts_refresh_limiter.get(cache_key) is not None:
+        return False
+    if refresh_window_seconds > 0:
+        _alerts_refresh_limiter.set(cache_key, True, ttl_seconds=refresh_window_seconds)
+
+    try:
+        await run_saved_search_alert_job(
+            db,
+            limit_per_search=max(1, int(settings.MARKETLY_ALERTS_SEARCH_LIMIT)),
+            user_id=user_id,
+        )
+    except Exception as exc:
+        logger.warning("saved search alert refresh failed for user %s: %s", user_id, exc)
+        if refresh_window_seconds > 0:
+            _alerts_refresh_limiter.delete(cache_key)
+        return False
+
+    return True
+
+
 async def run_saved_search_alert_job(
     db: Session,
     *,
@@ -178,13 +244,25 @@ async def run_saved_search_alert_job(
             logger.warning("saved search alert run failed id=%s error=%s", saved_search.id, exc)
             continue
 
-        now = datetime.now(timezone.utc)
+        now = _utc_now()
+        seen_before = _as_utc(saved_search.last_alert_checked_at)
+        if seen_before is None:
+            persist_listing_snapshots(
+                query=saved_search.query,
+                listings=results,
+                user_id=saved_search.user_id,
+                saved_search_id=saved_search.id,
+            )
+            saved_search.last_alert_checked_at = now
+            db.commit()
+            continue
+
         fingerprints = [listing_fingerprint(item) for item in results]
         seen_fingerprints = previously_seen_fingerprints(
             db,
             saved_search_id=saved_search.id,
             listing_fingerprints=fingerprints,
-            seen_before=saved_search.last_alert_checked_at,
+            seen_before=seen_before,
         )
 
         persist_listing_snapshots(
@@ -197,7 +275,7 @@ async def run_saved_search_alert_job(
         matched_items: list[dict] = []
         for item in results:
             fingerprint = listing_fingerprint(item)
-            if saved_search.last_alert_checked_at is not None and fingerprint in seen_fingerprints:
+            if fingerprint in seen_fingerprints:
                 continue
 
             confidence, why_matched = compute_match_confidence(item)
@@ -262,7 +340,7 @@ def mark_notification_read(
         return None
 
     if row.read_at is None:
-        row.read_at = datetime.now(timezone.utc)
+        row.read_at = _utc_now()
         db.commit()
         db.refresh(row)
     return serialize_notification(row)

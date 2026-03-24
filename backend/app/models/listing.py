@@ -6,6 +6,14 @@ from pydantic import BaseModel, Field
 Source = Literal["ebay", "kijiji", "facebook"]
 SearchSort = Literal["relevance", "price_asc", "price_desc", "newest"]
 ValuationVerdict = Literal["underpriced", "fair", "overpriced", "insufficient_data"]
+ValuationEstimateSource = Literal[
+    "historical_exact",
+    "historical_relaxed",
+    "live_cohort",
+    "category_prior",
+    "none",
+]
+ValuationConfidenceLabel = Literal["high", "medium", "low"]
 RiskLevel = Literal["low", "medium", "high"]
 
 
@@ -21,7 +29,9 @@ class ListingValuation(BaseModel):
     median_price: Optional[float] = Field(default=None, ge=0)
     currency: str = Field(default="CAD", min_length=3, max_length=3)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    confidence_label: ValuationConfidenceLabel = "low"
     sample_count: int = Field(default=0, ge=0)
+    estimate_source: ValuationEstimateSource = "none"
     explanation: Optional[str] = None
 
 

@@ -60,6 +60,21 @@ class KijijiScrapeConnector(MarketplaceConnector):
         t = (title or "").lower()
         return sum(1 for tok in q_tokens if tok in t)
 
+    def _clean_snippet(self, title: str, blob: str) -> str | None:
+        text = " ".join((blob or "").split())
+        if not text:
+            return None
+
+        stripped_title = (title or "").strip()
+        if stripped_title:
+            text = text.replace(stripped_title, "", 1).strip(" -|:")
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text or text.lower() == stripped_title.lower():
+            return None
+        if len(text) > 240:
+            text = text[:237].rstrip() + "..."
+        return text
+
     def _extract_location_from_listing_url(self, listing_url: str) -> str | None:
         path = listing_url.replace(BASE, "")
         parts = [part for part in path.split("/") if part]
@@ -185,7 +200,7 @@ class KijijiScrapeConnector(MarketplaceConnector):
                     image_urls=image_urls,
                     location=self._extract_location_from_listing_url(listing_url),
                     condition=None,
-                    snippet=None,
+                    snippet=self._clean_snippet(title, blob),
                 )
             )
 

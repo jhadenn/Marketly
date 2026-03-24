@@ -107,7 +107,9 @@ type Valuation = {
   median_price?: number | null;
   currency: string;
   confidence: number;
+  confidence_label?: "high" | "medium" | "low";
   sample_count: number;
+  estimate_source?: "historical_exact" | "historical_relaxed" | "live_cohort" | "category_prior" | "none";
   explanation?: string | null;
 };
 
@@ -1939,6 +1941,18 @@ function valuationTone(valuation?: Valuation | null): "emerald" | "amber" | "red
   return "slate";
 }
 
+function hasValuationBand(valuation?: Valuation | null) {
+  return valuation?.estimated_low != null && valuation?.estimated_high != null;
+}
+
+function valuationLabel(valuation?: Valuation | null) {
+  if (!valuation) return null;
+  if (valuation.verdict === "insufficient_data") {
+    return hasValuationBand(valuation) ? "Value: rough estimate" : "Value: pending";
+  }
+  return `Value: ${valuation.verdict.replace("_", " ")}`;
+}
+
 function ListingCardBody({
   item,
   deviceCoords,
@@ -2001,11 +2015,7 @@ function ListingCardBody({
         <div className="flex flex-wrap gap-1.5">
           {item.valuation ? (
             <InsightPill
-              label={
-                item.valuation.verdict === "insufficient_data"
-                  ? "Value: pending"
-                  : `Value: ${item.valuation.verdict.replace("_", " ")}`
-              }
+              label={valuationLabel(item.valuation) ?? "Value: pending"}
               tone={valuationTone(item.valuation)}
             />
           ) : null}
@@ -2273,7 +2283,7 @@ function CopilotWindow({
     [filteredResults],
   );
   const scrollContentRef = useRef<HTMLDivElement | null>(null);
-  const hasListings = filteredResults.length > 0 && activeQuery.trim().length > 0;
+  const hasListings = filteredResults.length > 0;
   const selectedListings = useMemo(
     () =>
       copilotSelectedListingKeys
@@ -2286,11 +2296,30 @@ function CopilotWindow({
     () => new Set(copilotSelectedListingKeys),
     [copilotSelectedListingKeys],
   );
-  const presets = [
-    "Which is the best value?",
-    "What should I ask the seller?",
-    "What are the red flags?",
-  ];
+  const itemLabel = (() => {
+    const trimmed = activeQuery.trim();
+    if (!trimmed || trimmed.toLowerCase() === "saved searches") {
+      return "this item";
+    }
+    return trimmed;
+  })();
+  const presets = hasListings || hasSelectedListings
+    ? [
+        "Which is the best value?",
+        "What should I ask the seller?",
+        "What are the red flags?",
+      ]
+    : [
+        itemLabel === "this item"
+          ? "What should I know before buying this item?"
+          : `What should I know before buying ${itemLabel}?`,
+        itemLabel === "this item"
+          ? "What are the common issues to watch out for?"
+          : `What are the common issues with ${itemLabel}?`,
+        itemLabel === "this item"
+          ? "What should I ask before buying one?"
+          : `What should I ask before buying ${itemLabel}?`,
+      ];
   const [isDesktop, setIsDesktop] = useState(false);
 
   useEffect(() => {
@@ -2388,7 +2417,7 @@ function CopilotWindow({
                 <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.02] p-4">
                   <p className="text-sm text-zinc-200">How can I help you today?</p>
                   <p className="mt-2 text-sm text-zinc-400">
-                    Ask about the visible listings, or turn on selection mode to compare specific listings directly.
+                    Ask about any marketplace item, and when listings are loaded I can use them as live context for comparisons and listing-specific advice.
                   </p>
                 </div>
               ) : (
@@ -2492,7 +2521,7 @@ function CopilotWindow({
                     setCopilotQuestion(preset);
                     void onAskCopilot(preset);
                   }}
-                  disabled={!hasListings || copilotLoading}
+                  disabled={copilotLoading}
                 >
                   {preset}
                 </button>
@@ -2504,8 +2533,10 @@ function CopilotWindow({
                 className="min-h-[112px] w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-white/20 focus:outline-none"
                 placeholder={
                   hasSelectedListings
-                    ? "Ask about the selected listings..."
-                    : "Ask about the currently loaded listings..."
+                    ? "Ask about the selected listings or the item itself..."
+                    : hasListings
+                      ? "Ask about this item or the current listings..."
+                      : "Ask about any marketplace item..."
                 }
                 value={copilotQuestion}
                 onChange={(event) => setCopilotQuestion(event.target.value)}
@@ -2513,14 +2544,16 @@ function CopilotWindow({
               <div className="flex items-center justify-between gap-3">
                 <p className="text-xs text-zinc-500">
                   {hasSelectedListings
-                    ? `Uses ${Math.min(selectedListings.length, 25)} selected listing${selectedListings.length === 1 ? "" : "s"} from this search.`
-                    : `Uses the top ${Math.min(filteredResults.length, 25)} visible listings from this search.`}
+                    ? `Uses ${Math.min(selectedListings.length, 25)} selected listing${selectedListings.length === 1 ? "" : "s"} from this search as live context.`
+                    : hasListings
+                      ? `Uses the top ${Math.min(filteredResults.length, 25)} visible listings from this search as live context.`
+                      : "No listings are loaded yet. Ask about any marketplace item, or run a search to include live listings."}
                 </p>
                 <button
                   type="button"
                   className="inline-flex items-center gap-2 rounded-xl bg-white px-4 py-2 text-sm font-medium text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
                   onClick={() => void onAskCopilot()}
-                  disabled={!hasListings || copilotLoading || !copilotQuestion.trim()}
+                  disabled={copilotLoading || !copilotQuestion.trim()}
                 >
                   {copilotLoading ? <Loader2 className="size-4 animate-spin" /> : <Bot className="size-4" />}
                   {copilotLoading ? "Thinking..." : "Ask copilot"}
@@ -4085,7 +4118,10 @@ export default function HomePage() {
 
   const onAskCopilot = useCallback(async (questionOverride?: string) => {
     const question = (questionOverride ?? copilotQuestion).trim();
-    const query = (activeQuery || q).trim();
+    const activeQueryContext = (activeQuery || "").trim();
+    const query = activeQueryContext && activeQueryContext.toLowerCase() !== "saved searches"
+      ? activeQueryContext
+      : q.trim();
     const listingMap = new Map(filteredResults.map((item) => [getListingKey(item), item]));
     const selectedListings = copilotSelectedListingKeys
       .map((listingKey) => listingMap.get(listingKey) ?? null)
@@ -4094,8 +4130,8 @@ export default function HomePage() {
       (selectedListings.length > 0 ? selectedListings : filteredResults).slice(0, 25);
     const listingContext = sourceListings.map(buildCopilotListingContext);
 
-    if (!question || !query || listingContext.length === 0) {
-      setCopilotError("Run a search first, then ask about the visible or selected listings.");
+    if (!question) {
+      setCopilotError("Ask about an item, or load listings to include the current search results.");
       return;
     }
 
@@ -4106,7 +4142,10 @@ export default function HomePage() {
     };
     const conversationPayload: CopilotConversationPayload[] = copilotMessages
       .slice(-12)
-      .map((message) => ({ role: message.role, content: message.content }));
+      .map((message) => ({
+        role: message.role,
+        content: message.answer?.trim() || message.content,
+      }));
     const sessionVersion = copilotSessionVersionRef.current;
 
     setCopilotOpen(true);
@@ -4119,7 +4158,7 @@ export default function HomePage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          query,
+          ...(query ? { query } : {}),
           user_question: question,
           listings: listingContext,
           conversation: conversationPayload,

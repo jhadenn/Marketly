@@ -46,7 +46,11 @@ from app.services.response_cache import (
     is_search_response_cache_active,
     set_cached_search_response,
 )
-from app.services.alerts import list_notifications, mark_notification_read
+from app.services.alerts import (
+    list_notifications,
+    mark_notification_read,
+    refresh_saved_search_alerts_for_user,
+)
 from app.services.gemini_client import generate_copilot_response
 from app.services.listing_insights import enrich_listings_with_insights
 from app.services.listing_snapshots import persist_listing_snapshots
@@ -87,6 +91,11 @@ def _dt_str(value) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _reset_saved_search_alert_baseline(row: SavedSearch) -> None:
+    row.last_alert_checked_at = None
+    row.last_alert_notified_at = None
 
 
 def _facebook_status_response(
@@ -671,9 +680,16 @@ def update_saved_search(
     if not row:
         raise HTTPException(status_code=404, detail="Saved search not found")
 
+    next_sources = ",".join(payload.sources)
+    query_changed = row.query != payload.query
+    sources_changed = row.sources != next_sources
+    re_enabled = not bool(row.alerts_enabled) and payload.alerts_enabled
+
     row.query = payload.query
-    row.sources = ",".join(payload.sources)
+    row.sources = next_sources
     row.alerts_enabled = payload.alerts_enabled
+    if query_changed or sources_changed or re_enabled:
+        _reset_saved_search_alert_baseline(row)
 
     try:
         db.commit()
@@ -773,11 +789,12 @@ async def run_saved_search(
 
 
 @app.get("/me/notifications", response_model=list[SavedSearchNotificationOut])
-def get_notifications(
+async def get_notifications(
     limit: int = Query(default=25, ge=1, le=100),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
+    await refresh_saved_search_alerts_for_user(db, user_id=user_id)
     return list_notifications(db, user_id=user_id, limit=limit)
 
 

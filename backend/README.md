@@ -17,9 +17,10 @@
 - Saved searches support `alerts_enabled` and daily in-app digests via:
   - `GET /me/notifications`
   - `POST /me/notifications/{id}/read`
-- The shopping copilot is available at `POST /copilot/query`.
+- `GET /me/notifications` now auto-refreshes stale alert-enabled saved searches before returning the latest digests.
+- The shopping copilot is available at `POST /copilot/query` and can answer broader marketplace-item questions even without loaded listings.
 - Gemini is the only configured AI provider. For low-cost local development, use a Gemini Developer API key from Google AI Studio and set `MARKETLY_GEMINI_MODEL=gemini-2.5-flash-lite`.
-- Run the alert digest job from cron or your scheduler with:
+- Run the alert digest job from cron or your scheduler as a fallback or batch backstop with:
 
 ```bash
 python scripts/run_saved_search_alerts.py
@@ -69,6 +70,8 @@ MARKETLY_SEARCH_FETCH_CACHE_MAX_ITEMS=32
 MARKETLY_SEARCH_PAGINATION_CACHE_MAX_ITEMS=8
 
 MARKETLY_ALERTS_SEARCH_LIMIT=20
+MARKETLY_ALERTS_STALE_AFTER_SECONDS=86400
+MARKETLY_ALERTS_AUTO_REFRESH_WINDOW_SECONDS=300
 MARKETLY_VALUATION_LOOKBACK_DAYS=120
 MARKETLY_GEMINI_MODEL=gemini-2.5-flash-lite
 MARKETLY_GEMINI_TIMEOUT_SECONDS=25

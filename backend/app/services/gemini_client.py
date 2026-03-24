@@ -2,13 +2,94 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 import httpx
 
 from app.core.config import settings
 from app.schemas.copilot import CopilotQueryResponse
+from app.services.scoring import tokenize
 
 logger = logging.getLogger(__name__)
+
+CURRENT_CONTEXT_MARKERS = (
+    "this listing",
+    "these listings",
+    "those listings",
+    "this result",
+    "these results",
+    "those results",
+    "current search",
+    "search results",
+    "best value",
+    "best deal",
+    "which one",
+    "which listing",
+    "compare",
+    "comparison",
+    "shortlist",
+    "top pick",
+    "top option",
+    "what should i ask",
+    "ask the seller",
+    "red flag",
+    "red flags",
+    "worth buying",
+    "worth it",
+)
+CURRENT_CONTEXT_TOKEN_MARKERS = {
+    "condition",
+    "listing",
+    "listings",
+    "result",
+    "results",
+    "risk",
+    "risks",
+    "seller",
+    "compare",
+    "comparison",
+    "versus",
+    "price",
+    "priced",
+    "value",
+    "shortlist",
+}
+GENERIC_TOPIC_TOKENS = {
+    "about",
+    "answer",
+    "ask",
+    "buy",
+    "buying",
+    "can",
+    "find",
+    "help",
+    "item",
+    "items",
+    "know",
+    "listing",
+    "listings",
+    "market",
+    "marketplace",
+    "more",
+    "need",
+    "price",
+    "prices",
+    "question",
+    "questions",
+    "result",
+    "results",
+    "search",
+    "seller",
+    "should",
+    "selling",
+    "shop",
+    "shopping",
+    "tell",
+    "value",
+    "want",
+    "what",
+    "which",
+}
 
 
 def gemini_is_configured() -> bool:
@@ -142,7 +223,7 @@ def _fallback_alert_summary(query: str, items: list[dict]) -> str:
 
 async def generate_copilot_response(
     *,
-    query: str,
+    query: str | None,
     user_question: str,
     listings: list[dict],
     conversation: list[dict] | None = None,
@@ -171,6 +252,13 @@ async def generate_copilot_response(
             error_message=None,
         )
 
+    normalized_query = " ".join((query or "").split())
+    resolved_query, resolved_listings, resolved_conversation, context_mode = _resolve_copilot_context(
+        query=normalized_query,
+        user_question=user_question,
+        listings=listings,
+        conversation=conversation or [],
+    )
     schema = {
         "type": "object",
         "additionalProperties": False,
@@ -202,10 +290,12 @@ async def generate_copilot_response(
     }
     prompt = json.dumps(
         {
-            "query": query,
+            "query": resolved_query,
             "user_question": user_question,
-            "conversation": (conversation or [])[-20:],
-            "listings": listings[:25],
+            "conversation": resolved_conversation,
+            "context_mode": context_mode,
+            "has_listing_context": bool(resolved_listings),
+            "listings": resolved_listings[:25],
         },
         ensure_ascii=True,
     )
@@ -214,17 +304,27 @@ async def generate_copilot_response(
         result = await request_gemini_structured_json(
             schema=schema,
             instructions=(
-                "You are Marketly's shopping copilot. Answer using only the supplied listings. "
+                "You are Marketly's marketplace copilot. "
+                "You may help with marketplace items, model-specific buying guidance, common issues, "
+                "used-market considerations, negotiation advice, and interpreting the supplied listings. "
                 "Treat the supplied conversation as ongoing context for follow-up questions. "
-                "If the user is greeting you, thanking you, or making small talk, reply briefly and naturally "
-                "without producing a shortlist, seller questions, or red flags. "
+                "Refusals are turn-local and must not narrow future shopping help to a previous category. "
+                "If the current turn starts a new marketplace topic, let it replace unrelated prior search context. "
+                "Use supplied listings only for listing-specific claims, comparisons, or recommendations. "
+                "If the user asks about the item or model more broadly, answer from general marketplace and "
+                "used-buying knowledge even when no listings are supplied. "
+                "Refuse requests that are unrelated to marketplace items, shopping, buying, selling, or "
+                "listing evaluation. Keep refusals brief and redirect back to item-related help. "
+                "If the question depends on a specific item and the item is still unclear, ask one short "
+                "clarifying question instead of guessing. "
                 "Only return shortlist entries when the user is explicitly asking for recommendations, best picks, "
-                "comparisons, top options, what to buy, or a shortlist. "
-                "If the user has not given enough criteria to decide between listings, ask one short clarifying "
-                "question instead of pretending to know their preference. "
-                "Return seller_questions only when the user explicitly asks what to ask the seller. "
-                "Return red_flags only when the user explicitly asks for risks, red flags, or concerns. "
-                "Do not invent facts, and mention uncertainty when the listing data is thin."
+                "comparisons, top options, what to buy, or a shortlist, and only use supplied listings for that. "
+                "If no listings are supplied, shortlist must be empty. "
+                "Treat low-confidence valuation bands, especially estimate_source values of live_cohort, "
+                "category_prior, or confidence_label low, as approximate rough estimates and never as precise market value. "
+                "Return seller_questions only when the user explicitly asks what to ask before buying or what to ask the seller. "
+                "Return red_flags only when the user explicitly asks for risks, red flags, common issues, or what to watch out for. "
+                "Do not invent listing details, and mention uncertainty when the available context is thin."
             ),
             prompt=prompt,
         )
@@ -237,7 +337,7 @@ async def generate_copilot_response(
         shortlist = result.get("shortlist") or []
         seller_questions = result.get("seller_questions") or []
         red_flags = result.get("red_flags") or []
-        if not _question_requests_shortlist(user_question):
+        if not listings or not _question_requests_shortlist(user_question):
             shortlist = []
         if not _question_requests_seller_questions(user_question):
             seller_questions = []
@@ -247,7 +347,7 @@ async def generate_copilot_response(
         return CopilotQueryResponse.model_validate(
             {
                 "available": True,
-                "answer": result.get("answer") or "I couldn't form a useful answer from these listings.",
+                "answer": result.get("answer") or "I couldn't form a useful answer from the available context.",
                 "shortlist": shortlist,
                 "seller_questions": seller_questions,
                 "red_flags": red_flags,
@@ -268,14 +368,98 @@ def _small_talk_response(user_question: str) -> str | None:
 
     if normalized in greeting_markers or normalized.startswith("hello ") or normalized.startswith("hi "):
         return (
-            "Hi. I can compare listings, find the best value, flag risks, build a shortlist, "
-            "and suggest seller questions when you ask about the listings in view."
+            "Hi. I can help with marketplace items, explain what to know before buying, "
+            "compare live listings, flag risks, and suggest seller questions."
         )
     if normalized in thanks_markers:
-        return "You're welcome. Ask me to compare listings, flag risks, or help narrow down the best option."
+        return "You're welcome. Ask about an item, compare listings, check risks, or get seller questions."
     if normalized in acknowledgement_markers:
-        return "Ask me to compare listings, find the best value, flag red flags, or suggest seller questions."
+        return "Ask about an item, compare listings, find the best value, flag red flags, or get seller questions."
     return None
+
+
+def _question_tokens(text: str) -> set[str]:
+    return {token for token in tokenize(text) if token not in GENERIC_TOPIC_TOKENS}
+
+
+def _strip_ui_appended_sections(content: str) -> str:
+    normalized = content.replace("\r\n", "\n").strip()
+    first_heading = re.search(r"\n\n(?:Seller questions|Red flags):\n", normalized)
+    if first_heading is not None:
+        normalized = normalized[: first_heading.start()]
+    return normalized.strip()
+
+
+def _sanitize_conversation(conversation: list[dict]) -> list[dict]:
+    sanitized: list[dict] = []
+    for message in conversation[-20:]:
+        role = str(message.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(message.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "assistant":
+            content = _strip_ui_appended_sections(content)
+            if not content:
+                continue
+        sanitized.append({"role": role, "content": content[:4000]})
+    return sanitized[-20:]
+
+
+def _question_references_active_context(user_question: str) -> bool:
+    normalized = " ".join(user_question.lower().split())
+    if any(marker in normalized for marker in CURRENT_CONTEXT_MARKERS):
+        return True
+    return bool(set(tokenize(user_question)).intersection(CURRENT_CONTEXT_TOKEN_MARKERS))
+
+
+def _should_use_active_search_context(
+    *,
+    query: str | None,
+    user_question: str,
+    listings: list[dict],
+) -> bool:
+    has_active_context = bool((query or "").strip()) or bool(listings)
+    if not has_active_context:
+        return False
+    if _question_references_active_context(user_question):
+        return True
+
+    query_tokens = _question_tokens(query or "")
+    question_tokens = _question_tokens(user_question)
+    if not query_tokens or not question_tokens:
+        return False
+
+    shared_tokens = len(query_tokens.intersection(question_tokens))
+    required_overlap = 1 if min(len(query_tokens), len(question_tokens)) <= 2 else 2
+    return shared_tokens >= required_overlap
+
+
+def _conversation_for_fresh_topic(conversation: list[dict], user_question: str) -> list[dict]:
+    question_tokens = _question_tokens(user_question)
+    if not question_tokens:
+        return []
+
+    filtered = [
+        message
+        for message in conversation
+        if _question_tokens(message["content"]).intersection(question_tokens)
+    ]
+    return filtered[-8:]
+
+
+def _resolve_copilot_context(
+    *,
+    query: str | None,
+    user_question: str,
+    listings: list[dict],
+    conversation: list[dict],
+) -> tuple[str | None, list[dict], list[dict], str]:
+    sanitized_conversation = _sanitize_conversation(conversation)
+    if _should_use_active_search_context(query=query, user_question=user_question, listings=listings):
+        return query or None, listings[:25], sanitized_conversation, "active_search"
+    return None, [], _conversation_for_fresh_topic(sanitized_conversation, user_question), "fresh_topic"
 
 
 def _question_requests_shortlist(user_question: str) -> bool:
@@ -303,11 +487,35 @@ def _question_requests_shortlist(user_question: str) -> bool:
 
 
 def _question_requests_seller_questions(user_question: str) -> bool:
-    normalized = user_question.lower()
-    return ("seller" in normalized and "question" in normalized) or "what should i ask" in normalized
+    normalized = " ".join(user_question.lower().split())
+    seller_question_markers = (
+        "what should i ask",
+        "what should i ask the seller",
+        "what to ask the seller",
+        "questions should i ask",
+        "ask before buying",
+        "ask the seller",
+    )
+    return (
+        any(marker in normalized for marker in seller_question_markers)
+        or ("seller" in normalized and ("question" in normalized or "ask" in normalized))
+    )
 
 
 def _question_requests_red_flags(user_question: str) -> bool:
-    normalized = user_question.lower()
-    red_flag_markers = ("red flag", "risk", "concern", "concerns", "suspicious", "sketchy")
+    normalized = " ".join(user_question.lower().split())
+    red_flag_markers = (
+        "red flag",
+        "risk",
+        "concern",
+        "concerns",
+        "suspicious",
+        "sketchy",
+        "watch out",
+        "look out",
+        "common issues",
+        "known issues",
+        "problem",
+        "problems",
+    )
     return any(marker in normalized for marker in red_flag_markers)

@@ -43,3 +43,7 @@ class TTLCache:
             if self._max_items is not None:
                 while len(self._store) > self._max_items:
                     self._store.popitem(last=False)
+
+    def delete(self, key: str) -> None:
+        with self._lock:
+            self._store.pop(key, None)
