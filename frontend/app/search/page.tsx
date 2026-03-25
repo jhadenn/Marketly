@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
+import { DotLottieReact } from "@lottiefiles/dotlottie-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
@@ -1011,12 +1012,8 @@ function SearchPageView(props: SearchPageViewProps) {
           </div>
 
           <div className="flex items-center gap-2">
-            <Link
-              href="/"
-              className="hidden rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.04] sm:inline-flex"
-            >
-              Home
-            </Link>
+
+            <AlertsRail {...props} />
 
             {props.authLoading ? (
               <span className="rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-zinc-400">
@@ -1078,7 +1075,7 @@ function SearchPageView(props: SearchPageViewProps) {
               </h1>
               <p className="mt-3 max-w-3xl text-sm leading-relaxed text-zinc-400 sm:text-base">
                 {showLiveHeroCopy
-                  ? "Compare live listings across Kijiji, eBay, and Facebook Marketplace in a single feed with image-first tiles inspired by Facebook Marketplace."
+                  ? "Compare live listings across Kijiji, eBay, and Facebook Marketplace in a single feed."
                   : "Run a search, choose sources, and browse a unified marketplace grid with saved searches and infinite scroll."}
               </p>
 
@@ -1086,9 +1083,6 @@ function SearchPageView(props: SearchPageViewProps) {
                 {(props.summarySources.length > 0 ? props.summarySources : props.sources).map((source) => (
                   <SourceChip key={`hero-source-${source}`} source={source} compact />
                 ))}
-                <span className="rounded-full border border-white/10 bg-white/[0.02] px-3 py-1 text-xs text-zinc-300">
-                  {props.hasSearched ? `${props.filteredResults.length} visible` : `${props.limit} per page`}
-                </span>
                 {props.hasActiveClientFilters ? (
                   <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-3 py-1 text-xs text-amber-100">
                     Location ranking active
@@ -1117,7 +1111,6 @@ function SearchPageView(props: SearchPageViewProps) {
         <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
           <aside className="space-y-4 xl:sticky xl:top-24 xl:self-start">
             <SearchControlsRail {...props} />
-            <AlertsRail {...props} />
             <SavedSearchRail {...props} />
           </aside>
 
@@ -1357,20 +1350,12 @@ function SearchControlsRail(props: SearchControlsRailProps) {
           {props.sources.length === 0 ? (
             <p className="text-xs text-red-300">Select at least one source to search.</p>
           ) : null}
-          {props.currentLocation ? (
-            <p className="text-xs text-zinc-500">
-              Active location: {props.currentLocation.display_name}
-              {props.locationPersistence === "account"
-                ? " | synced to account"
-                : " | saved in this browser"}
-            </p>
-          ) : null}
           {props.locationError ? (
             <p className="text-xs text-red-300">{props.locationError}</p>
           ) : null}
           {props.currentLocation ? (
             <p className="text-xs text-zinc-400">
-              Nearby Canadian Kijiji and Facebook listings will rank first. Distances display in kilometers.
+              Nearby Kijiji and Facebook listings will rank first.
             </p>
           ) : null}
         </div>
@@ -1522,21 +1507,29 @@ function SavedSearchRail(props: SavedSearchRailProps) {
 
 function AlertsRail(props: AlertsRailProps) {
   const unreadCount = props.notifications.filter((entry) => !entry.read_at).length;
+  const showUnreadDot = unreadCount > 0;
 
   return (
-    <GlassPanel className="p-4 sm:p-5">
-      <div className="mb-4 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <BellRing className="size-4 text-zinc-400" />
-          <p className="font-mono text-xs uppercase tracking-[0.18em] text-zinc-400">
-            Alerts
-          </p>
-        </div>
+    <details className="relative">
+      <summary className="relative flex cursor-pointer list-none items-center gap-2 rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.04] [&::-webkit-details-marker]:hidden">
+        <BellRing className="size-4 text-zinc-300" />
+        <span className="hidden sm:inline">Alerts</span>
+        {showUnreadDot ? (
+          <span className="absolute right-2 top-2 size-2 rounded-full bg-red-500 ring-2 ring-black" />
+        ) : null}
+      </summary>
 
-        <div className="flex items-center gap-2">
-          <span className="rounded-full border border-white/10 bg-white/[0.02] px-2.5 py-1 text-[11px] text-zinc-300">
-            {unreadCount} unread
-          </span>
+      <div className="absolute right-0 z-50 mt-2 w-[380px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/95 p-4 shadow-2xl backdrop-blur-xl">
+        <div className="mb-4 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <p className="font-mono text-xs uppercase tracking-[0.18em] text-zinc-400">
+              Alerts
+            </p>
+            <span className="rounded-full border border-white/10 bg-white/[0.02] px-2.5 py-1 text-[11px] text-zinc-300">
+              {unreadCount} unread
+            </span>
+          </div>
+
           <button
             className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.02] px-2.5 py-1 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
             onClick={() => void props.fetchNotifications()}
@@ -1547,70 +1540,70 @@ function AlertsRail(props: AlertsRailProps) {
             {props.notificationsLoading ? "Refreshing" : "Refresh"}
           </button>
         </div>
-      </div>
 
-      {props.notificationsError ? (
-        <div className="mb-3 rounded-xl border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-100">
-          {props.notificationsError}
-        </div>
-      ) : null}
+        {props.notificationsError ? (
+          <div className="mb-3 rounded-xl border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-100">
+            {props.notificationsError}
+          </div>
+        ) : null}
 
-      {!props.user ? (
-        <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-4">
-          <p className="text-sm text-zinc-300">
-            {props.authLoading ? "Checking your account..." : "Log in to receive saved search alerts."}
-          </p>
-          <p className="mt-1 text-xs text-zinc-500">
-            Alerts appear when Marketly finds new listings for one of your alert-enabled saved searches.
-          </p>
-        </div>
-      ) : props.notifications.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-4">
-          <p className="text-sm text-zinc-300">No saved search alerts yet.</p>
-          <p className="mt-1 text-xs text-zinc-500">
-            Enable alerts on a saved search and new-listing alerts will show up here.
-          </p>
-        </div>
-      ) : (
-        <ul className="space-y-2">
-          {props.notifications.map((notification) => (
-            <li
-              key={notification.id}
-              className={cn(
-                "rounded-xl border p-3 transition",
-                notification.read_at
-                  ? "border-white/10 bg-white/[0.02]"
-                  : "border-emerald-300/20 bg-emerald-400/[0.06]",
-              )}
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <p className="line-clamp-2 text-sm font-medium text-zinc-100">
-                    {notification.saved_search_query}
-                  </p>
-                  <p className="mt-1 text-[11px] text-zinc-500">
-                    {formatNewListingsCount(notification.new_count)} | {formatTimestamp(notification.created_at)}
-                  </p>
-                </div>
-                {!notification.read_at ? (
-                  <button
-                    type="button"
-                    className="rounded-full border border-emerald-300/25 bg-emerald-400/10 px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-emerald-100 transition hover:border-emerald-300/40"
-                    onClick={() => void props.onMarkNotificationRead(notification.id)}
-                  >
-                    Read
-                  </button>
-                ) : (
-                  <span className="rounded-full border border-white/10 bg-white/[0.02] px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-zinc-400">
-                    Read
-                  </span>
+        {!props.user ? (
+          <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-4">
+            <p className="text-sm text-zinc-300">
+              {props.authLoading ? "Checking your account..." : "Log in to receive saved search alerts."}
+            </p>
+            <p className="mt-1 text-xs text-zinc-500">
+              Alerts appear when Marketly finds new listings for one of your alert-enabled saved searches.
+            </p>
+          </div>
+        ) : props.notifications.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-4">
+            <p className="text-sm text-zinc-300">No saved search alerts yet.</p>
+            <p className="mt-1 text-xs text-zinc-500">
+              Enable alerts on a saved search and new-listing alerts will show up here.
+            </p>
+          </div>
+        ) : (
+          <ul className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
+            {props.notifications.map((notification) => (
+              <li
+                key={notification.id}
+                className={cn(
+                  "rounded-xl border p-3 transition",
+                  notification.read_at
+                    ? "border-white/10 bg-white/[0.02]"
+                    : "border-emerald-300/20 bg-emerald-400/[0.06]",
                 )}
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </GlassPanel>
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="line-clamp-2 text-sm font-medium text-zinc-100">
+                      {notification.saved_search_query}
+                    </p>
+                    <p className="mt-1 text-[11px] text-zinc-500">
+                      {formatNewListingsCount(notification.new_count)} | {formatTimestamp(notification.created_at)}
+                    </p>
+                  </div>
+                  {!notification.read_at ? (
+                    <button
+                      type="button"
+                      className="rounded-full border border-emerald-300/25 bg-emerald-400/10 px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-emerald-100 transition hover:border-emerald-300/40"
+                      onClick={() => void props.onMarkNotificationRead(notification.id)}
+                    >
+                      Read
+                    </button>
+                  ) : (
+                    <span className="rounded-full border border-white/10 bg-white/[0.02] px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-zinc-400">
+                      Read
+                    </span>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </details>
   );
 }
 
@@ -1668,23 +1661,7 @@ function ResultsPanel({
         </GlassPanel>
       ) : null}
 
-      {searchLoading && results.length === 0 ? (
-        <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-          {Array.from({ length: 8 }).map((_, index) => (
-            <li
-              key={`skeleton-${index}`}
-              className="overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/80"
-            >
-              <div className="aspect-[5/4] animate-pulse bg-zinc-900/80" />
-              <div className="space-y-2 p-3.5">
-                <div className="h-4 w-24 animate-pulse rounded bg-zinc-800" />
-                <div className="h-3 w-full animate-pulse rounded bg-zinc-900" />
-                <div className="h-3 w-2/3 animate-pulse rounded bg-zinc-900" />
-              </div>
-            </li>
-          ))}
-        </ul>
-      ) : null}
+      {searchLoading && results.length === 0 ? <ListingsLoadingState /> : null}
 
       {!searchLoading && !hasSearched ? (
         <GlassPanel className="overflow-hidden border-dashed p-5 sm:p-6">
@@ -1782,6 +1759,26 @@ function PreviewListingCard({ listing }: { listing: PreviewListing }) {
         </div>
       </div>
     </article>
+  );
+}
+
+function ListingsLoadingState() {
+  return (
+    <div className="flex min-h-[420px] items-center justify-center bg-black sm:min-h-[520px]">
+      <div className="flex flex-col items-center justify-center">
+        <div className="w-full max-w-[340px] sm:max-w-[700px]">
+          <DotLottieReact
+            src="https://lottie.host/729f73c3-4888-46ac-8dfc-ec1f5a93a4ab/EXocOBWnmK.lottie"
+            loop
+            autoplay
+          />
+        </div>
+        <p className="mt-1 font-mono text-[11px] uppercase tracking-[0.22em] text-zinc-500">
+          Loading Listings
+        </p>
+        <Loader2 className="mt-3 size-9 animate-spin text-zinc-300" aria-hidden="true" />
+      </div>
+    </div>
   );
 }
 
@@ -1967,15 +1964,28 @@ function SourceChip({
   className?: string;
 }) {
   const tone = getSourceChipTone(source);
-  const content = (
+  const label = formatSourceLabel(source) || source;
+  const logo = getMarketplaceLogoMeta(source);
+  const content = logo ? (
+    <Image
+      src={logo.src}
+      alt={logo.alt}
+      width={logo.width}
+      height={logo.height}
+      className={cn(
+        "w-auto shrink-0",
+        compact ? logo.compactChipClassName : logo.chipClassName,
+      )}
+    />
+  ) : (
     <>
       <span className={cn("size-1.5 rounded-full", tone.dot)} />
-      <span>{formatSourceLabel(source) || source}</span>
+      <span>{label}</span>
     </>
   );
 
   const classes = cn(
-    "inline-flex items-center gap-2 rounded-full border font-medium transition",
+    "inline-flex items-center justify-center gap-2 rounded-full border font-medium transition",
     compact ? "px-2.5 py-1 text-[11px]" : "px-3 py-1.5 text-sm",
     className,
   );
@@ -1985,6 +1995,8 @@ function SourceChip({
       <button
         type="button"
         onClick={onClick}
+        aria-label={label}
+        title={label}
         className={cn(
           classes,
           selected
@@ -1997,7 +2009,11 @@ function SourceChip({
     );
   }
 
-  return <span className={cn(classes, tone.border, tone.bg, tone.text)}>{content}</span>;
+  return (
+    <span className={cn(classes, tone.border, tone.bg, tone.text)} title={label}>
+      {content}
+    </span>
+  );
 }
 
 function getMarketplaceLogoMeta(source: string): {
@@ -2005,7 +2021,9 @@ function getMarketplaceLogoMeta(source: string): {
   alt: string;
   width: number;
   height: number;
-  className?: string;
+  chipClassName?: string;
+  compactChipClassName?: string;
+  badgeClassName?: string;
 } | null {
   const normalized = source.toLowerCase();
 
@@ -2015,7 +2033,9 @@ function getMarketplaceLogoMeta(source: string): {
       alt: "Facebook Marketplace",
       width: 190,
       height: 36,
-      className: "h-3.5",
+      chipClassName: "h-3.5 max-w-[74px]",
+      compactChipClassName: "h-3 max-w-[64px]",
+      badgeClassName: "h-3.5 max-w-[84px]",
     };
   }
 
@@ -2025,7 +2045,9 @@ function getMarketplaceLogoMeta(source: string): {
       alt: "eBay",
       width: 150,
       height: 44,
-      className: "h-3.5",
+      chipClassName: "h-3.5 max-w-[52px]",
+      compactChipClassName: "h-3 max-w-[44px]",
+      badgeClassName: "h-3.5 max-w-[60px]",
     };
   }
 
@@ -2035,7 +2057,9 @@ function getMarketplaceLogoMeta(source: string): {
       alt: "Kijiji",
       width: 360,
       height: 120,
-      className: "h-4",
+      chipClassName: "h-4 max-w-[48px]",
+      compactChipClassName: "h-3.5 max-w-[42px]",
+      badgeClassName: "h-4 max-w-[84px]",
     };
   }
 
@@ -2062,7 +2086,7 @@ function MarketplaceSourceBadge({ source }: { source: string }) {
         alt={logo.alt}
         width={logo.width}
         height={logo.height}
-        className={cn("w-auto max-w-[84px] opacity-95", logo.className)}
+        className={cn("w-auto opacity-95", logo.badgeClassName)}
       />
     </span>
   );
@@ -2112,7 +2136,9 @@ function valuationLabel(valuation?: Valuation | null) {
 function formatDistanceKm(distanceKm?: number | null, approximate = false) {
   if (typeof distanceKm !== "number" || !Number.isFinite(distanceKm)) return null;
   if (distanceKm < 10) {
-    return `${approximate ? "~" : ""}${distanceKm.toFixed(1)} km away`;
+    const preciseDistanceKm = Number(distanceKm.toFixed(1));
+    if (preciseDistanceKm === 0) return "Nearby";
+    return `${approximate ? "~" : ""}${preciseDistanceKm.toFixed(1)} km away`;
   }
   return `${approximate ? "~" : ""}${Math.round(distanceKm)} km away`;
 }
@@ -4736,7 +4762,7 @@ export default function HomePage() {
   }, [API_BASE, activeQuery, copilotMessages, copilotQuestion, copilotSelectedListingKeys, filteredResults, q]);
 
   const hasSourceErrorEntries = Object.keys(sourceErrors).length > 0;
-  const summarySources = hasSearched && activeSources.length > 0 ? activeSources : sources;
+  const summarySources = sources;
   const totalResultsCount = total ?? rawResults.length;
 
   return (

@@ -212,13 +212,8 @@ Marketly/
 
 ## Roadmap
 
-- [x] Multi-source search (Kijiji, eBay, Facebook)
-- [x] Saved searches (per user)
-- [x] Filters, sorting, infinite scroll
-- [x] Edit saved searches
-- [ ] Deploy
-- [ ] Rate limiting and caching
-- [ ] Notifications
+- [ ] add feature to see listings within x kms from your city
+- [ ] 
 
 See `https://github.com/jhadenn/Marketly/issues` for open items.
 
