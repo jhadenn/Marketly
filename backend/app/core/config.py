@@ -50,7 +50,15 @@ class Settings(BaseSettings):
     MARKETLY_RATE_LIMIT_FB_DELETE_PER_HOUR: int = 20
     MARKETLY_SEARCH_FETCH_CACHE_MAX_ITEMS: int = 32
     MARKETLY_SEARCH_PAGINATION_CACHE_MAX_ITEMS: int = 8
+    MARKETLY_ALERTS_SEARCH_LIMIT: int = 20
+    MARKETLY_ALERTS_STALE_AFTER_SECONDS: int = 86400
+    MARKETLY_ALERTS_AUTO_REFRESH_WINDOW_SECONDS: int = 300
+    MARKETLY_VALUATION_LOOKBACK_DAYS: int = 120
+    MARKETLY_GEMINI_MODEL: str = "gemini-2.5-flash-lite"
+    MARKETLY_GEMINI_TIMEOUT_SECONDS: float = 25.0
     MARKETLY_CREDENTIALS_ENCRYPTION_KEY: str | None = None
+    GEMINI_API_KEY: str | None = None
+    GEMINI_API_BASE: str = "https://generativelanguage.googleapis.com/v1beta"
     EBAY_ENV: str = "production"
     EBAY_CLIENT_ID: str | None = None
     EBAY_CLIENT_SECRET: str | None = None

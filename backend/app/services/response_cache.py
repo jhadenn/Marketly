@@ -78,6 +78,16 @@ def _facebook_fragment(
     )
 
 
+def _location_fragment(search_location_context: Any | None) -> str:
+    if search_location_context is None:
+        return "|loc=|loc_mode="
+    return (
+        f"|loc={_rounded_coord(getattr(search_location_context, 'latitude', None))},"
+        f"{_rounded_coord(getattr(search_location_context, 'longitude', None))}"
+        f"|loc_mode={getattr(search_location_context, 'mode', None) or ''}"
+    )
+
+
 def build_search_response_cache_key(
     *,
     query: str,
@@ -86,6 +96,7 @@ def build_search_response_cache_key(
     offset: int,
     sort: str,
     facebook_runtime_context: Any | None = None,
+    search_location_context: Any | None = None,
 ) -> str:
     raw = (
         f"v1|q={query}"
@@ -97,6 +108,7 @@ def build_search_response_cache_key(
         f"|disable_fb_multi_expansion={settings.MARKETLY_DISABLE_FACEBOOK_MULTI_SOURCE_EXPANSION}"
         f"|balance_multi={settings.MARKETLY_BALANCE_MULTI_SOURCE_RESULTS}"
         f"{_facebook_fragment(sources=sources, facebook_runtime_context=facebook_runtime_context)}"
+        f"{_location_fragment(search_location_context)}"
     )
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return f"marketly:search_response:{digest}"

@@ -1,11 +1,13 @@
 import re
+from datetime import datetime
 from urllib.parse import quote_plus, urljoin
 
 import httpx
 from bs4 import BeautifulSoup
 
 from app.connectors.base import MarketplaceConnector
-from app.models.listing import Listing, Money
+from app.core.time_utils import parse_absolute_date_to_utc_iso, parse_relative_age_to_utc_iso
+from app.models.listing import Listing, Money, SearchSort
 
 BASE = "https://www.kijiji.ca"
 
@@ -14,6 +16,18 @@ BASE = "https://www.kijiji.ca"
 LISTING_HREF_RE = re.compile(r"^/v-[^/]+/.+/\d+/?$")
 
 PRICE_RE = re.compile(r"\$\s*([\d,]+(?:\.\d{1,2})?)")
+RELATIVE_POSTED_RE = re.compile(
+    r"\b(?:posted|updated)?\s*(just listed|\d+\s+(?:minute|hour|day|week|month|year)s?\s+ago|today|yesterday)\b",
+    re.IGNORECASE,
+)
+ABSOLUTE_POSTED_RE = re.compile(
+    r"\b(?:posted|updated)(?:\s+on)?\s+([A-Za-z]+\s+\d{1,2},\s+\d{4}|\d{4}[-/]\d{2}[-/]\d{2})\b",
+    re.IGNORECASE,
+)
+CANADA_PROVINCE_RE = re.compile(
+    r"\b(?P<city>[A-Za-zÀ-ÿ0-9' .-]{2,60}),\s*"
+    r"(?P<province>AB|BC|MB|NB|NL|NS|NT|NU|ON|PE|QC|SK|YT)\b"
+)
 
 
 class KijijiScrapeConnector(MarketplaceConnector):
@@ -29,11 +43,18 @@ class KijijiScrapeConnector(MarketplaceConnector):
             "Accept-Language": "en-CA,en;q=0.9",
         }
 
-    def _build_search_url(self, query: str, page: int = 1) -> str:
+    def _build_search_url(
+        self,
+        query: str,
+        page: int = 1,
+        *,
+        sort: SearchSort = "relevance",
+    ) -> str:
         q = quote_plus(query.strip())
+        sort_fragment = "&sortByName=dateDesc" if sort == "newest" else ""
         if page <= 1:
-            return f"{BASE}/b-canada/{q}/k0l0?dc=true&view=list"
-        return f"{BASE}/b-canada/{q}/page-{page}/k0l0?dc=true&view=list"
+            return f"{BASE}/b-canada/{q}/k0l0?dc=true&view=list{sort_fragment}"
+        return f"{BASE}/b-canada/{q}/page-{page}/k0l0?dc=true&view=list{sort_fragment}"
 
     def _abs_url(self, href: str) -> str:
         return urljoin(BASE, href)
@@ -60,6 +81,21 @@ class KijijiScrapeConnector(MarketplaceConnector):
         t = (title or "").lower()
         return sum(1 for tok in q_tokens if tok in t)
 
+    def _clean_snippet(self, title: str, blob: str) -> str | None:
+        text = " ".join((blob or "").split())
+        if not text:
+            return None
+
+        stripped_title = (title or "").strip()
+        if stripped_title:
+            text = text.replace(stripped_title, "", 1).strip(" -|:")
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text or text.lower() == stripped_title.lower():
+            return None
+        if len(text) > 240:
+            text = text[:237].rstrip() + "..."
+        return text
+
     def _extract_location_from_listing_url(self, listing_url: str) -> str | None:
         path = listing_url.replace(BASE, "")
         parts = [part for part in path.split("/") if part]
@@ -70,6 +106,31 @@ class KijijiScrapeConnector(MarketplaceConnector):
             return None
         city = city_slug.replace("-", " ").title()
         return city or None
+
+    def _extract_location(self, blob: str, listing_url: str) -> str | None:
+        compact_blob = " ".join((blob or "").split())
+        if compact_blob:
+            location_match = CANADA_PROVINCE_RE.search(compact_blob)
+            if location_match:
+                city = location_match.group("city").strip(" -|:")
+                province = location_match.group("province").upper()
+                if city:
+                    return f"{city}, {province}"
+        return self._extract_location_from_listing_url(listing_url)
+
+    def _extract_posted_at(self, blob: str, *, now: datetime | None = None) -> str | None:
+        if not blob:
+            return None
+
+        relative_match = RELATIVE_POSTED_RE.search(blob)
+        if relative_match:
+            return parse_relative_age_to_utc_iso(relative_match.group(1), now=now)
+
+        absolute_match = ABSOLUTE_POSTED_RE.search(blob)
+        if absolute_match:
+            return parse_absolute_date_to_utc_iso(absolute_match.group(1), now=now)
+
+        return None
 
     def _extract_candidates(
         self,
@@ -131,7 +192,13 @@ class KijijiScrapeConnector(MarketplaceConnector):
 
         return candidates
 
-    async def search(self, query: str, limit: int = 20) -> list[Listing]:
+    async def search(
+        self,
+        query: str,
+        limit: int = 20,
+        *,
+        sort: SearchSort = "relevance",
+    ) -> list[Listing]:
         safe_limit = max(1, int(limit))
         max_pages = max(1, min(10, (safe_limit // 24) + 2))
         all_candidates: list[tuple[int, str, str, str, list[str]]] = []
@@ -143,7 +210,7 @@ class KijijiScrapeConnector(MarketplaceConnector):
             follow_redirects=True,
         ) as client:
             for page in range(1, max_pages + 1):
-                url = self._build_search_url(query, page=page)
+                url = self._build_search_url(query, page=page, sort=sort)
                 try:
                     response = await client.get(url)
                     response.raise_for_status()
@@ -165,7 +232,8 @@ class KijijiScrapeConnector(MarketplaceConnector):
                 if len(all_candidates) >= safe_limit * 2:
                     break
 
-        all_candidates.sort(key=lambda item: item[0], reverse=True)
+        if sort == "relevance":
+            all_candidates.sort(key=lambda item: item[0], reverse=True)
 
         results: list[Listing] = []
         for score, listing_url, title, blob, image_urls in all_candidates:
@@ -183,9 +251,10 @@ class KijijiScrapeConnector(MarketplaceConnector):
                     price=Money(amount=price_val or 0.0, currency="CAD"),
                     url=listing_url,
                     image_urls=image_urls,
-                    location=self._extract_location_from_listing_url(listing_url),
+                    location=self._extract_location(blob, listing_url),
                     condition=None,
-                    snippet=None,
+                    snippet=self._clean_snippet(title, blob),
+                    posted_at=self._extract_posted_at(blob),
                 )
             )
 

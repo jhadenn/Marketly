@@ -14,7 +14,7 @@ UNKNOWN_LOCATION_TOKENS = {
 
 TITLE_TOKEN_RE = re.compile(r"[a-z0-9]+")
 AGE_HINT_RE = re.compile(
-    r"\b(\d+)\s+(minute|hour|day|week|month|year)s?\s+ago\b",
+    r"\b(?:just\s+listed|(\d+)\s+(minute|hour|day|week|month|year)s?\s+ago)\b",
     re.IGNORECASE,
 )
 

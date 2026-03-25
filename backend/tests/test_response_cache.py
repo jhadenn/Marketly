@@ -52,6 +52,30 @@ def test_cache_key_varies_by_facebook_context():
     assert key_a != key_b
 
 
+def test_cache_key_varies_by_search_location_context():
+    loc_a = SimpleNamespace(latitude=43.6532, longitude=-79.3832, mode="manual")
+    loc_b = SimpleNamespace(latitude=45.4215, longitude=-75.6972, mode="gps")
+
+    key_a = response_cache.build_search_response_cache_key(
+        query="bike",
+        sources=["kijiji", "ebay"],
+        limit=24,
+        offset=0,
+        sort="relevance",
+        search_location_context=loc_a,
+    )
+    key_b = response_cache.build_search_response_cache_key(
+        query="bike",
+        sources=["kijiji", "ebay"],
+        limit=24,
+        offset=0,
+        sort="relevance",
+        search_location_context=loc_b,
+    )
+
+    assert key_a != key_b
+
+
 def test_response_cache_roundtrip(monkeypatch):
     fake_redis = FakeRedis()
     monkeypatch.setattr(response_cache.settings, "MARKETLY_RESPONSE_CACHE_ENABLED", True)

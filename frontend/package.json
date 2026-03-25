@@ -9,6 +9,7 @@
         "lint": "eslint"
     },
     "dependencies": {
+        "@lottiefiles/dotlottie-react": "^0.18.7",
         "@radix-ui/react-slot": "1.1.1",
         "@radix-ui/react-tooltip": "1.1.6",
         "@react-three/drei": "^10.7.7",
@@ -29,7 +30,10 @@
         "postprocessing": "^6.38.2",
         "react": "19.2.3",
         "react-dom": "19.2.3",
+        "react-markdown": "^10.1.0",
         "react-use-measure": "^2.1.7",
+        "remark-breaks": "^4.0.0",
+        "remark-gfm": "^4.0.1",
         "tailwind-merge": "^3.3.1",
         "three": "^0.167.1"
     },

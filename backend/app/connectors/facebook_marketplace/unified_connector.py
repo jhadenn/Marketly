@@ -18,9 +18,77 @@ from app.connectors.facebook_marketplace.models import (
     FacebookSearchRequest,
 )
 from app.core.config import settings
-from app.models.listing import Listing, Money
+from app.models.listing import Listing, Money, SearchSort
 
 QUERY_TOKEN_RE = re.compile(r"[a-z0-9]+")
+PRICE_TEXT_RE = re.compile(
+    r"^\s*(?:"
+    r"free"
+    r"|(?:ca|us|au|nz)?\s*[$\u00a3\u20ac]\s*\d[\d,]*(?:\.\d{1,2})?"
+    r"|(?:cad|usd|eur|gbp)\s*\d[\d,]*(?:\.\d{1,2})?"
+    r"|\d[\d,]*(?:\.\d{1,2})?\s*(?:cad|usd|eur|gbp)"
+    r")\s*$",
+    re.IGNORECASE,
+)
+AGE_LINE_RE = re.compile(
+    r"\b(?:just\s+listed|(?:listed\s+)?\d+\s+(?:minute|hour|day|week|month|year)s?\s+ago)\b",
+    re.IGNORECASE,
+)
+
+
+def _clean_card_line(value: object) -> str:
+    return " ".join(str(value or "").split()).strip()
+
+
+def _looks_like_location_line(line: str) -> bool:
+    lowered = line.lower()
+    if "seller" in lowered:
+        return False
+    if "km away" in lowered:
+        return True
+    if "," in line and len(line.split()) <= 6:
+        return True
+    return False
+
+
+def _build_listing_snippet(item: FacebookNormalizedListing) -> str | None:
+    raw = item.raw or {}
+    lines = raw.get("lines") if isinstance(raw, dict) else None
+    if not isinstance(lines, list):
+        return None
+
+    cleaned_title = _clean_card_line(item.title).lower()
+    snippet_lines: list[str] = []
+    seen: set[str] = set()
+    for raw_line in lines:
+        line = _clean_card_line(raw_line)
+        if not line:
+            continue
+        lowered = line.lower()
+        if lowered == cleaned_title:
+            continue
+        if PRICE_TEXT_RE.match(line):
+            continue
+        if AGE_LINE_RE.search(line):
+            continue
+        if lowered.startswith("seller:"):
+            continue
+        if _looks_like_location_line(line):
+            continue
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        snippet_lines.append(line)
+        if len(snippet_lines) >= 2:
+            break
+
+    if not snippet_lines:
+        return None
+
+    snippet = " | ".join(snippet_lines)
+    if len(snippet) > 240:
+        snippet = snippet[:237].rstrip() + "..."
+    return snippet
 
 
 def _to_listing(item: FacebookNormalizedListing) -> Listing:
@@ -33,10 +101,14 @@ def _to_listing(item: FacebookNormalizedListing) -> Listing:
             price = None
 
     snippet_parts: list[str] = []
-    if item.seller_name:
-        snippet_parts.append(f"Seller: {item.seller_name}")
-    if item.age_hint:
-        snippet_parts.append(item.age_hint)
+    descriptive_snippet = _build_listing_snippet(item)
+    if descriptive_snippet:
+        snippet_parts.append(descriptive_snippet)
+    else:
+        if item.seller_name:
+            snippet_parts.append(f"Seller: {item.seller_name}")
+        if item.age_hint:
+            snippet_parts.append(item.age_hint)
     snippet = " | ".join(snippet_parts) if snippet_parts else None
 
     return Listing(
@@ -51,6 +123,7 @@ def _to_listing(item: FacebookNormalizedListing) -> Listing:
         longitude=item.longitude,
         condition=None,
         snippet=snippet,
+        posted_at=item.posted_at,
     )
 
 
@@ -143,6 +216,7 @@ class FacebookUnifiedConnector(MarketplaceConnector):
         query: str,
         limit: int = 20,
         *,
+        sort: SearchSort = "relevance",
         auth_mode: str | None = None,
         cookie_payload: object | None = None,
         latitude: float | None = None,
@@ -202,6 +276,7 @@ class FacebookUnifiedConnector(MarketplaceConnector):
         request = FacebookSearchRequest(
             query=query,
             limit=scrape_limit,
+            sort="newest" if sort == "newest" else "relevance",
             auth_mode=effective_auth_mode,
             cookie_path=cookie_path,
             cookie_payload=cookie_payload,

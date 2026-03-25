@@ -3,7 +3,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
+import { DotLottieReact } from "@lottiefiles/dotlottie-react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkBreaks from "remark-breaks";
+import remarkGfm from "remark-gfm";
 import {
+  ArrowUpRight,
+  BellRing,
+  Bot,
   Bookmark,
   ChevronDown,
   Loader2,
@@ -14,6 +21,7 @@ import {
   Search,
   SlidersHorizontal,
   Sparkles,
+  X,
 } from "lucide-react";
 import Dither from "@/components/Dither";
 import { cn } from "@/lib/utils";
@@ -22,11 +30,40 @@ import { useAuth } from "../providers";
 const SOURCE_OPTIONS = ["kijiji", "ebay", "facebook"] as const;
 const DEFAULT_SOURCES: SourceOption[] = ["kijiji", "ebay", "facebook"];
 const DEFAULT_PAGE_SIZE = 24;
+const COPILOT_DESKTOP_BREAKPOINT = 1024;
+const COPILOT_FLOATING_MARGIN = 24;
+const COPILOT_LAUNCHER_WIDTH = 196;
+const COPILOT_LAUNCHER_HEIGHT = 72;
+const COPILOT_WINDOW_WIDTH_DEFAULT = 440;
+const COPILOT_WINDOW_WIDTH_MIN = 360;
+const COPILOT_WINDOW_WIDTH_MAX = 860;
+const COPILOT_WINDOW_HEIGHT_DEFAULT = 720;
+const COPILOT_WINDOW_HEIGHT_MIN = 480;
+const COPILOT_WINDOW_HEIGHT_MAX = 920;
+const COPILOT_WINDOW_WIDTH_STORAGE_KEY = "marketly:copilot-window-width";
+const COPILOT_WINDOW_RECT_STORAGE_KEY = "marketly:copilot-window-rect";
+const COPILOT_LAUNCHER_POSITION_STORAGE_KEY = "marketly:copilot-launcher-position";
+const SEARCH_LOCATION_STORAGE_KEY = "marketly:search-location";
 const SORT_OPTIONS = [
   { value: "relevance", label: "Relevance", disabled: false },
   { value: "price_asc", label: "Price: Low -> High", disabled: false },
   { value: "price_desc", label: "Price: High -> Low", disabled: false },
-  { value: "newest", label: "Newest (unavailable)", disabled: true },
+  { value: "newest", label: "Newest", disabled: false },
+] as const;
+const PROVINCE_OPTIONS = [
+  { code: "AB", label: "Alberta" },
+  { code: "BC", label: "British Columbia" },
+  { code: "MB", label: "Manitoba" },
+  { code: "NB", label: "New Brunswick" },
+  { code: "NL", label: "Newfoundland and Labrador" },
+  { code: "NS", label: "Nova Scotia" },
+  { code: "NT", label: "Northwest Territories" },
+  { code: "NU", label: "Nunavut" },
+  { code: "ON", label: "Ontario" },
+  { code: "PE", label: "Prince Edward Island" },
+  { code: "QC", label: "Quebec" },
+  { code: "SK", label: "Saskatchewan" },
+  { code: "YT", label: "Yukon" },
 ] as const;
 
 type PreviewListing = {
@@ -54,7 +91,7 @@ const PREVIEW_SAMPLE_LISTINGS: PreviewListing[] = [
     price: "CAD 6,500",
     location: "North York, ON",
     source: "kijiji",
-    imagePath: "/preview-listing-2.jpg",
+    imagePath: "/example-listing-2.jpg",
     fallbackImagePath: "/example-listing-2.jpg",
   },
   {
@@ -83,6 +120,26 @@ type Money = {
   currency: string;
 };
 
+type Valuation = {
+  verdict: "underpriced" | "fair" | "overpriced" | "insufficient_data";
+  estimated_low?: number | null;
+  estimated_high?: number | null;
+  median_price?: number | null;
+  currency: string;
+  confidence: number;
+  confidence_label?: "high" | "medium" | "low";
+  sample_count: number;
+  estimate_source?: "historical_exact" | "historical_relaxed" | "live_cohort" | "category_prior" | "none";
+  explanation?: string | null;
+};
+
+type Risk = {
+  level: "low" | "medium" | "high";
+  score: number;
+  reasons: string[];
+  explanation?: string | null;
+};
+
 type Listing = {
   source: string;
   source_listing_id: string;
@@ -95,9 +152,41 @@ type Listing = {
   longitude?: number | null;
   condition?: string | null;
   snippet?: string | null;
+  posted_at?: string | null;
+  distance_km?: number | null;
+  distance_is_approximate?: boolean;
   score?: number;
   score_reason?: string | null;
+  valuation?: Valuation | null;
+  risk?: Risk | null;
 };
+
+type ResolvedLocation = {
+  display_name: string;
+  city: string;
+  province_code: string;
+  province_name: string;
+  country_code: string;
+  latitude: number;
+  longitude: number;
+  mode: "manual" | "gps";
+};
+
+type LocationResolveRequest = {
+  city?: string;
+  province?: string;
+  latitude?: number;
+  longitude?: number;
+};
+
+type LocationCitySuggestion = {
+  city: string;
+  province_code: string;
+  province_name: string;
+  display_name: string;
+};
+
+type LocationPersistence = "browser" | "account";
 
 type SearchResponse = {
   query: string;
@@ -138,7 +227,88 @@ type SavedSearch = {
   id: number;
   query: string;
   sources: string[];
+  alerts_enabled: boolean;
+  last_alert_checked_at?: string | null;
+  last_alert_notified_at?: string | null;
   created_at: string;
+};
+
+type NotificationItem = {
+  listing_key: string;
+  source: string;
+  source_listing_id: string;
+  title: string;
+  url: string;
+  price?: Money | null;
+  location?: string | null;
+  match_confidence: number;
+  why_matched: string[];
+  valuation?: Valuation | null;
+  risk?: Risk | null;
+};
+
+type SavedSearchNotification = {
+  id: number;
+  saved_search_id: number;
+  saved_search_query: string;
+  summary: string;
+  new_count: number;
+  created_at: string;
+  read_at?: string | null;
+  items: NotificationItem[];
+};
+
+type CopilotShortlistItem = {
+  listing_key: string;
+  title: string;
+  reason: string;
+};
+
+type CopilotResponse = {
+  available: boolean;
+  answer: string;
+  shortlist: CopilotShortlistItem[];
+  seller_questions: string[];
+  red_flags: string[];
+  error_message?: string | null;
+};
+
+type CopilotConversationPayload = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+type CopilotWindowRect = {
+  width: number;
+  height: number;
+  x: number;
+  y: number;
+};
+
+type CopilotLauncherPosition = {
+  x: number;
+  y: number;
+};
+
+type CopilotResizeDirection =
+  | "n"
+  | "s"
+  | "e"
+  | "w"
+  | "ne"
+  | "nw"
+  | "se"
+  | "sw";
+
+type CopilotMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  answer?: string;
+  seller_questions?: string[];
+  red_flags?: string[];
+  available?: boolean;
+  error_message?: string | null;
 };
 
 type SavedBatchPaginationEntry = {
@@ -155,7 +325,6 @@ type SavedBatchPaginationState = {
 };
 
 type ResultMode = "single" | "saved_batch";
-type Coordinates = { latitude: number; longitude: number };
 type SavedSearchResultBucket = { items: Listing[] };
 type InterleavedSavedSearchBucketResult = {
   orderedItems: Listing[];
@@ -167,13 +336,181 @@ function isSourceOption(value: string): value is SourceOption {
   return SOURCE_OPTIONS.includes(value as SourceOption);
 }
 
+function isResolvedLocation(value: unknown): value is ResolvedLocation {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<ResolvedLocation>;
+  return (
+    typeof candidate.display_name === "string" &&
+    typeof candidate.city === "string" &&
+    typeof candidate.province_code === "string" &&
+    typeof candidate.province_name === "string" &&
+    typeof candidate.country_code === "string" &&
+    typeof candidate.latitude === "number" &&
+    typeof candidate.longitude === "number" &&
+    (candidate.mode === "manual" || candidate.mode === "gps")
+  );
+}
+
+function readStoredResolvedLocation(): ResolvedLocation | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.localStorage.getItem(SEARCH_LOCATION_STORAGE_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return isResolvedLocation(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredResolvedLocation(location: ResolvedLocation | null) {
+  if (typeof window === "undefined") return;
+  if (location) {
+    window.localStorage.setItem(SEARCH_LOCATION_STORAGE_KEY, JSON.stringify(location));
+    return;
+  }
+  window.localStorage.removeItem(SEARCH_LOCATION_STORAGE_KEY);
+}
+
+function toLocationResolveRequest(location: ResolvedLocation): LocationResolveRequest {
+  if (location.mode === "gps") {
+    return {
+      latitude: location.latitude,
+      longitude: location.longitude,
+    };
+  }
+  return {
+    city: location.city,
+    province: location.province_code,
+  };
+}
+
 function formatPrice(price?: Money | null) {
   if (!price) return "-";
   return `${price.currency} ${price.amount}`;
 }
 
+function formatMoneyCompact(amount?: number | null, currency = "CAD") {
+  if (typeof amount !== "number" || !Number.isFinite(amount)) return null;
+  return `${currency} ${Math.round(amount)}`;
+}
+
 function getListingKey(item: Listing): string {
   return `${item.source}:${item.source_listing_id || item.url}`;
+}
+
+function buildCopilotListingContext(item: Listing) {
+  return {
+    listing_key: getListingKey(item),
+    source: item.source,
+    source_listing_id: item.source_listing_id,
+    title: item.title,
+    price: item.price ?? null,
+    url: item.url,
+    condition: item.condition ?? null,
+    location: item.location ?? null,
+    snippet: item.snippet ?? null,
+    score: item.score ?? null,
+    score_reason: item.score_reason ?? null,
+    valuation: item.valuation ?? null,
+    risk: item.risk ?? null,
+  };
+}
+
+function createCopilotMessageId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function buildAssistantConversationContent(response: CopilotResponse) {
+  const sections = [response.answer.trim()];
+
+  if (response.seller_questions.length > 0) {
+    sections.push(
+      `Seller questions:\n${response.seller_questions.map((entry) => `- ${entry}`).join("\n")}`,
+    );
+  }
+
+  if (response.red_flags.length > 0) {
+    sections.push(`Red flags:\n${response.red_flags.map((entry) => `- ${entry}`).join("\n")}`);
+  }
+
+  return sections.filter(Boolean).join("\n\n");
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  if (min > max) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
+function getDefaultCopilotWindowRect(
+  viewportWidth: number,
+  viewportHeight: number,
+  widthOverride = COPILOT_WINDOW_WIDTH_DEFAULT,
+): CopilotWindowRect {
+  const maxWidth = Math.max(COPILOT_WINDOW_WIDTH_MIN, viewportWidth - COPILOT_FLOATING_MARGIN * 2);
+  const maxHeight = Math.max(COPILOT_WINDOW_HEIGHT_MIN, viewportHeight - COPILOT_FLOATING_MARGIN * 2);
+  const width = clampNumber(widthOverride, COPILOT_WINDOW_WIDTH_MIN, maxWidth);
+  const height = clampNumber(COPILOT_WINDOW_HEIGHT_DEFAULT, COPILOT_WINDOW_HEIGHT_MIN, maxHeight);
+  return {
+    width,
+    height,
+    x: Math.max(COPILOT_FLOATING_MARGIN, viewportWidth - width - COPILOT_FLOATING_MARGIN),
+    y: Math.max(COPILOT_FLOATING_MARGIN, viewportHeight - height - COPILOT_FLOATING_MARGIN),
+  };
+}
+
+function clampCopilotWindowRect(
+  rect: CopilotWindowRect,
+  viewportWidth: number,
+  viewportHeight: number,
+) {
+  const maxWidth = Math.max(COPILOT_WINDOW_WIDTH_MIN, viewportWidth - COPILOT_FLOATING_MARGIN * 2);
+  const maxHeight = Math.max(COPILOT_WINDOW_HEIGHT_MIN, viewportHeight - COPILOT_FLOATING_MARGIN * 2);
+  const width = clampNumber(rect.width, COPILOT_WINDOW_WIDTH_MIN, maxWidth);
+  const height = clampNumber(rect.height, COPILOT_WINDOW_HEIGHT_MIN, maxHeight);
+  const x = clampNumber(
+    rect.x,
+    COPILOT_FLOATING_MARGIN,
+    Math.max(COPILOT_FLOATING_MARGIN, viewportWidth - width - COPILOT_FLOATING_MARGIN),
+  );
+  const y = clampNumber(
+    rect.y,
+    COPILOT_FLOATING_MARGIN,
+    Math.max(COPILOT_FLOATING_MARGIN, viewportHeight - height - COPILOT_FLOATING_MARGIN),
+  );
+  return { width, height, x, y };
+}
+
+function getDefaultCopilotLauncherPosition(viewportWidth: number, viewportHeight: number) {
+  return {
+    x: Math.max(COPILOT_FLOATING_MARGIN, viewportWidth - COPILOT_LAUNCHER_WIDTH - COPILOT_FLOATING_MARGIN),
+    y: Math.max(COPILOT_FLOATING_MARGIN, viewportHeight - COPILOT_LAUNCHER_HEIGHT - COPILOT_FLOATING_MARGIN),
+  };
+}
+
+function clampCopilotLauncherPosition(
+  position: CopilotLauncherPosition,
+  viewportWidth: number,
+  viewportHeight: number,
+) {
+  return {
+    x: clampNumber(
+      position.x,
+      COPILOT_FLOATING_MARGIN,
+      Math.max(
+        COPILOT_FLOATING_MARGIN,
+        viewportWidth - COPILOT_LAUNCHER_WIDTH - COPILOT_FLOATING_MARGIN,
+      ),
+    ),
+    y: clampNumber(
+      position.y,
+      COPILOT_FLOATING_MARGIN,
+      Math.max(
+        COPILOT_FLOATING_MARGIN,
+        viewportHeight - COPILOT_LAUNCHER_HEIGHT - COPILOT_FLOATING_MARGIN,
+      ),
+    ),
+  };
 }
 
 function sortListingsLocal(listings: Listing[], sort: SortOption): Listing[] {
@@ -182,6 +519,11 @@ function sortListingsLocal(listings: Listing[], sort: SortOption): Listing[] {
   }
 
   const indexed = listings.map((item, index) => ({ item, index }));
+  const postedAtTimestamp = (value: string | null | undefined) => {
+    if (!value) return null;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
 
   if (sort === "price_asc") {
     indexed.sort((a, b) => {
@@ -204,6 +546,21 @@ function sortListingsLocal(listings: Listing[], sort: SortOption): Listing[] {
       const aAmount = a.item.price?.amount ?? Number.NEGATIVE_INFINITY;
       const bAmount = b.item.price?.amount ?? Number.NEGATIVE_INFINITY;
       if (aAmount !== bAmount) return bAmount - aAmount;
+      return a.index - b.index;
+    });
+    return indexed.map((entry) => entry.item);
+  }
+
+  if (sort === "newest") {
+    indexed.sort((a, b) => {
+      const aTimestamp = postedAtTimestamp(a.item.posted_at);
+      const bTimestamp = postedAtTimestamp(b.item.posted_at);
+      const aMissing = aTimestamp === null;
+      const bMissing = bTimestamp === null;
+      if (aMissing !== bMissing) return aMissing ? 1 : -1;
+      if (aTimestamp !== null && bTimestamp !== null && aTimestamp !== bTimestamp) {
+        return bTimestamp - aTimestamp;
+      }
       return a.index - b.index;
     });
     return indexed.map((entry) => entry.item);
@@ -296,21 +653,97 @@ function formatSourceLabel(source: string) {
     .join(" ");
 }
 
-function haversineMiles(a: Coordinates, b: Coordinates) {
-  const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
-  const earthRadiusMiles = 3958.8;
-  const latDelta = toRadians(b.latitude - a.latitude);
-  const lonDelta = toRadians(b.longitude - a.longitude);
-  const lat1 = toRadians(a.latitude);
-  const lat2 = toRadians(b.latitude);
-
-  const sinLat = Math.sin(latDelta / 2);
-  const sinLon = Math.sin(lonDelta / 2);
-  const value =
-    sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLon * sinLon;
-  const arc = 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
-  return earthRadiusMiles * arc;
+function formatTimestamp(value?: string | null) {
+  if (!value) return "Just now";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
+
+function formatNewListingsCount(count: number) {
+  return `${count} new ${count === 1 ? "listing" : "listings"}`;
+}
+
+function getSavedSearchAlertStatus(entry: SavedSearch) {
+  if (!entry.alerts_enabled) {
+    return "Alerts off";
+  }
+
+  if (!entry.last_alert_checked_at) {
+    return "Waiting for first alert check. The first check sets your baseline.";
+  }
+
+  const lastChecked = formatTimestamp(entry.last_alert_checked_at);
+  if (!entry.last_alert_notified_at) {
+    return `Last checked ${lastChecked}. No new listings since your baseline.`;
+  }
+
+  return `Last checked ${lastChecked}. Last alert ${formatTimestamp(entry.last_alert_notified_at)}.`;
+}
+
+function normalizeNotificationError(error: unknown, fallback: string) {
+  if (!(error instanceof Error)) return fallback;
+  const message = error.message.trim();
+  if (!message) return fallback;
+  if (/failed to fetch|load failed|networkerror/i.test(message)) {
+    return fallback;
+  }
+  return message;
+}
+
+function isLikelyNetworkError(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  return /failed to fetch|load failed|networkerror/i.test(error.message);
+}
+
+const COPILOT_MARKDOWN_COMPONENTS: Components = {
+  p: ({ children }) => (
+    <p className="mt-3 text-sm leading-relaxed text-zinc-100 first:mt-0">{children}</p>
+  ),
+  ul: ({ children }) => (
+    <ul className="mt-3 list-disc space-y-1.5 pl-5 text-sm leading-relaxed text-zinc-100 first:mt-0">
+      {children}
+    </ul>
+  ),
+  ol: ({ children }) => (
+    <ol className="mt-3 list-decimal space-y-1.5 pl-5 text-sm leading-relaxed text-zinc-100 first:mt-0">
+      {children}
+    </ol>
+  ),
+  li: ({ children }) => <li className="pl-1">{children}</li>,
+  a: ({ children, href }) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="font-medium text-emerald-200 underline underline-offset-2 transition hover:text-emerald-100"
+    >
+      {children}
+    </a>
+  ),
+  strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
+  em: ({ children }) => <em className="italic text-zinc-100">{children}</em>,
+  code: ({ children }) => (
+    <code className="rounded bg-white/[0.08] px-1.5 py-0.5 font-mono text-[0.9em] text-zinc-100">
+      {children}
+    </code>
+  ),
+  pre: ({ children }) => (
+    <pre className="mt-3 overflow-x-auto rounded-xl border border-white/10 bg-black/30 p-3 text-sm text-zinc-100 first:mt-0">
+      {children}
+    </pre>
+  ),
+  blockquote: ({ children }) => (
+    <blockquote className="mt-3 border-l-2 border-white/15 pl-4 text-sm text-zinc-300 first:mt-0">
+      {children}
+    </blockquote>
+  ),
+};
 
 type SearchPageViewProps = {
   authLoading: boolean;
@@ -328,19 +761,18 @@ type SearchPageViewProps = {
   onSearch: (e: React.FormEvent) => Promise<void>;
   onSaveCurrentSearch: () => Promise<void>;
   limit: number;
-  locationFilterText: string;
-  setLocationFilterText: React.Dispatch<React.SetStateAction<string>>;
+  locationProvince: string;
+  setLocationProvince: React.Dispatch<React.SetStateAction<string>>;
+  locationCityInput: string;
+  setLocationCityInput: React.Dispatch<React.SetStateAction<string>>;
+  currentLocation: ResolvedLocation | null;
+  locationPersistence: LocationPersistence | null;
+  locationSuggestions: LocationCitySuggestion[];
+  onApplyManualLocation: () => Promise<void>;
   onUseMyLocation: () => void;
-  onClearMyLocation: () => void;
-  locatingDevice: boolean;
-  deviceCoords: Coordinates | null;
-  locationFilterError: string | null;
-  travelRangeMilesInput: string;
-  setTravelRangeMilesInput: React.Dispatch<React.SetStateAction<string>>;
-  hideUnknownDistance: boolean;
-  setHideUnknownDistance: React.Dispatch<React.SetStateAction<boolean>>;
-  distanceFilterPendingLocation: boolean;
-  distanceFilterActive: boolean;
+  onClearLocation: () => Promise<void>;
+  locationBusy: boolean;
+  locationError: string | null;
   error: string | null;
   sourceErrors: Record<string, SourceErrorEntry>;
   hasSourceErrorEntries: boolean;
@@ -358,11 +790,17 @@ type SearchPageViewProps = {
   saved: SavedSearch[];
   savedLoading: boolean;
   savedError: string | null;
+  notifications: SavedSearchNotification[];
+  notificationsLoading: boolean;
+  notificationsError: string | null;
   activeSavedSearchId: number | null;
   fetchSavedSearches: () => Promise<SavedSearch[] | null>;
+  fetchNotifications: () => Promise<SavedSearchNotification[] | null>;
+  onMarkNotificationRead: (id: number) => Promise<void>;
   runAllSavedSearches: (savedSearches: SavedSearch[]) => Promise<void>;
   onRunSavedSearch: (id: number) => Promise<void>;
   onDeleteSavedSearch: (id: number) => Promise<void>;
+  onToggleSavedSearchAlerts: (entry: SavedSearch) => Promise<void>;
   openEdit: (entry: SavedSearch) => void;
   editing: SavedSearch | null;
   closeEdit: () => void;
@@ -372,6 +810,8 @@ type SearchPageViewProps = {
   setEditQuery: React.Dispatch<React.SetStateAction<string>>;
   editSources: SourceOption[];
   toggleEditSource: (source: SourceOption) => void;
+  editAlertsEnabled: boolean;
+  setEditAlertsEnabled: React.Dispatch<React.SetStateAction<boolean>>;
   onSaveEdit: () => Promise<void>;
   facebookConfigStatus: FacebookConnectorStatus | null;
   facebookConfigLoading: boolean;
@@ -385,6 +825,32 @@ type SearchPageViewProps = {
   onVerifyFacebookCookies: () => Promise<void>;
   onDeleteFacebookCookies: () => Promise<void>;
   onFacebookCookieFileSelected: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  activeQuery: string;
+  copilotOpen: boolean;
+  openCopilot: () => void;
+  closeCopilot: () => void;
+  copilotQuestion: string;
+  setCopilotQuestion: React.Dispatch<React.SetStateAction<string>>;
+  copilotLoading: boolean;
+  copilotError: string | null;
+  copilotMessages: CopilotMessage[];
+  latestShortlist: CopilotShortlistItem[];
+  copilotSelectionMode: boolean;
+  toggleCopilotSelectionMode: () => void;
+  copilotSelectedListingKeys: string[];
+  clearCopilotSelection: () => void;
+  removeListingFromCopilotSelection: (listingKey: string) => void;
+  onToggleListingSelection: (item: Listing) => void;
+  resetCopilotConversation: () => void;
+  copilotWindowRect: CopilotWindowRect;
+  copilotLauncherPosition: CopilotLauncherPosition;
+  onCopilotLauncherDragStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onCopilotWindowDragStart: (event: React.PointerEvent<HTMLDivElement>) => void;
+  onCopilotResizeStart: (
+    direction: CopilotResizeDirection,
+    event: React.PointerEvent<HTMLDivElement>,
+  ) => void;
+  onAskCopilot: (questionOverride?: string) => Promise<void>;
 };
 
 function GlassPanel({
@@ -419,19 +885,18 @@ type SearchControlsRailProps = Pick<
   | "sortBy"
   | "sortApplying"
   | "onChangeSort"
-  | "locationFilterText"
-  | "setLocationFilterText"
+  | "locationProvince"
+  | "setLocationProvince"
+  | "locationCityInput"
+  | "setLocationCityInput"
+  | "currentLocation"
+  | "locationPersistence"
+  | "locationSuggestions"
+  | "onApplyManualLocation"
   | "onUseMyLocation"
-  | "onClearMyLocation"
-  | "locatingDevice"
-  | "deviceCoords"
-  | "locationFilterError"
-  | "travelRangeMilesInput"
-  | "setTravelRangeMilesInput"
-  | "hideUnknownDistance"
-  | "setHideUnknownDistance"
-  | "distanceFilterPendingLocation"
-  | "distanceFilterActive"
+  | "onClearLocation"
+  | "locationBusy"
+  | "locationError"
   | "authLoading"
   | "user"
   | "facebookConfigStatus"
@@ -462,7 +927,19 @@ type SavedSearchRailProps = Pick<
   | "runAllSavedSearches"
   | "onRunSavedSearch"
   | "onDeleteSavedSearch"
+  | "onToggleSavedSearchAlerts"
   | "openEdit"
+>;
+
+type AlertsRailProps = Pick<
+  SearchPageViewProps,
+  | "authLoading"
+  | "user"
+  | "notifications"
+  | "notificationsLoading"
+  | "notificationsError"
+  | "fetchNotifications"
+  | "onMarkNotificationRead"
 >;
 
 type ResultsPanelProps = Pick<
@@ -482,10 +959,12 @@ type ResultsPanelProps = Pick<
   | "sourceErrors"
   | "hasSourceErrorEntries"
   | "error"
-  | "deviceCoords"
   | "sentinelRef"
   | "loadingMore"
   | "hasMore"
+  | "copilotSelectionMode"
+  | "copilotSelectedListingKeys"
+  | "onToggleListingSelection"
 >;
 
 function SearchPageView(props: SearchPageViewProps) {
@@ -493,6 +972,15 @@ function SearchPageView(props: SearchPageViewProps) {
   const heroTitle =
     heroQuery || (props.hasSearched ? "Unified results" : "All marketplaces. One search.");
   const showLiveHeroCopy = heroQuery.length > 0 || props.hasSearched;
+  const [isDesktop, setIsDesktop] = useState(false);
+
+  useEffect(() => {
+    const media = window.matchMedia(`(min-width: ${COPILOT_DESKTOP_BREAKPOINT}px)`);
+    const sync = () => setIsDesktop(media.matches);
+    sync();
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
 
   return (
     <main className="dark relative min-h-screen overflow-x-hidden bg-black text-white antialiased">
@@ -521,19 +1009,11 @@ function SearchPageView(props: SearchPageViewProps) {
             >
               <span className="font-mono text-sm text-zinc-100">Marketly</span>
             </Link>
-            <span className="hidden items-center gap-2 rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-zinc-300 md:inline-flex">
-              <Sparkles className="size-3.5 text-zinc-400" />
-              Marketplace Search
-            </span>
           </div>
 
           <div className="flex items-center gap-2">
-            <Link
-              href="/"
-              className="hidden rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.04] sm:inline-flex"
-            >
-              Home
-            </Link>
+
+            <AlertsRail {...props} />
 
             {props.authLoading ? (
               <span className="rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-zinc-400">
@@ -595,7 +1075,7 @@ function SearchPageView(props: SearchPageViewProps) {
               </h1>
               <p className="mt-3 max-w-3xl text-sm leading-relaxed text-zinc-400 sm:text-base">
                 {showLiveHeroCopy
-                  ? "Compare live listings across Kijiji, eBay, and Facebook Marketplace in a single feed with image-first tiles inspired by Facebook Marketplace."
+                  ? "Compare live listings across Kijiji, eBay, and Facebook Marketplace in a single feed."
                   : "Run a search, choose sources, and browse a unified marketplace grid with saved searches and infinite scroll."}
               </p>
 
@@ -603,12 +1083,9 @@ function SearchPageView(props: SearchPageViewProps) {
                 {(props.summarySources.length > 0 ? props.summarySources : props.sources).map((source) => (
                   <SourceChip key={`hero-source-${source}`} source={source} compact />
                 ))}
-                <span className="rounded-full border border-white/10 bg-white/[0.02] px-3 py-1 text-xs text-zinc-300">
-                  {props.hasSearched ? `${props.filteredResults.length} visible` : `${props.limit} per page`}
-                </span>
                 {props.hasActiveClientFilters ? (
                   <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-3 py-1 text-xs text-amber-100">
-                    Location filters active
+                    Location ranking active
                   </span>
                 ) : null}
               </div>
@@ -624,7 +1101,7 @@ function SearchPageView(props: SearchPageViewProps) {
               <StatTile
                 label="Showing"
                 value={String(props.filteredResults.length)}
-                sub={props.hasActiveClientFilters ? `${props.filteredOutCount} filtered out` : "No client filters"}
+                sub={props.hasActiveClientFilters ? "Nearby results ranked first" : "No location ranking"}
               />
               <StatTile label="Sources" value={String((props.summarySources.length > 0 ? props.summarySources : props.sources).length)} sub="Selected" />
             </div>
@@ -641,6 +1118,39 @@ function SearchPageView(props: SearchPageViewProps) {
         </div>
       </div>
 
+      {!props.copilotOpen ? (
+        <button
+          type="button"
+          onClick={props.openCopilot}
+          onPointerDown={isDesktop ? props.onCopilotLauncherDragStart : undefined}
+          className={cn(
+            "fixed z-50 inline-flex max-w-[calc(100vw-2rem)] items-center gap-3 rounded-[24px] border border-white/10 bg-zinc-950/90 px-5 py-4 text-left text-zinc-100 shadow-2xl backdrop-blur-xl transition hover:border-white/20 hover:bg-zinc-950 sm:max-w-[calc(100vw-3rem)]",
+            isDesktop ? "" : "bottom-4 right-4 sm:bottom-6 sm:right-6",
+          )}
+          style={
+            isDesktop
+              ? {
+                  left: props.copilotLauncherPosition.x,
+                  top: props.copilotLauncherPosition.y,
+                  width: COPILOT_LAUNCHER_WIDTH,
+                  minHeight: COPILOT_LAUNCHER_HEIGHT,
+                }
+              : undefined
+          }
+        >
+          <div className="rounded-full border border-white/10 bg-white/[0.02] p-2.5 text-zinc-200">
+            <Bot className="size-5" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold tracking-tight text-white">Copilot</p>
+            <p className="mt-0.5 text-xs text-zinc-400">
+              {isDesktop ? "Drag me anywhere" : "Ask about these listings"}
+            </p>
+          </div>
+        </button>
+      ) : null}
+
+      <CopilotWindow {...props} />
       <EditSavedSearchModal {...props} />
     </main>
   );
@@ -768,89 +1278,84 @@ function SearchControlsRail(props: SearchControlsRailProps) {
 
           <div className="space-y-2">
             <label className="block text-xs font-medium uppercase tracking-[0.14em] text-zinc-400">
-              Location text filter
+              Your location
             </label>
+            <select
+              className="w-full rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2.5 text-sm text-zinc-100 focus:border-white/20 focus:outline-none"
+              value={props.locationProvince}
+              onChange={(e) => props.setLocationProvince(e.target.value)}
+            >
+              <option value="" className="bg-black text-white">
+                Select province
+              </option>
+              {PROVINCE_OPTIONS.map((province) => (
+                <option key={province.code} value={province.code} className="bg-black text-white">
+                  {province.label}
+                </option>
+              ))}
+            </select>
             <div className="relative">
               <MapPin className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-zinc-500" />
               <input
+                list="marketly-location-suggestions"
                 className="w-full rounded-xl border border-white/10 bg-white/[0.02] py-2.5 pl-9 pr-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-white/20 focus:outline-none"
-                value={props.locationFilterText}
-                onChange={(e) => props.setLocationFilterText(e.target.value)}
-                placeholder="City, state, neighborhood..."
+                value={props.locationCityInput}
+                onChange={(e) => props.setLocationCityInput(e.target.value)}
+                placeholder="City in Canada"
               />
             </div>
+            <datalist id="marketly-location-suggestions">
+              {props.locationSuggestions.map((suggestion) => (
+                <option key={suggestion.display_name} value={suggestion.city}>
+                  {suggestion.display_name}
+                </option>
+              ))}
+            </datalist>
           </div>
 
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <button
+              type="button"
+              onClick={() => void props.onApplyManualLocation()}
+              disabled={props.locationBusy || !props.locationProvince || !props.locationCityInput.trim()}
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-white px-3 py-2.5 text-sm font-medium text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {props.locationBusy ? <Loader2 className="size-4 animate-spin" /> : <MapPin className="size-4" />}
+              {props.locationBusy ? "Saving..." : "Set location"}
+            </button>
             <button
               type="button"
               onClick={props.onUseMyLocation}
-              disabled={props.locatingDevice}
+              disabled={props.locationBusy}
               className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2.5 text-sm text-zinc-100 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {props.locatingDevice ? (
+              {props.locationBusy ? (
                 <Loader2 className="size-4 animate-spin" />
               ) : (
                 <LocateFixed className="size-4" />
               )}
-              {props.locatingDevice ? "Locating..." : "Use GPS"}
+              {props.locationBusy ? "Locating..." : "Use GPS"}
             </button>
 
             <button
               type="button"
-              onClick={props.onClearMyLocation}
-              disabled={!props.deviceCoords}
+              onClick={() => void props.onClearLocation()}
+              disabled={props.locationBusy && !props.currentLocation}
               className="rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2.5 text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-40"
             >
-              Clear GPS
+              Clear
             </button>
           </div>
-
-          <div className="space-y-2">
-            <label className="block text-xs font-medium uppercase tracking-[0.14em] text-zinc-400">
-              Range (miles)
-            </label>
-            <input
-              className="w-full rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-white/20 focus:outline-none"
-              type="number"
-              min={1}
-              max={500}
-              value={props.travelRangeMilesInput}
-              onChange={(e) => props.setTravelRangeMilesInput(e.target.value)}
-              placeholder="Off"
-            />
-          </div>
-
-          <label className="flex items-start gap-2 rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-zinc-300">
-            <input
-              type="checkbox"
-              className="mt-0.5 rounded border-white/20 bg-black"
-              checked={props.hideUnknownDistance}
-              onChange={(e) => props.setHideUnknownDistance(e.target.checked)}
-            />
-            <span>Hide listings without distance data when range filtering is enabled.</span>
-          </label>
 
           {props.sources.length === 0 ? (
             <p className="text-xs text-red-300">Select at least one source to search.</p>
           ) : null}
-          {props.deviceCoords ? (
-            <p className="text-xs text-zinc-500">
-              GPS ready: {props.deviceCoords.latitude.toFixed(3)}, {props.deviceCoords.longitude.toFixed(3)}
-            </p>
+          {props.locationError ? (
+            <p className="text-xs text-red-300">{props.locationError}</p>
           ) : null}
-          {props.locationFilterError ? (
-            <p className="text-xs text-red-300">{props.locationFilterError}</p>
-          ) : null}
-          {props.distanceFilterPendingLocation ? (
-            <p className="text-xs text-amber-200">
-              Range is set, but GPS is not enabled yet. Tap &quot;Use GPS&quot; to apply distance
-              filtering.
-            </p>
-          ) : null}
-          {props.distanceFilterActive ? (
+          {props.currentLocation ? (
             <p className="text-xs text-zinc-400">
-              Distance filtering is active. Facebook listings usually have the best coordinate support.
+              Nearby Kijiji and Facebook listings will rank first.
             </p>
           ) : null}
         </div>
@@ -911,7 +1416,7 @@ function SavedSearchRail(props: SavedSearchRailProps) {
                 : "Log in to view and run saved searches."}
           </p>
           <p className="mt-1 text-xs text-zinc-500">
-            Saved searches can auto-load a multi-query feed when you come back.
+            Saved searches can auto-load a multi-query feed and power saved search alerts.
           </p>
         </div>
       ) : (
@@ -927,7 +1432,22 @@ function SavedSearchRail(props: SavedSearchRailProps) {
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <p className="line-clamp-1 text-sm font-medium text-zinc-100">{entry.query}</p>
-                  <p className="mt-1 text-[11px] text-zinc-500">Saved</p>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+                    <span>Saved</span>
+                    <span
+                      className={cn(
+                        "rounded-full border px-1.5 py-0.5",
+                        entry.alerts_enabled
+                          ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-100"
+                          : "border-white/10 bg-white/[0.02] text-zinc-400",
+                      )}
+                    >
+                      {entry.alerts_enabled ? "Alerts on" : "Alerts off"}
+                    </span>
+                  </div>
+                  <p className="mt-2 text-xs leading-relaxed text-zinc-500">
+                    {getSavedSearchAlertStatus(entry)}
+                  </p>
                 </div>
                 {props.activeSavedSearchId === entry.id ? (
                   <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-zinc-300">
@@ -958,6 +1478,18 @@ function SavedSearchRail(props: SavedSearchRailProps) {
                   Edit
                 </button>
                 <button
+                  className={cn(
+                    "rounded-lg border px-3 py-1.5 text-xs transition",
+                    entry.alerts_enabled
+                      ? "border-emerald-300/25 bg-emerald-400/10 text-emerald-100 hover:border-emerald-300/40"
+                      : "border-white/10 bg-white/[0.02] text-zinc-200 hover:border-white/20 hover:bg-white/[0.05]",
+                  )}
+                  type="button"
+                  onClick={() => void props.onToggleSavedSearchAlerts(entry)}
+                >
+                  {entry.alerts_enabled ? "Disable alerts" : "Enable alerts"}
+                </button>
+                <button
                   className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-200 transition hover:border-red-300/30 hover:bg-red-400/10 hover:text-red-100"
                   type="button"
                   onClick={() => void props.onDeleteSavedSearch(entry.id)}
@@ -973,6 +1505,108 @@ function SavedSearchRail(props: SavedSearchRailProps) {
   );
 }
 
+function AlertsRail(props: AlertsRailProps) {
+  const unreadCount = props.notifications.filter((entry) => !entry.read_at).length;
+  const showUnreadDot = unreadCount > 0;
+
+  return (
+    <details className="relative">
+      <summary className="relative flex cursor-pointer list-none items-center gap-2 rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.04] [&::-webkit-details-marker]:hidden">
+        <BellRing className="size-4 text-zinc-300" />
+        <span className="hidden sm:inline">Alerts</span>
+        {showUnreadDot ? (
+          <span className="absolute right-2 top-2 size-2 rounded-full bg-red-500 ring-2 ring-black" />
+        ) : null}
+      </summary>
+
+      <div className="absolute right-0 z-50 mt-2 w-[380px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/95 p-4 shadow-2xl backdrop-blur-xl">
+        <div className="mb-4 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <p className="font-mono text-xs uppercase tracking-[0.18em] text-zinc-400">
+              Alerts
+            </p>
+            <span className="rounded-full border border-white/10 bg-white/[0.02] px-2.5 py-1 text-[11px] text-zinc-300">
+              {unreadCount} unread
+            </span>
+          </div>
+
+          <button
+            className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.02] px-2.5 py-1 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={() => void props.fetchNotifications()}
+            disabled={props.notificationsLoading}
+            type="button"
+          >
+            <RefreshCw className={cn("size-3.5", props.notificationsLoading && "animate-spin")} />
+            {props.notificationsLoading ? "Refreshing" : "Refresh"}
+          </button>
+        </div>
+
+        {props.notificationsError ? (
+          <div className="mb-3 rounded-xl border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-100">
+            {props.notificationsError}
+          </div>
+        ) : null}
+
+        {!props.user ? (
+          <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-4">
+            <p className="text-sm text-zinc-300">
+              {props.authLoading ? "Checking your account..." : "Log in to receive saved search alerts."}
+            </p>
+            <p className="mt-1 text-xs text-zinc-500">
+              Alerts appear when Marketly finds new listings for one of your alert-enabled saved searches.
+            </p>
+          </div>
+        ) : props.notifications.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-4">
+            <p className="text-sm text-zinc-300">No saved search alerts yet.</p>
+            <p className="mt-1 text-xs text-zinc-500">
+              Enable alerts on a saved search and new-listing alerts will show up here.
+            </p>
+          </div>
+        ) : (
+          <ul className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
+            {props.notifications.map((notification) => (
+              <li
+                key={notification.id}
+                className={cn(
+                  "rounded-xl border p-3 transition",
+                  notification.read_at
+                    ? "border-white/10 bg-white/[0.02]"
+                    : "border-emerald-300/20 bg-emerald-400/[0.06]",
+                )}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="line-clamp-2 text-sm font-medium text-zinc-100">
+                      {notification.saved_search_query}
+                    </p>
+                    <p className="mt-1 text-[11px] text-zinc-500">
+                      {formatNewListingsCount(notification.new_count)} | {formatTimestamp(notification.created_at)}
+                    </p>
+                  </div>
+                  {!notification.read_at ? (
+                    <button
+                      type="button"
+                      className="rounded-full border border-emerald-300/25 bg-emerald-400/10 px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-emerald-100 transition hover:border-emerald-300/40"
+                      onClick={() => void props.onMarkNotificationRead(notification.id)}
+                    >
+                      Read
+                    </button>
+                  ) : (
+                    <span className="rounded-full border border-white/10 bg-white/[0.02] px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-zinc-400">
+                      Read
+                    </span>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </details>
+  );
+}
+
 function ResultsPanel({
   searchLoading,
   results,
@@ -982,11 +1616,18 @@ function ResultsPanel({
   sourceErrors,
   hasSourceErrorEntries,
   error,
-  deviceCoords,
   sentinelRef,
   loadingMore,
   hasMore,
+  copilotSelectionMode,
+  copilotSelectedListingKeys,
+  onToggleListingSelection,
 }: ResultsPanelProps) {
+  const selectedListingKeys = useMemo(
+    () => new Set(copilotSelectedListingKeys),
+    [copilotSelectedListingKeys],
+  );
+
   return (
     <section className="space-y-4">
       {error ? (
@@ -1020,23 +1661,7 @@ function ResultsPanel({
         </GlassPanel>
       ) : null}
 
-      {searchLoading && results.length === 0 ? (
-        <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-          {Array.from({ length: 8 }).map((_, index) => (
-            <li
-              key={`skeleton-${index}`}
-              className="overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/80"
-            >
-              <div className="aspect-[5/4] animate-pulse bg-zinc-900/80" />
-              <div className="space-y-2 p-3.5">
-                <div className="h-4 w-24 animate-pulse rounded bg-zinc-800" />
-                <div className="h-3 w-full animate-pulse rounded bg-zinc-900" />
-                <div className="h-3 w-2/3 animate-pulse rounded bg-zinc-900" />
-              </div>
-            </li>
-          ))}
-        </ul>
-      ) : null}
+      {searchLoading && results.length === 0 ? <ListingsLoadingState /> : null}
 
       {!searchLoading && !hasSearched ? (
         <GlassPanel className="overflow-hidden border-dashed p-5 sm:p-6">
@@ -1065,7 +1690,7 @@ function ResultsPanel({
           {filteredResults.length === 0 ? (
             <GlassPanel className="p-5 text-sm text-zinc-300">
               {results.length > 0 && hasActiveClientFilters
-                ? "No listings match your location filters."
+                ? "No listings are available for the selected location ranking."
                 : "No results found for this search."}
             </GlassPanel>
           ) : (
@@ -1073,7 +1698,13 @@ function ResultsPanel({
               {filteredResults.map((item) => {
                 const cardKey = `${item.source}:${item.source_listing_id || item.url}`;
                 return (
-                  <MarketplaceResultCard key={cardKey} item={item} deviceCoords={deviceCoords} />
+                  <MarketplaceResultCard
+                    key={cardKey}
+                    item={item}
+                    selectionMode={copilotSelectionMode}
+                    copilotSelected={selectedListingKeys.has(cardKey)}
+                    onToggleSelection={onToggleListingSelection}
+                  />
                 );
               })}
             </ul>
@@ -1131,6 +1762,26 @@ function PreviewListingCard({ listing }: { listing: PreviewListing }) {
   );
 }
 
+function ListingsLoadingState() {
+  return (
+    <div className="flex min-h-[420px] items-center justify-center bg-black sm:min-h-[520px]">
+      <div className="flex flex-col items-center justify-center">
+        <div className="w-full max-w-[340px] sm:max-w-[700px]">
+          <DotLottieReact
+            src="https://lottie.host/729f73c3-4888-46ac-8dfc-ec1f5a93a4ab/EXocOBWnmK.lottie"
+            loop
+            autoplay
+          />
+        </div>
+        <p className="mt-1 font-mono text-[11px] uppercase tracking-[0.22em] text-zinc-500">
+          Loading Listings
+        </p>
+        <Loader2 className="mt-3 size-9 animate-spin text-zinc-300" aria-hidden="true" />
+      </div>
+    </div>
+  );
+}
+
 function EditSavedSearchModal(
   props: Pick<
     SearchPageViewProps,
@@ -1142,6 +1793,8 @@ function EditSavedSearchModal(
     | "setEditQuery"
     | "editSources"
     | "toggleEditSource"
+    | "editAlertsEnabled"
+    | "setEditAlertsEnabled"
     | "onSaveEdit"
   >,
 ) {
@@ -1210,6 +1863,25 @@ function EditSavedSearchModal(
               <p className="text-xs text-red-300">Select at least one source.</p>
             ) : null}
           </div>
+
+          <label className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2.5">
+            <div>
+              <p className="text-sm font-medium text-zinc-100">Saved search alerts</p>
+              <p className="text-xs text-zinc-500">Let me know when new listings appear for this search.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => props.setEditAlertsEnabled((prev) => !prev)}
+              className={cn(
+                "inline-flex items-center rounded-full border px-3 py-1 text-xs transition",
+                props.editAlertsEnabled
+                  ? "border-emerald-300/30 bg-emerald-400/10 text-emerald-100"
+                  : "border-white/10 bg-white/[0.02] text-zinc-300",
+              )}
+            >
+              {props.editAlertsEnabled ? "Enabled" : "Disabled"}
+            </button>
+          </label>
 
           <div className="flex items-center justify-end gap-2">
             <button
@@ -1292,15 +1964,28 @@ function SourceChip({
   className?: string;
 }) {
   const tone = getSourceChipTone(source);
-  const content = (
+  const label = formatSourceLabel(source) || source;
+  const logo = getMarketplaceLogoMeta(source);
+  const content = logo ? (
+    <Image
+      src={logo.src}
+      alt={logo.alt}
+      width={logo.width}
+      height={logo.height}
+      className={cn(
+        "w-auto shrink-0",
+        compact ? logo.compactChipClassName : logo.chipClassName,
+      )}
+    />
+  ) : (
     <>
       <span className={cn("size-1.5 rounded-full", tone.dot)} />
-      <span>{formatSourceLabel(source) || source}</span>
+      <span>{label}</span>
     </>
   );
 
   const classes = cn(
-    "inline-flex items-center gap-2 rounded-full border font-medium transition",
+    "inline-flex items-center justify-center gap-2 rounded-full border font-medium transition",
     compact ? "px-2.5 py-1 text-[11px]" : "px-3 py-1.5 text-sm",
     className,
   );
@@ -1310,6 +1995,8 @@ function SourceChip({
       <button
         type="button"
         onClick={onClick}
+        aria-label={label}
+        title={label}
         className={cn(
           classes,
           selected
@@ -1322,7 +2009,11 @@ function SourceChip({
     );
   }
 
-  return <span className={cn(classes, tone.border, tone.bg, tone.text)}>{content}</span>;
+  return (
+    <span className={cn(classes, tone.border, tone.bg, tone.text)} title={label}>
+      {content}
+    </span>
+  );
 }
 
 function getMarketplaceLogoMeta(source: string): {
@@ -1330,7 +2021,9 @@ function getMarketplaceLogoMeta(source: string): {
   alt: string;
   width: number;
   height: number;
-  className?: string;
+  chipClassName?: string;
+  compactChipClassName?: string;
+  badgeClassName?: string;
 } | null {
   const normalized = source.toLowerCase();
 
@@ -1340,7 +2033,9 @@ function getMarketplaceLogoMeta(source: string): {
       alt: "Facebook Marketplace",
       width: 190,
       height: 36,
-      className: "h-3.5",
+      chipClassName: "h-3.5 max-w-[74px]",
+      compactChipClassName: "h-3 max-w-[64px]",
+      badgeClassName: "h-3.5 max-w-[84px]",
     };
   }
 
@@ -1350,7 +2045,9 @@ function getMarketplaceLogoMeta(source: string): {
       alt: "eBay",
       width: 150,
       height: 44,
-      className: "h-3.5",
+      chipClassName: "h-3.5 max-w-[52px]",
+      compactChipClassName: "h-3 max-w-[44px]",
+      badgeClassName: "h-3.5 max-w-[60px]",
     };
   }
 
@@ -1360,7 +2057,9 @@ function getMarketplaceLogoMeta(source: string): {
       alt: "Kijiji",
       width: 360,
       height: 120,
-      className: "h-4",
+      chipClassName: "h-4 max-w-[48px]",
+      compactChipClassName: "h-3.5 max-w-[42px]",
+      badgeClassName: "h-4 max-w-[84px]",
     };
   }
 
@@ -1387,104 +2086,737 @@ function MarketplaceSourceBadge({ source }: { source: string }) {
         alt={logo.alt}
         width={logo.width}
         height={logo.height}
-        className={cn("w-auto max-w-[84px] opacity-95", logo.className)}
+        className={cn("w-auto opacity-95", logo.badgeClassName)}
       />
     </span>
   );
 }
 
-function MarketplaceResultCard({
+function InsightPill({
+  label,
+  tone,
+}: {
+  label: string;
+  tone: "emerald" | "amber" | "red" | "slate";
+}) {
+  const toneClasses = {
+    emerald: "border-emerald-300/25 bg-emerald-400/10 text-emerald-100",
+    amber: "border-amber-300/25 bg-amber-300/10 text-amber-100",
+    red: "border-red-300/25 bg-red-400/10 text-red-100",
+    slate: "border-white/10 bg-white/[0.03] text-zinc-300",
+  }[tone];
+
+  return (
+    <span className={cn("rounded-full border px-2 py-0.5 text-[10px] font-medium", toneClasses)}>
+      {label}
+    </span>
+  );
+}
+
+function valuationTone(valuation?: Valuation | null): "emerald" | "amber" | "red" | "slate" {
+  if (!valuation) return "slate";
+  if (valuation.verdict === "underpriced") return "emerald";
+  if (valuation.verdict === "overpriced") return "red";
+  if (valuation.verdict === "fair") return "amber";
+  return "slate";
+}
+
+function hasValuationBand(valuation?: Valuation | null) {
+  return valuation?.estimated_low != null && valuation?.estimated_high != null;
+}
+
+function valuationLabel(valuation?: Valuation | null) {
+  if (!valuation) return null;
+  if (valuation.verdict === "insufficient_data") {
+    return hasValuationBand(valuation) ? "Value: rough estimate" : "Value: pending";
+  }
+  return `Value: ${valuation.verdict.replace("_", " ")}`;
+}
+
+function formatDistanceKm(distanceKm?: number | null, approximate = false) {
+  if (typeof distanceKm !== "number" || !Number.isFinite(distanceKm)) return null;
+  if (distanceKm < 10) {
+    const preciseDistanceKm = Number(distanceKm.toFixed(1));
+    if (preciseDistanceKm === 0) return "Nearby";
+    return `${approximate ? "~" : ""}${preciseDistanceKm.toFixed(1)} km away`;
+  }
+  return `${approximate ? "~" : ""}${Math.round(distanceKm)} km away`;
+}
+
+function ListingCardBody({
   item,
-  deviceCoords,
+  titleClassName,
 }: {
   item: Listing;
-  deviceCoords: Coordinates | null;
+  titleClassName?: string;
 }) {
   const imageUrl = item.image_urls?.[0];
-  const listingCoords = deviceCoords ? getListingCoordinates(item) : null;
-  const distanceMiles =
-    deviceCoords && listingCoords ? haversineMiles(deviceCoords, listingCoords) : null;
-  const distanceLabel = distanceMiles !== null ? formatDistanceMiles(distanceMiles) : null;
+  const distanceLabel = formatDistanceKm(item.distance_km, item.distance_is_approximate);
+
+  return (
+    <>
+      <div className="relative aspect-[5/4] shrink-0 overflow-hidden bg-zinc-900">
+        {imageUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={imageUrl}
+            alt={item.title}
+            className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.03]"
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-xs text-zinc-500">
+            No image
+          </div>
+        )}
+
+        <div className="absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-2.5">
+          <MarketplaceSourceBadge source={item.source} />
+        </div>
+      </div>
+
+      <div className="flex min-h-[196px] flex-1 flex-col gap-2 overflow-hidden p-3.5">
+        <div className="flex items-start justify-between gap-2">
+          <p className="text-base font-semibold tracking-tight text-white">{formatPrice(item.price)}</p>
+          {distanceLabel ? (
+            <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[10px] text-zinc-300">
+              {distanceLabel}
+            </span>
+          ) : null}
+        </div>
+
+        <p
+          className={cn(
+            "line-clamp-2 text-sm font-medium leading-snug text-zinc-100 transition group-hover:text-white",
+            titleClassName,
+          )}
+        >
+          {item.title}
+        </p>
+
+        <p className="line-clamp-1 text-xs text-zinc-400">
+          {item.location || `${formatSourceLabel(item.source)} listing`}
+        </p>
+
+        <div className="flex flex-wrap gap-1.5">
+          {item.valuation ? (
+            <InsightPill
+              label={valuationLabel(item.valuation) ?? "Value: pending"}
+              tone={valuationTone(item.valuation)}
+            />
+          ) : null}
+        </div>
+
+        <div className="mt-auto space-y-1">
+          {typeof item.score === "number" ? (
+            <p className="text-[11px] text-zinc-500">Score {item.score.toFixed(2)}</p>
+          ) : null}
+          {item.valuation?.explanation ? (
+            <p className="line-clamp-2 text-xs leading-relaxed text-zinc-400">
+              {item.valuation.explanation}
+              {item.valuation.estimated_low != null && item.valuation.estimated_high != null
+                ? ` | ${formatMoneyCompact(item.valuation.estimated_low, item.valuation.currency)}-${formatMoneyCompact(item.valuation.estimated_high, item.valuation.currency)}`
+                : ""}
+            </p>
+          ) : null}
+          {item.condition ? (
+            <p className="line-clamp-1 text-[11px] uppercase tracking-[0.12em] text-zinc-500">
+              {item.condition}
+            </p>
+          ) : null}
+          {item.snippet ? (
+            <p className="line-clamp-2 text-xs leading-relaxed text-zinc-500">{item.snippet}</p>
+          ) : null}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function MarketplaceResultCard({
+  item,
+  selectionMode,
+  copilotSelected,
+  onToggleSelection,
+}: {
+  item: Listing;
+  selectionMode: boolean;
+  copilotSelected: boolean;
+  onToggleSelection: (item: Listing) => void;
+}) {
+  const content = <ListingCardBody item={item} />;
 
   return (
     <li className="h-full">
-      <a
-        href={item.url}
-        target="_blank"
-        rel="noreferrer"
-        className="group flex h-full flex-col overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/85 transition hover:-translate-y-0.5 hover:border-white/20 hover:bg-zinc-950"
+      <article
+        className={cn(
+          "group flex h-full flex-col overflow-hidden rounded-2xl border bg-zinc-950/85 transition hover:-translate-y-0.5 hover:border-white/20 hover:bg-zinc-950",
+          copilotSelected
+            ? "border-emerald-300/50 shadow-[0_0_0_1px_rgba(110,231,183,0.35)_inset]"
+            : "border-white/10",
+        )}
       >
-        <div className="relative aspect-[5/4] shrink-0 overflow-hidden bg-zinc-900">
-          {imageUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={imageUrl}
-              alt={item.title}
-              className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.03]"
-            />
-          ) : (
-            <div className="flex h-full w-full items-center justify-center text-xs text-zinc-500">
-              No image
-            </div>
-          )}
-
-          <div className="absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-2.5">
-            <MarketplaceSourceBadge source={item.source} />
-          </div>
-        </div>
-
-        <div className="flex h-[196px] flex-col gap-2 overflow-hidden p-3.5">
-          <div className="flex items-start justify-between gap-2">
-            <p className="text-base font-semibold tracking-tight text-white">{formatPrice(item.price)}</p>
-            {distanceLabel ? (
-              <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[10px] text-zinc-300">
-                {distanceLabel}
-              </span>
-            ) : null}
-          </div>
-
-          <p className="line-clamp-2 text-sm font-medium leading-snug text-zinc-100 transition group-hover:text-white">
-            {item.title}
-          </p>
-
-          <p className="line-clamp-1 text-xs text-zinc-400">
-            {item.location || `${formatSourceLabel(item.source)} listing`}
-          </p>
-
-          <div className="mt-auto space-y-1">
-            {typeof item.score === "number" ? (
-              <p className="text-[11px] text-zinc-500">Score {item.score.toFixed(2)}</p>
-            ) : null}
-            {item.condition ? (
-              <p className="line-clamp-1 text-[11px] uppercase tracking-[0.12em] text-zinc-500">
-                {item.condition}
-              </p>
-            ) : null}
-            {item.snippet ? (
-              <p className="line-clamp-2 text-xs leading-relaxed text-zinc-500">{item.snippet}</p>
-            ) : null}
-          </div>
-        </div>
-      </a>
+        {selectionMode ? (
+          <button
+            type="button"
+            onClick={() => onToggleSelection(item)}
+            className="flex flex-1 flex-col text-left"
+            aria-pressed={copilotSelected}
+          >
+            {content}
+          </button>
+        ) : (
+          <a href={item.url} target="_blank" rel="noreferrer" className="flex flex-1 flex-col">
+            {content}
+          </a>
+        )}
+      </article>
     </li>
   );
 }
 
-function getListingCoordinates(listing: Listing): Coordinates | null {
-  if (typeof listing.latitude !== "number" || typeof listing.longitude !== "number") {
+function CopilotShortlistCard({
+  item,
+  reason,
+  selectionMode,
+  copilotSelected,
+  onToggleSelection,
+}: {
+  item: Listing;
+  reason: string;
+  selectionMode: boolean;
+  copilotSelected: boolean;
+  onToggleSelection: (item: Listing) => void;
+}) {
+  const body = (
+    <div className="flex flex-1 flex-col">
+      <ListingCardBody item={item} titleClassName="text-[15px]" />
+    </div>
+  );
+
+  return (
+    <li className="h-full">
+      <article
+        className={cn(
+          "group flex h-full flex-col overflow-hidden rounded-2xl border bg-zinc-950/85 transition hover:border-white/20 hover:bg-zinc-950",
+          copilotSelected
+            ? "border-emerald-300/50 shadow-[0_0_0_1px_rgba(110,231,183,0.35)_inset]"
+            : "border-white/10",
+        )}
+      >
+        {selectionMode ? (
+          <button
+            type="button"
+            onClick={() => onToggleSelection(item)}
+            className="flex flex-1 flex-col text-left"
+            aria-pressed={copilotSelected}
+          >
+            {body}
+          </button>
+        ) : (
+          body
+        )}
+
+        <div className="space-y-3 border-t border-white/10 p-3">
+          <p className="text-xs leading-relaxed text-zinc-300">{reason}</p>
+          <div className="grid grid-cols-1 gap-2">
+            <a
+              href={item.url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2 text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05]"
+            >
+              <ArrowUpRight className="size-4" />
+              Open listing
+            </a>
+          </div>
+        </div>
+      </article>
+    </li>
+  );
+}
+
+function CopilotTranscriptMessage({ message }: { message: CopilotMessage }) {
+  if (message.role === "user") {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[88%] whitespace-pre-wrap rounded-2xl bg-white px-4 py-3 text-sm text-black">
+          {message.content}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+      <div className="text-sm leading-relaxed text-zinc-100">
+        <ReactMarkdown
+          components={COPILOT_MARKDOWN_COMPONENTS}
+          remarkPlugins={[remarkGfm, remarkBreaks]}
+        >
+          {(message.answer ?? message.content).replace(/\r\n/g, "\n")}
+        </ReactMarkdown>
+      </div>
+      {message.seller_questions && message.seller_questions.length > 0 ? (
+        <div className="mt-3">
+          <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-500">
+            Seller questions
+          </p>
+          <ul className="mt-2 space-y-1.5 text-sm text-zinc-300">
+            {message.seller_questions.map((entry) => (
+              <li key={entry}>- {entry}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {message.red_flags && message.red_flags.length > 0 ? (
+        <div className="mt-3">
+          <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-500">
+            Red flags
+          </p>
+          <ul className="mt-2 space-y-1.5 text-sm text-zinc-300">
+            {message.red_flags.map((entry) => (
+              <li key={entry}>- {entry}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {!message.available && message.error_message ? (
+        <p className="mt-3 text-xs text-zinc-500">{message.error_message}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function CopilotSelectedListingCard({
+  item,
+  onRemove,
+}: {
+  item: Listing;
+  onRemove: (listingKey: string) => void;
+}) {
+  return (
+    <li className="rounded-2xl border border-white/10 bg-white/[0.02] p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-zinc-100">{item.title}</p>
+          <p className="mt-1 text-xs text-zinc-500">
+            {formatSourceLabel(item.source)} | {formatPrice(item.price)}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => onRemove(getListingKey(item))}
+          className="rounded-full border border-white/10 bg-white/[0.02] p-1.5 text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05]"
+          aria-label={`Remove ${item.title} from copilot selection`}
+        >
+          <X className="size-3.5" />
+        </button>
+      </div>
+    </li>
+  );
+}
+
+function CopilotWindow({
+  activeQuery,
+  filteredResults,
+  copilotOpen,
+  closeCopilot,
+  copilotQuestion,
+  setCopilotQuestion,
+  copilotLoading,
+  copilotError,
+  copilotMessages,
+  latestShortlist,
+  copilotSelectionMode,
+  toggleCopilotSelectionMode,
+  copilotSelectedListingKeys,
+  clearCopilotSelection,
+  removeListingFromCopilotSelection,
+  resetCopilotConversation,
+  onToggleListingSelection,
+  copilotWindowRect,
+  onCopilotWindowDragStart,
+  onCopilotResizeStart,
+  onAskCopilot,
+}: Pick<
+  SearchPageViewProps,
+  | "activeQuery"
+  | "filteredResults"
+  | "copilotOpen"
+  | "closeCopilot"
+  | "copilotQuestion"
+  | "setCopilotQuestion"
+  | "copilotLoading"
+  | "copilotError"
+  | "copilotMessages"
+  | "latestShortlist"
+  | "copilotSelectionMode"
+  | "toggleCopilotSelectionMode"
+  | "copilotSelectedListingKeys"
+  | "clearCopilotSelection"
+  | "removeListingFromCopilotSelection"
+  | "resetCopilotConversation"
+  | "onToggleListingSelection"
+  | "copilotWindowRect"
+  | "onCopilotWindowDragStart"
+  | "onCopilotResizeStart"
+  | "onAskCopilot"
+>) {
+  const listingMap = useMemo(
+    () => new Map(filteredResults.map((item) => [getListingKey(item), item])),
+    [filteredResults],
+  );
+  const scrollContentRef = useRef<HTMLDivElement | null>(null);
+  const hasListings = filteredResults.length > 0;
+  const selectedListings = useMemo(
+    () =>
+      copilotSelectedListingKeys
+        .map((listingKey) => listingMap.get(listingKey) ?? null)
+        .filter((item): item is Listing => item !== null),
+    [copilotSelectedListingKeys, listingMap],
+  );
+  const hasSelectedListings = selectedListings.length > 0;
+  const selectedListingKeySet = useMemo(
+    () => new Set(copilotSelectedListingKeys),
+    [copilotSelectedListingKeys],
+  );
+  const itemLabel = (() => {
+    const trimmed = activeQuery.trim();
+    if (!trimmed || trimmed.toLowerCase() === "saved searches") {
+      return "this item";
+    }
+    return trimmed;
+  })();
+  const presets = hasListings || hasSelectedListings
+    ? [
+        "Which is the best value?",
+        "What should I ask the seller?",
+        "What are the red flags?",
+      ]
+    : [
+        itemLabel === "this item"
+          ? "What should I know before buying this item?"
+          : `What should I know before buying ${itemLabel}?`,
+        itemLabel === "this item"
+          ? "What are the common issues to watch out for?"
+          : `What are the common issues with ${itemLabel}?`,
+        itemLabel === "this item"
+          ? "What should I ask before buying one?"
+          : `What should I ask before buying ${itemLabel}?`,
+      ];
+  const [showPresetPrompts, setShowPresetPrompts] = useState(true);
+  const [isDesktop, setIsDesktop] = useState(false);
+
+  useEffect(() => {
+    const media = window.matchMedia(`(min-width: ${COPILOT_DESKTOP_BREAKPOINT}px)`);
+    const sync = () => setIsDesktop(media.matches);
+    sync();
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
+
+  useEffect(() => {
+    if (!scrollContentRef.current) return;
+    scrollContentRef.current.scrollTop = scrollContentRef.current.scrollHeight;
+  }, [copilotLoading, copilotMessages, copilotSelectedListingKeys.length, latestShortlist]);
+
+  const handleAskCopilot = useCallback(
+    (questionOverride?: string) => {
+      const question = (questionOverride ?? copilotQuestion).trim();
+      if (question) {
+        setShowPresetPrompts(false);
+      }
+      void onAskCopilot(questionOverride);
+    },
+    [copilotQuestion, onAskCopilot],
+  );
+
+  const handleResetCopilotConversation = useCallback(() => {
+    setShowPresetPrompts(true);
+    resetCopilotConversation();
+  }, [resetCopilotConversation]);
+
+  if (!copilotOpen) {
     return null;
   }
 
-  return {
-    latitude: listing.latitude,
-    longitude: listing.longitude,
-  };
-}
+  return (
+    <div className="pointer-events-none fixed inset-0 z-50">
+      <div
+        className={cn(
+          "pointer-events-auto absolute flex flex-col",
+          isDesktop ? "" : "inset-4 sm:inset-6",
+        )}
+        style={
+          isDesktop
+            ? {
+                width: copilotWindowRect.width,
+                height: copilotWindowRect.height,
+                left: copilotWindowRect.x,
+                top: copilotWindowRect.y,
+              }
+            : undefined
+        }
+      >
+        <GlassPanel className="relative flex h-full w-full min-h-0 flex-col overflow-hidden">
+          <div className="border-b border-white/10 px-4 py-3">
+            <div
+              className={cn(
+                "space-y-3",
+                isDesktop ? "cursor-move select-none" : "",
+              )}
+              onPointerDown={isDesktop ? onCopilotWindowDragStart : undefined}
+            >
+              <div className="flex min-w-0 items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="rounded-full border border-white/10 bg-white/[0.02] p-2 text-zinc-300">
+                    <Bot className="size-4" />
+                  </div>
+                  <p className="font-mono text-xs uppercase tracking-[0.18em] text-zinc-500">Copilot</p>
+                </div>
+                <button
+                  type="button"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={closeCopilot}
+                  className="shrink-0 rounded-full border border-white/10 bg-white/[0.02] p-2 text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05]"
+                  aria-label="Close copilot"
+                >
+                  <X className="size-4" />
+                </button>
+              </div>
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={toggleCopilotSelectionMode}
+                  className={cn(
+                    "inline-flex whitespace-nowrap rounded-full border px-3 py-2 text-xs font-medium uppercase tracking-[0.14em] transition",
+                    copilotSelectionMode
+                      ? "border-emerald-300/30 bg-emerald-400/10 text-emerald-100"
+                      : "border-white/10 bg-white/[0.02] text-zinc-300 hover:border-white/20 hover:bg-white/[0.05]",
+                  )}
+                >
+                  {copilotSelectionMode ? "Selecting listings" : "Select listings"}
+                </button>
+                <button
+                  type="button"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={handleResetCopilotConversation}
+                  className="inline-flex items-center gap-2 whitespace-nowrap rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05]"
+                >
+                  <RefreshCw className="size-3.5" />
+                  New chat
+                </button>
+              </div>
+            </div>
+          </div>
 
-function formatDistanceMiles(distanceMiles: number) {
-  if (!Number.isFinite(distanceMiles)) return null;
-  if (distanceMiles < 10) return `${distanceMiles.toFixed(1)} mi away`;
-  return `${Math.round(distanceMiles)} mi away`;
+          <div
+            ref={scrollContentRef}
+            className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4"
+          >
+            <div className="space-y-3">
+              {copilotMessages.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.02] p-4">
+                  <p className="text-sm text-zinc-200">How can I help you today?</p>
+                  <p className="mt-2 text-sm text-zinc-400">
+                    Ask about any marketplace item, and when listings are loaded I can use them as live context for comparisons and listing-specific advice.
+                  </p>
+                </div>
+              ) : (
+                copilotMessages.map((message) => (
+                  <CopilotTranscriptMessage key={message.id} message={message} />
+                ))
+              )}
+
+              {copilotLoading ? (
+                <div className="inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-300">
+                  <Loader2 className="size-4 animate-spin" />
+                  Thinking...
+                </div>
+              ) : null}
+            </div>
+
+            {(copilotSelectionMode || hasSelectedListings) && (
+              <div className="rounded-2xl border border-white/10 bg-black/30 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">
+                      Selected listings
+                    </p>
+                    <p className="mt-1 text-xs text-zinc-400">
+                      {hasSelectedListings
+                        ? `${selectedListings.length} listing${selectedListings.length === 1 ? "" : "s"} will be used for the next copilot answer.`
+                        : "Selection mode is on. Click result cards to add listings."}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={clearCopilotSelection}
+                    disabled={!hasSelectedListings}
+                    className="rounded-full border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Clear all
+                  </button>
+                </div>
+                {hasSelectedListings ? (
+                  <ul className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    {selectedListings.map((item) => (
+                      <CopilotSelectedListingCard
+                        key={getListingKey(item)}
+                        item={item}
+                        onRemove={removeListingFromCopilotSelection}
+                      />
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            )}
+
+            {latestShortlist.length > 0 ? (
+              <div className="rounded-2xl border border-white/10 bg-black/30 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">Shortlist</p>
+                  <span className="text-xs text-zinc-500">
+                    {`${latestShortlist.length} listing${latestShortlist.length === 1 ? "" : "s"}`}
+                  </span>
+                </div>
+                <ul className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
+                  {latestShortlist.map((entry) => {
+                    const linkedListing = listingMap.get(entry.listing_key);
+                    if (!linkedListing) {
+                      return (
+                        <li
+                          key={entry.listing_key}
+                          className="rounded-2xl border border-white/10 bg-white/[0.02] p-3 text-sm text-zinc-300"
+                        >
+                          <p className="font-medium text-zinc-100">{entry.title}</p>
+                          <p className="mt-1 text-xs text-zinc-400">{entry.reason}</p>
+                        </li>
+                      );
+                    }
+
+                    return (
+                      <CopilotShortlistCard
+                        key={entry.listing_key}
+                        item={linkedListing}
+                        reason={entry.reason}
+                        selectionMode={copilotSelectionMode}
+                        copilotSelected={selectedListingKeySet.has(entry.listing_key)}
+                        onToggleSelection={onToggleListingSelection}
+                      />
+                    );
+                  })}
+                </ul>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="space-y-3 border-t border-white/10 bg-black/20 px-4 py-4">
+            {showPresetPrompts ? (
+              <div className="flex flex-wrap gap-2">
+                {presets.map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    className="rounded-full border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
+                    onClick={() => handleAskCopilot(preset)}
+                    disabled={copilotLoading}
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+
+            <div className="space-y-2">
+              <textarea
+                className="min-h-[112px] w-full rounded-2xl border border-white/10 bg-black/30 px-3 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-white/20 focus:outline-none"
+                placeholder={
+                  hasSelectedListings
+                    ? "Ask about the selected listings or the item itself..."
+                    : hasListings
+                      ? "Ask about this item or the current listings..."
+                      : "Ask about any marketplace item..."
+                }
+                value={copilotQuestion}
+                onChange={(event) => setCopilotQuestion(event.target.value)}
+              />
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-xs text-zinc-500">
+                  {hasSelectedListings
+                    ? `Uses ${Math.min(selectedListings.length, 25)} selected listing${selectedListings.length === 1 ? "" : "s"} from this search as live context.`
+                    : hasListings
+                      ? `Uses the top ${Math.min(filteredResults.length, 25)} visible listings from this search as live context.`
+                      : "No listings are loaded yet. Ask about any marketplace item, or run a search to include live listings."}
+                </p>
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-2 rounded-xl bg-white px-4 py-2 text-sm font-medium text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={() => handleAskCopilot()}
+                  disabled={copilotLoading || !copilotQuestion.trim()}
+                >
+                  {copilotLoading ? <Loader2 className="size-4 animate-spin" /> : <Bot className="size-4" />}
+                  {copilotLoading ? "Thinking..." : "Ask copilot"}
+                </button>
+              </div>
+            </div>
+
+            {copilotError ? (
+              <div className="rounded-xl border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-100">
+                {copilotError}
+              </div>
+            ) : null}
+          </div>
+        </GlassPanel>
+
+        {isDesktop && (
+          <>
+            <div
+              className="absolute inset-y-0 -left-2 hidden w-4 cursor-ew-resize lg:block"
+              onPointerDown={(event) => onCopilotResizeStart("w", event)}
+              role="presentation"
+            />
+            <div
+              className="absolute inset-y-0 -right-2 hidden w-4 cursor-ew-resize lg:block"
+              onPointerDown={(event) => onCopilotResizeStart("e", event)}
+              role="presentation"
+            />
+            <div
+              className="absolute inset-x-0 -top-2 hidden h-4 cursor-ns-resize lg:block"
+              onPointerDown={(event) => onCopilotResizeStart("n", event)}
+              role="presentation"
+            />
+            <div
+              className="absolute inset-x-0 -bottom-2 hidden h-4 cursor-ns-resize lg:block"
+              onPointerDown={(event) => onCopilotResizeStart("s", event)}
+              role="presentation"
+            />
+            <div
+              className="absolute -left-2 -top-2 hidden size-4 cursor-nwse-resize lg:block"
+              onPointerDown={(event) => onCopilotResizeStart("nw", event)}
+              role="presentation"
+            />
+            <div
+              className="absolute -right-2 -top-2 hidden size-4 cursor-nesw-resize lg:block"
+              onPointerDown={(event) => onCopilotResizeStart("ne", event)}
+              role="presentation"
+            />
+            <div
+              className="absolute -left-2 -bottom-2 hidden size-4 cursor-nesw-resize lg:block"
+              onPointerDown={(event) => onCopilotResizeStart("sw", event)}
+              role="presentation"
+            />
+            <div
+              className="absolute -bottom-2 -right-2 hidden size-4 cursor-nwse-resize lg:block"
+              onPointerDown={(event) => onCopilotResizeStart("se", event)}
+              role="presentation"
+            />
+          </>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default function HomePage() {
@@ -1517,19 +2849,44 @@ export default function HomePage() {
   const [saved, setSaved] = useState<SavedSearch[]>([]);
   const [savedLoading, setSavedLoading] = useState(false);
   const [savedError, setSavedError] = useState<string | null>(null);
+  const [notifications, setNotifications] = useState<SavedSearchNotification[]>([]);
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
+  const [notificationsError, setNotificationsError] = useState<string | null>(null);
   const [activeSavedSearchId, setActiveSavedSearchId] = useState<number | null>(null);
-  const [locationFilterText, setLocationFilterText] = useState("");
-  const [travelRangeMilesInput, setTravelRangeMilesInput] = useState("");
-  const [deviceCoords, setDeviceCoords] = useState<Coordinates | null>(null);
-  const [locatingDevice, setLocatingDevice] = useState(false);
-  const [locationFilterError, setLocationFilterError] = useState<string | null>(null);
-  const [hideUnknownDistance, setHideUnknownDistance] = useState(true);
+  const [locationProvince, setLocationProvince] = useState("");
+  const [locationCityInput, setLocationCityInput] = useState("");
+  const [currentLocation, setCurrentLocation] = useState<ResolvedLocation | null>(null);
+  const [locationPersistence, setLocationPersistence] = useState<LocationPersistence | null>(null);
+  const [locationSuggestions, setLocationSuggestions] = useState<LocationCitySuggestion[]>([]);
+  const [locationBusy, setLocationBusy] = useState(false);
+  const [locationError, setLocationError] = useState<string | null>(null);
+  const [locationHydrated, setLocationHydrated] = useState(false);
+  const [accountLocationReady, setAccountLocationReady] = useState(false);
 
   const [editing, setEditing] = useState<SavedSearch | null>(null);
   const [editQuery, setEditQuery] = useState("");
   const [editSources, setEditSources] = useState<SourceOption[]>([]);
+  const [editAlertsEnabled, setEditAlertsEnabled] = useState(true);
   const [editError, setEditError] = useState<string | null>(null);
   const [editSaving, setEditSaving] = useState(false);
+  const [copilotOpen, setCopilotOpen] = useState(false);
+  const [copilotQuestion, setCopilotQuestion] = useState("");
+  const [copilotLoading, setCopilotLoading] = useState(false);
+  const [copilotError, setCopilotError] = useState<string | null>(null);
+  const [copilotMessages, setCopilotMessages] = useState<CopilotMessage[]>([]);
+  const [latestShortlist, setLatestShortlist] = useState<CopilotShortlistItem[]>([]);
+  const [copilotSelectionMode, setCopilotSelectionMode] = useState(false);
+  const [copilotSelectedListingKeys, setCopilotSelectedListingKeys] = useState<string[]>([]);
+  const [copilotWindowRect, setCopilotWindowRect] = useState<CopilotWindowRect>({
+    width: COPILOT_WINDOW_WIDTH_DEFAULT,
+    height: COPILOT_WINDOW_HEIGHT_DEFAULT,
+    x: COPILOT_FLOATING_MARGIN,
+    y: COPILOT_FLOATING_MARGIN,
+  });
+  const [copilotLauncherPosition, setCopilotLauncherPosition] = useState<CopilotLauncherPosition>({
+    x: COPILOT_FLOATING_MARGIN,
+    y: COPILOT_FLOATING_MARGIN,
+  });
   const [facebookConfigStatus, setFacebookConfigStatus] = useState<FacebookConnectorStatus | null>(null);
   const [facebookConfigLoading, setFacebookConfigLoading] = useState(false);
   const [facebookConfigError, setFacebookConfigError] = useState<string | null>(null);
@@ -1539,10 +2896,14 @@ export default function HomePage() {
   const [facebookCookieJsonText, setFacebookCookieJsonText] = useState("");
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const currentLocationRef = useRef<ResolvedLocation | null>(null);
   const seenKeysRef = useRef<Set<string>>(new Set());
   const fetchInFlightRef = useRef(false);
   const autoLoadedSavedForUserRef = useRef<string | null>(null);
+  const initializedLocationUserRef = useRef<string | null>(null);
   const savedBatchLaneStartRef = useRef(0);
+  const copilotSessionVersionRef = useRef(0);
+  const copilotLauncherDragMovedRef = useRef(false);
 
   const savedBatchHasMore =
     resultMode === "saved_batch" &&
@@ -1551,16 +2912,102 @@ export default function HomePage() {
   const hasMore =
     hasSearched &&
     (resultMode === "saved_batch" ? savedBatchHasMore : nextOffset !== null);
-  const normalizedLocationFilterText = locationFilterText.trim().toLowerCase();
-  const parsedTravelRangeMiles = Number(travelRangeMilesInput);
-  const travelRangeMiles =
-    travelRangeMilesInput.trim() !== "" &&
-    Number.isFinite(parsedTravelRangeMiles) &&
-    parsedTravelRangeMiles > 0
-      ? parsedTravelRangeMiles
-      : null;
-  const distanceFilterActive = deviceCoords !== null && travelRangeMiles !== null;
-  const distanceFilterPendingLocation = deviceCoords === null && travelRangeMiles !== null;
+
+  useEffect(() => {
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const legacyWidth = Number(window.localStorage.getItem(COPILOT_WINDOW_WIDTH_STORAGE_KEY));
+
+    let nextRect = getDefaultCopilotWindowRect(
+      viewportWidth,
+      viewportHeight,
+      Number.isFinite(legacyWidth) ? legacyWidth : COPILOT_WINDOW_WIDTH_DEFAULT,
+    );
+    const storedRect = window.localStorage.getItem(COPILOT_WINDOW_RECT_STORAGE_KEY);
+    if (storedRect) {
+      try {
+        const parsed = JSON.parse(storedRect) as Partial<CopilotWindowRect>;
+        if (
+          typeof parsed.width === "number" &&
+          typeof parsed.height === "number" &&
+          typeof parsed.x === "number" &&
+          typeof parsed.y === "number"
+        ) {
+          nextRect = clampCopilotWindowRect(
+            {
+              width: parsed.width,
+              height: parsed.height,
+              x: parsed.x,
+              y: parsed.y,
+            },
+            viewportWidth,
+            viewportHeight,
+          );
+        }
+      } catch {
+        // Ignore invalid persisted state.
+      }
+    }
+    setCopilotWindowRect(nextRect);
+
+    let nextLauncherPosition = getDefaultCopilotLauncherPosition(viewportWidth, viewportHeight);
+    const storedLauncher = window.localStorage.getItem(COPILOT_LAUNCHER_POSITION_STORAGE_KEY);
+    if (storedLauncher) {
+      try {
+        const parsed = JSON.parse(storedLauncher) as Partial<CopilotLauncherPosition>;
+        if (typeof parsed.x === "number" && typeof parsed.y === "number") {
+          nextLauncherPosition = clampCopilotLauncherPosition(
+            { x: parsed.x, y: parsed.y },
+            viewportWidth,
+            viewportHeight,
+          );
+        }
+      } catch {
+        // Ignore invalid persisted state.
+      }
+    }
+    setCopilotLauncherPosition(nextLauncherPosition);
+  }, []);
+
+  useEffect(() => {
+    const storedLocation = readStoredResolvedLocation();
+    if (storedLocation) {
+      currentLocationRef.current = storedLocation;
+      setCurrentLocation(storedLocation);
+      setLocationPersistence("browser");
+      setLocationProvince(storedLocation.province_code);
+      setLocationCityInput(storedLocation.city);
+    }
+    setLocationHydrated(true);
+    setAccountLocationReady(false);
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(COPILOT_WINDOW_RECT_STORAGE_KEY, JSON.stringify(copilotWindowRect));
+  }, [copilotWindowRect]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      COPILOT_LAUNCHER_POSITION_STORAGE_KEY,
+      JSON.stringify(copilotLauncherPosition),
+    );
+  }, [copilotLauncherPosition]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      setCopilotWindowRect((prev) =>
+        clampCopilotWindowRect(prev, viewportWidth, viewportHeight),
+      );
+      setCopilotLauncherPosition((prev) =>
+        clampCopilotLauncherPosition(prev, viewportWidth, viewportHeight),
+      );
+    };
+
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   useEffect(() => {
     const delayMs = sortDebounceMs(rawResults.length);
@@ -1579,68 +3026,70 @@ export default function HomePage() {
     return () => window.clearTimeout(timeout);
   }, [rawResults, sortBy]);
 
-  const filteredResults = useMemo(() => {
-    return results.filter((item) => {
-      if (normalizedLocationFilterText) {
-        const listingLocation = (item.location ?? "").toLowerCase();
-        if (!listingLocation.includes(normalizedLocationFilterText)) {
-          return false;
-        }
-      }
+  const filteredResults = results;
 
-      if (distanceFilterActive && deviceCoords && travelRangeMiles !== null) {
-        const listingCoords = getListingCoordinates(item);
-        if (!listingCoords) {
-          return !hideUnknownDistance;
-        }
-
-        const distanceMiles = haversineMiles(deviceCoords, listingCoords);
-        if (!Number.isFinite(distanceMiles) || distanceMiles > travelRangeMiles) {
-          return false;
-        }
-      }
-
-      return true;
+  useEffect(() => {
+    const visibleKeys = new Set(filteredResults.map((item) => getListingKey(item)));
+    setCopilotSelectedListingKeys((prev) => {
+      const next = prev.filter((listingKey) => visibleKeys.has(listingKey));
+      return next.length === prev.length ? prev : next;
     });
-  }, [
-    deviceCoords,
-    distanceFilterActive,
-    hideUnknownDistance,
-    normalizedLocationFilterText,
-    results,
-    travelRangeMiles,
-  ]);
+  }, [filteredResults]);
 
-  const hasActiveClientFilters =
-    normalizedLocationFilterText.length > 0 || distanceFilterActive;
-  const filteredOutCount = Math.max(0, results.length - filteredResults.length);
+  const resetCopilotConversation = useCallback(() => {
+    copilotSessionVersionRef.current += 1;
+    setCopilotQuestion("");
+    setCopilotLoading(false);
+    setCopilotError(null);
+    setCopilotMessages([]);
+    setLatestShortlist([]);
+    setCopilotSelectionMode(false);
+    setCopilotSelectedListingKeys([]);
+  }, []);
+
+  const hasActiveClientFilters = currentLocation !== null;
+  const filteredOutCount = 0;
 
   const buildSearchUrl = useCallback(
     (
       query: string,
       selectedSources: SourceOption[],
+      selectedSort: SortOption,
       selectedLimit: number,
       offset: number,
     ) => {
+      const searchLocation = currentLocationRef.current;
       const params = new URLSearchParams();
       params.set("q", query);
       for (const source of selectedSources) {
         params.append("sources", source);
       }
-      params.set("sort", "relevance");
+      params.set("sort", selectedSort);
       params.set("limit", String(selectedLimit));
       params.set("offset", String(offset));
-      if (deviceCoords) {
-        params.set("latitude", String(deviceCoords.latitude));
-        params.set("longitude", String(deviceCoords.longitude));
-      }
-      if (travelRangeMiles !== null) {
-        params.set("radius_km", String(Math.max(1, Math.round(travelRangeMiles * 1.60934))));
+      if (searchLocation) {
+        params.set("latitude", String(searchLocation.latitude));
+        params.set("longitude", String(searchLocation.longitude));
       }
       return `${API_BASE}/search?${params.toString()}`;
     },
-    [API_BASE, deviceCoords, travelRangeMiles],
+    [API_BASE],
   );
+
+  const fetchWithRetry = useCallback(async (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    try {
+      return await fetch(input, init);
+    } catch (error: unknown) {
+      if (!isLikelyNetworkError(error)) {
+        throw error;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+      return fetch(input, init);
+    }
+  }, []);
 
   const runSearch = useCallback(
     async ({
@@ -1660,12 +3109,30 @@ export default function HomePage() {
     }) => {
       if (fetchInFlightRef.current) return;
       fetchInFlightRef.current = true;
+      const previousState = append
+        ? null
+        : {
+            rawResults,
+            results,
+            nextOffset,
+            total,
+            sourceErrors,
+            savedBatchPagination,
+            hasSearched,
+            resultMode,
+            activeQuery,
+            activeSources,
+            activeSort,
+            activeLimit,
+            seenKeys: new Set(seenKeysRef.current),
+          };
 
       if (append) {
         setLoadingMore(true);
       } else {
         setSearchLoading(true);
         setError(null);
+        setCopilotError(null);
         setRawResults([]);
         setResults([]);
         setNextOffset(null);
@@ -1676,8 +3143,8 @@ export default function HomePage() {
       }
 
       try {
-        const url = buildSearchUrl(query, sourceList, selectedLimit, offset);
-        const res = await fetch(url, {
+        const url = buildSearchUrl(query, sourceList, selectedSort, selectedLimit, offset);
+        const res = await fetchWithRetry(url, {
           cache: "no-store",
           headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
         });
@@ -1714,6 +3181,7 @@ export default function HomePage() {
           setRawResults((prev) => [...prev, ...dedupedIncoming]);
           setSourceErrors((prev) => ({ ...prev, ...incomingSourceErrors }));
         } else {
+          resetCopilotConversation();
           setRawResults(dedupedIncoming);
           setSourceErrors(incomingSourceErrors);
           setActiveQuery(query);
@@ -1736,6 +3204,21 @@ export default function HomePage() {
         }
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : "Unknown error");
+        if (previousState) {
+          setRawResults(previousState.rawResults);
+          setResults(previousState.results);
+          setNextOffset(previousState.nextOffset);
+          setTotal(previousState.total);
+          setSourceErrors(previousState.sourceErrors);
+          setSavedBatchPagination(previousState.savedBatchPagination);
+          setHasSearched(previousState.hasSearched);
+          setResultMode(previousState.resultMode);
+          setActiveQuery(previousState.activeQuery);
+          setActiveSources(previousState.activeSources);
+          setActiveSort(previousState.activeSort);
+          setActiveLimit(previousState.activeLimit);
+          seenKeysRef.current = previousState.seenKeys;
+        }
       } finally {
         if (append) {
           setLoadingMore(false);
@@ -1745,42 +3228,25 @@ export default function HomePage() {
         fetchInFlightRef.current = false;
       }
     },
-    [accessToken, buildSearchUrl],
+    [
+      accessToken,
+      activeLimit,
+      activeQuery,
+      activeSort,
+      activeSources,
+      buildSearchUrl,
+      fetchWithRetry,
+      hasSearched,
+      nextOffset,
+      rawResults,
+      resetCopilotConversation,
+      resultMode,
+      results,
+      savedBatchPagination,
+      sourceErrors,
+      total,
+    ],
   );
-
-  function onUseMyLocation() {
-    if (typeof navigator === "undefined" || !navigator.geolocation) {
-      setLocationFilterError("Browser location is not available.");
-      return;
-    }
-
-    setLocatingDevice(true);
-    setLocationFilterError(null);
-
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        setDeviceCoords({
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude,
-        });
-        setLocatingDevice(false);
-      },
-      (geoError) => {
-        setLocationFilterError(geoError.message || "Unable to get your location.");
-        setLocatingDevice(false);
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 10000,
-        maximumAge: 5 * 60 * 1000,
-      },
-    );
-  }
-
-  function onClearMyLocation() {
-    setDeviceCoords(null);
-    setLocationFilterError(null);
-  }
 
   const parseApiError = useCallback(async (res: Response, fallback: string) => {
     const text = await res.text();
@@ -1805,6 +3271,156 @@ export default function HomePage() {
     }
     return fallback;
   }, []);
+
+  const applyResolvedLocation = useCallback((location: ResolvedLocation | null) => {
+    currentLocationRef.current = location;
+    setCurrentLocation(location);
+    setLocationProvince(location?.province_code ?? "");
+    setLocationCityInput(location?.city ?? "");
+    writeStoredResolvedLocation(location);
+  }, []);
+
+  const resolveLocationPayload = useCallback(async (
+    payload: LocationResolveRequest,
+  ): Promise<ResolvedLocation> => {
+    const res = await fetchWithRetry(`${API_BASE}/location/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      throw new Error(await parseApiError(res, "Unable to resolve that Canadian location."));
+    }
+    return (await res.json()) as ResolvedLocation;
+  }, [API_BASE, fetchWithRetry, parseApiError]);
+
+  const fetchMyLocation = useCallback(async (): Promise<ResolvedLocation | null> => {
+    if (!accessToken) return null;
+    const res = await fetchWithRetry(`${API_BASE}/me/location`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      throw new Error(await parseApiError(res, "Failed to load your saved location."));
+    }
+    return (await res.json()) as ResolvedLocation | null;
+  }, [API_BASE, accessToken, fetchWithRetry, parseApiError]);
+
+  const syncLocationToAccount = useCallback(async (
+    location: ResolvedLocation | null,
+  ): Promise<ResolvedLocation | null> => {
+    if (!accessToken) return location;
+
+    if (location === null) {
+      const res = await fetchWithRetry(`${API_BASE}/me/location`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!res.ok) {
+        throw new Error(await parseApiError(res, "Failed to clear your account location."));
+      }
+      return null;
+    }
+
+    const res = await fetchWithRetry(`${API_BASE}/me/location`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(toLocationResolveRequest(location)),
+    });
+    if (!res.ok) {
+      throw new Error(await parseApiError(res, "Failed to save your account location."));
+    }
+    return (await res.json()) as ResolvedLocation;
+  }, [API_BASE, accessToken, fetchWithRetry, parseApiError]);
+
+  useEffect(() => {
+    if (!locationHydrated) return;
+    if (!locationProvince) {
+      setLocationSuggestions([]);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const params = new URLSearchParams();
+          params.set("province", locationProvince);
+          params.set("limit", "20");
+          if (locationCityInput.trim()) {
+            params.set("q", locationCityInput.trim());
+          }
+
+          const res = await fetch(`${API_BASE}/location/cities?${params.toString()}`, {
+            cache: "no-store",
+            signal: controller.signal,
+          });
+          if (!res.ok) {
+            throw new Error(await parseApiError(res, "Failed to load city suggestions."));
+          }
+          const payload = (await res.json()) as LocationCitySuggestion[];
+          setLocationSuggestions(payload);
+        } catch {
+          if (!controller.signal.aborted) {
+            setLocationSuggestions([]);
+          }
+        }
+      })();
+    }, 120);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timeout);
+    };
+  }, [API_BASE, locationCityInput, locationHydrated, locationProvince, parseApiError]);
+
+  useEffect(() => {
+    if (!locationHydrated) return;
+    if (!accessToken || !user?.id) {
+      initializedLocationUserRef.current = null;
+      setAccountLocationReady(true);
+      return;
+    }
+    if (initializedLocationUserRef.current === user.id) return;
+
+    initializedLocationUserRef.current = user.id;
+    setAccountLocationReady(false);
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const accountLocation = await fetchMyLocation();
+        if (cancelled) return;
+
+        if (accountLocation) {
+          applyResolvedLocation(accountLocation);
+          setLocationPersistence("account");
+          setLocationError(null);
+        }
+      } catch (error: unknown) {
+        if (!cancelled && !currentLocationRef.current) {
+          setLocationPersistence(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setAccountLocationReady(true);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    accessToken,
+    applyResolvedLocation,
+    fetchMyLocation,
+    locationHydrated,
+    user?.id,
+  ]);
 
   const fetchFacebookConfigStatus = useCallback(async (): Promise<FacebookConnectorStatus | null> => {
     if (!accessToken) {
@@ -1963,7 +3579,7 @@ export default function HomePage() {
         return [];
       }
 
-      const res = await fetch(`${API_BASE}/saved-searches`, {
+      const res = await fetchWithRetry(`${API_BASE}/saved-searches`, {
         headers: { Authorization: `Bearer ${accessToken}` },
         cache: "no-store",
       });
@@ -1984,31 +3600,67 @@ export default function HomePage() {
     }
   }
 
+  async function fetchNotifications(): Promise<SavedSearchNotification[] | null> {
+    setNotificationsLoading(true);
+    setNotificationsError(null);
+
+    try {
+      if (!accessToken) {
+        setNotifications([]);
+        return [];
+      }
+
+      const res = await fetchWithRetry(`${API_BASE}/me/notifications`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        cache: "no-store",
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`GET /me/notifications failed (${res.status}): ${text}`);
+      }
+
+      const json = (await res.json()) as SavedSearchNotification[];
+      setNotifications(json);
+      return json;
+    } catch (err: unknown) {
+      setNotificationsError(
+        normalizeNotificationError(
+          err,
+          "Unable to load saved search alerts right now. Please try again.",
+        ),
+      );
+      return null;
+    } finally {
+      setNotificationsLoading(false);
+    }
+  }
+
   const fetchSavedSearchPage = useCallback(async (
     entry: SavedSearch | SavedBatchPaginationEntry,
     {
       selectedLimit,
+      selectedSort,
       offset,
     }: {
       selectedLimit: number;
+      selectedSort: SortOption;
       offset: number;
     },
   ): Promise<SearchResponse> => {
     if (!accessToken) throw new Error("Please log in again.");
 
     const params = new URLSearchParams();
-    params.set("sort", "relevance");
+    params.set("sort", selectedSort);
     params.set("limit", String(selectedLimit));
     params.set("offset", String(offset));
-    if (deviceCoords) {
-      params.set("latitude", String(deviceCoords.latitude));
-      params.set("longitude", String(deviceCoords.longitude));
-    }
-    if (travelRangeMiles !== null) {
-      params.set("radius_km", String(Math.max(1, Math.round(travelRangeMiles * 1.60934))));
+    const searchLocation = currentLocationRef.current;
+    if (searchLocation) {
+      params.set("latitude", String(searchLocation.latitude));
+      params.set("longitude", String(searchLocation.longitude));
     }
 
-    const res = await fetch(`${API_BASE}/saved-searches/${entry.id}/run?${params.toString()}`, {
+    const res = await fetchWithRetry(`${API_BASE}/saved-searches/${entry.id}/run?${params.toString()}`, {
       headers: { Authorization: `Bearer ${accessToken}` },
       cache: "no-store",
     });
@@ -2019,7 +3671,7 @@ export default function HomePage() {
     }
 
     return (await res.json()) as SearchResponse;
-  }, [API_BASE, accessToken, deviceCoords, travelRangeMiles]);
+  }, [API_BASE, accessToken, fetchWithRetry]);
 
   const loadMoreSavedBatch = useCallback(async () => {
     if (
@@ -2040,41 +3692,36 @@ export default function HomePage() {
     setLoadingMore(true);
 
     try {
-      const requests = pendingEntries.map(async (entry) => ({
-        entryId: entry.id,
-        payload: await fetchSavedSearchPage(entry, {
-          selectedLimit: savedBatchPagination.selectedLimit,
-          offset: entry.nextOffset ?? 0,
-        }),
-      }));
-
-      const settled = await Promise.allSettled(requests);
       const failures: string[] = [];
       const mergedSourceErrors: Record<string, SourceErrorEntry> = {};
       const nextOffsetsById = new Map<number, number | null>();
       const dedupedIncoming: Listing[] = [];
       const incomingBuckets: SavedSearchResultBucket[] = [];
 
-      for (const outcome of settled) {
-        if (outcome.status === "rejected") {
-          failures.push(outcome.reason instanceof Error ? outcome.reason.message : "Unknown error");
-          continue;
-        }
+      for (const entry of pendingEntries) {
+        try {
+          const payload = await fetchSavedSearchPage(entry, {
+            selectedLimit: savedBatchPagination.selectedLimit,
+            selectedSort: savedBatchPagination.selectedSort,
+            offset: entry.nextOffset ?? 0,
+          });
+          nextOffsetsById.set(entry.id, payload.next_offset ?? null);
+          Object.assign(mergedSourceErrors, payload.source_errors ?? {});
 
-        const { entryId, payload } = outcome.value;
-        nextOffsetsById.set(entryId, payload.next_offset ?? null);
-        Object.assign(mergedSourceErrors, payload.source_errors ?? {});
-
-        const incomingItems = payload.results ?? [];
-        if (savedBatchPagination.selectedSort === "relevance") {
-          incomingBuckets.push({ items: incomingItems });
-        } else {
-          for (const item of incomingItems) {
-            const listingKey = getListingKey(item);
-            if (seenKeysRef.current.has(listingKey)) continue;
-            seenKeysRef.current.add(listingKey);
-            dedupedIncoming.push(item);
+          const incomingItems = payload.results ?? [];
+          if (savedBatchPagination.selectedSort === "relevance") {
+            incomingBuckets.push({ items: incomingItems });
+          } else {
+            for (const item of incomingItems) {
+              const listingKey = getListingKey(item);
+              if (seenKeysRef.current.has(listingKey)) continue;
+              seenKeysRef.current.add(listingKey);
+              dedupedIncoming.push(item);
+            }
           }
+        } catch (error: unknown) {
+          failures.push(error instanceof Error ? error.message : "Unknown error");
+          continue;
         }
       }
 
@@ -2089,7 +3736,7 @@ export default function HomePage() {
         savedBatchLaneStartRef.current = interleaved.nextLaneStart;
       }
 
-      if (settled.length > 0 && failures.length === settled.length) {
+      if (pendingEntries.length > 0 && failures.length === pendingEntries.length) {
         throw new Error(`Failed to load more saved-search results: ${failures[0]}`);
       }
 
@@ -2119,7 +3766,7 @@ export default function HomePage() {
       setTotal(batchHasMore ? null : results.length + dedupedIncoming.length);
 
       if (failures.length > 0) {
-        setError(`Some saved searches failed to load more (${failures.length}/${settled.length}).`);
+        setError(`Some saved searches failed to load more (${failures.length}/${pendingEntries.length}).`);
       } else {
         setError(null);
       }
@@ -2203,10 +3850,28 @@ export default function HomePage() {
   ) {
     if (!accessToken || savedSearches.length === 0 || fetchInFlightRef.current) return;
 
+    const previousState = {
+      rawResults,
+      results,
+      nextOffset,
+      total,
+      sourceErrors,
+      savedBatchPagination,
+      hasSearched,
+      resultMode,
+      activeSavedSearchId,
+      activeQuery,
+      activeSources,
+      activeSort,
+      activeLimit,
+      seenKeys: new Set(seenKeysRef.current),
+      laneStart: savedBatchLaneStartRef.current,
+    };
     fetchInFlightRef.current = true;
     setSearchLoading(true);
     setLoadingMore(false);
     setError(null);
+    resetCopilotConversation();
     setRawResults([]);
     setResults([]);
     setNextOffset(null);
@@ -2220,15 +3885,6 @@ export default function HomePage() {
     savedBatchLaneStartRef.current = seededLaneStart;
 
     try {
-      const requests = savedSearches.map(async (entry) => ({
-        entry,
-        payload: await fetchSavedSearchPage(entry, {
-          selectedLimit,
-          offset: 0,
-        }),
-      }));
-
-      const settled = await Promise.allSettled(requests);
       const dedupedResults: Listing[] = [];
       const mergedSourceErrors: Record<string, SourceErrorEntry> = {};
       const seenKeys = new Set<string>();
@@ -2236,33 +3892,37 @@ export default function HomePage() {
       const paginationEntries: SavedBatchPaginationEntry[] = [];
       const initialBuckets: SavedSearchResultBucket[] = [];
 
-      for (const outcome of settled) {
-        if (outcome.status === "rejected") {
-          failures.push(outcome.reason instanceof Error ? outcome.reason.message : "Unknown error");
+      for (const entry of savedSearches) {
+        try {
+          const payload = await fetchSavedSearchPage(entry, {
+            selectedLimit,
+            selectedSort,
+            offset: 0,
+          });
+          const normalizedSources = entry.sources.filter(isSourceOption);
+          paginationEntries.push({
+            id: entry.id,
+            query: entry.query,
+            sources: normalizedSources,
+            nextOffset: payload.next_offset ?? null,
+          });
+
+          const initialItems = payload.results ?? [];
+          initialBuckets.push({ items: initialItems });
+          if (selectedSort !== "relevance") {
+            for (const item of initialItems) {
+              const listingKey = getListingKey(item);
+              if (seenKeys.has(listingKey)) continue;
+              seenKeys.add(listingKey);
+              dedupedResults.push(item);
+            }
+          }
+
+          Object.assign(mergedSourceErrors, payload.source_errors ?? {});
+        } catch (error: unknown) {
+          failures.push(error instanceof Error ? error.message : "Unknown error");
           continue;
         }
-
-        const { entry, payload } = outcome.value;
-        const normalizedSources = entry.sources.filter(isSourceOption);
-        paginationEntries.push({
-          id: entry.id,
-          query: entry.query,
-          sources: normalizedSources,
-          nextOffset: payload.next_offset ?? null,
-        });
-
-        const initialItems = payload.results ?? [];
-        initialBuckets.push({ items: initialItems });
-        if (selectedSort !== "relevance") {
-          for (const item of initialItems) {
-            const listingKey = getListingKey(item);
-            if (seenKeys.has(listingKey)) continue;
-            seenKeys.add(listingKey);
-            dedupedResults.push(item);
-          }
-        }
-
-        Object.assign(mergedSourceErrors, payload.source_errors ?? {});
       }
 
       if (selectedSort === "relevance") {
@@ -2278,12 +3938,12 @@ export default function HomePage() {
         seenKeysRef.current = seenKeys;
       }
 
-      if (settled.length > 0 && failures.length === settled.length) {
+      if (savedSearches.length > 0 && failures.length === savedSearches.length) {
         throw new Error(`Failed to auto-load saved searches: ${failures[0]}`);
       }
 
       if (failures.length > 0) {
-        setError(`Some saved searches failed to load (${failures.length}/${settled.length}).`);
+        setError(`Some saved searches failed to load (${failures.length}/${savedSearches.length}).`);
       }
 
       setRawResults(dedupedResults);
@@ -2309,16 +3969,196 @@ export default function HomePage() {
       setHasSearched(true);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to auto-load saved searches");
+      if (previousState.hasSearched) {
+        setRawResults(previousState.rawResults);
+        setResults(previousState.results);
+        setNextOffset(previousState.nextOffset);
+        setTotal(previousState.total);
+        setSourceErrors(previousState.sourceErrors);
+        setSavedBatchPagination(previousState.savedBatchPagination);
+        setHasSearched(previousState.hasSearched);
+        setResultMode(previousState.resultMode);
+        setActiveSavedSearchId(previousState.activeSavedSearchId);
+        setActiveQuery(previousState.activeQuery);
+        setActiveSources(previousState.activeSources);
+        setActiveSort(previousState.activeSort);
+        setActiveLimit(previousState.activeLimit);
+        seenKeysRef.current = previousState.seenKeys;
+        savedBatchLaneStartRef.current = previousState.laneStart;
+      }
     } finally {
       setSearchLoading(false);
       fetchInFlightRef.current = false;
     }
   }
 
+  const rerunActiveSearchWithLocation = useCallback(async () => {
+    if (!hasSearched) return;
+
+    if (resultMode === "saved_batch") {
+      await runAllSavedSearches(saved, {
+        selectedSort: activeSort,
+        selectedLimit: activeLimit,
+      });
+      return;
+    }
+
+    const query = activeQuery.trim() || q.trim();
+    const sourceList = activeSources.length > 0 ? activeSources : sources;
+    if (!query || sourceList.length === 0) return;
+
+    await runSearch({
+      query,
+      sourceList,
+      selectedSort: activeSort,
+      selectedLimit: activeLimit,
+      offset: 0,
+      append: false,
+    });
+  }, [
+    activeLimit,
+    activeQuery,
+    activeSort,
+    activeSources,
+    hasSearched,
+    q,
+    resultMode,
+    runAllSavedSearches,
+    runSearch,
+    saved,
+    sources,
+  ]);
+
+  async function onApplyManualLocation() {
+    if (!locationProvince || !locationCityInput.trim()) {
+      setLocationError("Select a province and city in Canada.");
+      return;
+    }
+
+    setLocationBusy(true);
+    setLocationError(null);
+    try {
+      const resolved = await resolveLocationPayload({
+        city: locationCityInput.trim(),
+        province: locationProvince,
+      });
+      applyResolvedLocation(resolved);
+      setLocationPersistence("browser");
+
+      if (accessToken) {
+        try {
+          const syncedLocation = await syncLocationToAccount(resolved);
+          if (syncedLocation) {
+            applyResolvedLocation(syncedLocation);
+            setLocationPersistence("account");
+          }
+        } catch (error: unknown) {
+          setLocationError(
+            error instanceof Error
+              ? `${error.message} Using the browser-saved location for now.`
+              : "Failed to sync your account location. Using the browser-saved location for now.",
+          );
+        }
+      }
+
+      await rerunActiveSearchWithLocation();
+    } catch (error: unknown) {
+      setLocationError(
+        error instanceof Error ? error.message : "Unable to set that Canadian location.",
+      );
+    } finally {
+      setLocationBusy(false);
+    }
+  }
+
+  function onUseMyLocation() {
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      setLocationError("Browser location is not available.");
+      return;
+    }
+
+    setLocationBusy(true);
+    setLocationError(null);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        void (async () => {
+          try {
+            const resolved = await resolveLocationPayload({
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude,
+            });
+            applyResolvedLocation(resolved);
+            setLocationPersistence("browser");
+
+            if (accessToken) {
+              try {
+                const syncedLocation = await syncLocationToAccount(resolved);
+                if (syncedLocation) {
+                  applyResolvedLocation(syncedLocation);
+                  setLocationPersistence("account");
+                }
+              } catch (error: unknown) {
+                setLocationError(
+                  error instanceof Error
+                    ? `${error.message} Using the browser-saved location for now.`
+                    : "Failed to sync your account location. Using the browser-saved location for now.",
+                );
+              }
+            }
+
+            await rerunActiveSearchWithLocation();
+          } catch (error: unknown) {
+            setLocationError(
+              error instanceof Error ? error.message : "Unable to resolve your current location.",
+            );
+          } finally {
+            setLocationBusy(false);
+          }
+        })();
+      },
+      (geoError) => {
+        setLocationError(geoError.message || "Unable to get your current location.");
+        setLocationBusy(false);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 5 * 60 * 1000,
+      },
+    );
+  }
+
+  async function onClearLocation() {
+    setLocationBusy(true);
+    setLocationError(null);
+    try {
+      applyResolvedLocation(null);
+      setLocationPersistence(null);
+
+      if (accessToken) {
+        try {
+          await syncLocationToAccount(null);
+        } catch (error: unknown) {
+          setLocationError(
+            error instanceof Error
+              ? `${error.message} The location was cleared in this browser only.`
+              : "Failed to clear your account location. The location was cleared in this browser only.",
+          );
+        }
+      }
+
+      await rerunActiveSearchWithLocation();
+    } finally {
+      setLocationBusy(false);
+    }
+  }
+
   useEffect(() => {
+    if (!accountLocationReady) return;
     if (user) {
       void (async () => {
         const fetched = await fetchSavedSearches();
+        void fetchNotifications();
         if (!fetched) return;
 
         if (autoLoadedSavedForUserRef.current === user.id) return;
@@ -2331,9 +4171,10 @@ export default function HomePage() {
     } else {
       autoLoadedSavedForUserRef.current = null;
       setSaved([]);
+      setNotifications([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user, accessToken]);
+  }, [accessToken, accountLocationReady, user]);
 
   async function onSearch(e: React.FormEvent) {
     e.preventDefault();
@@ -2362,6 +4203,7 @@ export default function HomePage() {
       const payload = {
         query: q.trim(),
         sources,
+        alerts_enabled: true,
       };
 
       const res = await fetch(`${API_BASE}/saved-searches`, {
@@ -2379,6 +4221,7 @@ export default function HomePage() {
       }
 
       await fetchSavedSearches();
+      await fetchNotifications();
     } catch (err: unknown) {
       setSavedError(err instanceof Error ? err.message : "Failed to save search");
     }
@@ -2400,12 +4243,45 @@ export default function HomePage() {
         throw new Error(`DELETE /saved-searches/${id} failed (${res.status}): ${text}`);
       }
 
+      setNotifications((prev) => prev.filter((entry) => entry.saved_search_id !== id));
       if (activeSavedSearchId === id) {
         setActiveSavedSearchId(null);
       }
       await fetchSavedSearches();
+      await fetchNotifications();
     } catch (err: unknown) {
       setSavedError(err instanceof Error ? err.message : "Failed to delete saved search");
+    }
+  }
+
+  async function onToggleSavedSearchAlerts(entry: SavedSearch) {
+    setSavedError(null);
+
+    try {
+      if (!accessToken) throw new Error("Please log in to update alert settings.");
+
+      const res = await fetch(`${API_BASE}/saved-searches/${entry.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          query: entry.query,
+          sources: entry.sources,
+          alerts_enabled: !entry.alerts_enabled,
+        }),
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`PATCH /saved-searches/${entry.id} failed (${res.status}): ${text}`);
+      }
+
+      const updated = (await res.json()) as SavedSearch;
+      setSaved((prev) => prev.map((candidate) => (candidate.id === updated.id ? updated : candidate)));
+    } catch (err: unknown) {
+      setSavedError(err instanceof Error ? err.message : "Failed to update alert settings");
     }
   }
 
@@ -2436,6 +4312,7 @@ export default function HomePage() {
   }
 
   async function onChangeSort(nextSort: SortOption) {
+    const currentSort = sortBy;
     setSortBy(nextSort);
     setActiveSort(nextSort);
     setSavedBatchPagination((prev) =>
@@ -2446,6 +4323,29 @@ export default function HomePage() {
           }
         : prev,
     );
+
+    const rerunForServerSortedResults =
+      hasSearched && (currentSort === "newest" || nextSort === "newest");
+    if (!rerunForServerSortedResults) {
+      return;
+    }
+
+    if (resultMode === "saved_batch") {
+      await runAllSavedSearches(saved, {
+        selectedSort: nextSort,
+        selectedLimit: activeLimit,
+      });
+      return;
+    }
+
+    await runSearch({
+      query: activeQuery,
+      sourceList: activeSources,
+      selectedSort: nextSort,
+      selectedLimit: activeLimit,
+      offset: 0,
+      append: false,
+    });
   }
 
   function toggleSource(source: SourceOption) {
@@ -2456,6 +4356,7 @@ export default function HomePage() {
     setEditing(entry);
     setEditQuery(entry.query);
     setEditSources(entry.sources.filter(isSourceOption));
+    setEditAlertsEnabled(entry.alerts_enabled);
     setEditError(null);
   }
 
@@ -2463,6 +4364,7 @@ export default function HomePage() {
     setEditing(null);
     setEditError(null);
     setEditSaving(false);
+    setEditAlertsEnabled(true);
   }
 
   function toggleEditSource(source: SourceOption) {
@@ -2502,6 +4404,7 @@ export default function HomePage() {
         body: JSON.stringify({
           query: trimmedQuery,
           sources: editSources,
+          alerts_enabled: editAlertsEnabled,
         }),
       });
 
@@ -2517,6 +4420,7 @@ export default function HomePage() {
 
       const updated = (await res.json()) as SavedSearch;
       setSaved((prev) => prev.map((entry) => (entry.id === updated.id ? updated : entry)));
+      await fetchNotifications();
 
       if (activeSavedSearchId === updated.id) {
         const normalizedSources = updated.sources.filter(isSourceOption);
@@ -2546,8 +4450,319 @@ export default function HomePage() {
     }
   }
 
+  async function onMarkNotificationRead(id: number) {
+    setNotificationsError(null);
+
+    try {
+      if (!accessToken) throw new Error("Please log in to manage notifications.");
+      const res = await fetch(`${API_BASE}/me/notifications/${id}/read`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`POST /me/notifications/${id}/read failed (${res.status}): ${text}`);
+      }
+      const updated = (await res.json()) as SavedSearchNotification;
+      setNotifications((prev) => prev.map((entry) => (entry.id === updated.id ? updated : entry)));
+    } catch (err: unknown) {
+      setNotificationsError(
+        normalizeNotificationError(
+          err,
+          "Unable to update this alert right now. Please try again.",
+        ),
+      );
+    }
+  }
+
+  const openCopilot = useCallback(() => {
+    if (copilotLauncherDragMovedRef.current) {
+      copilotLauncherDragMovedRef.current = false;
+      return;
+    }
+    setCopilotOpen(true);
+    setCopilotError(null);
+  }, []);
+
+  const closeCopilot = useCallback(() => {
+    setCopilotOpen(false);
+  }, []);
+
+  const toggleCopilotSelectionMode = useCallback(() => {
+    setCopilotSelectionMode((prev) => !prev);
+  }, []);
+
+  const clearCopilotSelection = useCallback(() => {
+    setCopilotSelectedListingKeys([]);
+  }, []);
+
+  const removeListingFromCopilotSelection = useCallback((listingKey: string) => {
+    setCopilotSelectedListingKeys((prev) => prev.filter((candidate) => candidate !== listingKey));
+  }, []);
+
+  const onToggleListingSelection = useCallback((item: Listing) => {
+    const listingKey = getListingKey(item);
+    setCopilotOpen(true);
+    setCopilotError(null);
+    setCopilotSelectedListingKeys((prev) =>
+      prev.includes(listingKey)
+        ? prev.filter((candidate) => candidate !== listingKey)
+        : [...prev, listingKey],
+    );
+  }, []);
+
+  const onCopilotLauncherDragStart = useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      if (typeof window === "undefined" || window.innerWidth < COPILOT_DESKTOP_BREAKPOINT || event.button !== 0) {
+        return;
+      }
+
+      event.preventDefault();
+      copilotLauncherDragMovedRef.current = false;
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const startPosition = copilotLauncherPosition;
+      const originalUserSelect = document.body.style.userSelect;
+      document.body.style.userSelect = "none";
+
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        if (
+          !copilotLauncherDragMovedRef.current &&
+          (Math.abs(moveEvent.clientX - startX) > 4 || Math.abs(moveEvent.clientY - startY) > 4)
+        ) {
+          copilotLauncherDragMovedRef.current = true;
+        }
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        setCopilotLauncherPosition(
+          clampCopilotLauncherPosition(
+            {
+              x: startPosition.x + (moveEvent.clientX - startX),
+              y: startPosition.y + (moveEvent.clientY - startY),
+            },
+            viewportWidth,
+            viewportHeight,
+          ),
+        );
+      };
+
+      const handlePointerUp = () => {
+        document.body.style.userSelect = originalUserSelect;
+        window.removeEventListener("pointermove", handlePointerMove);
+        window.removeEventListener("pointerup", handlePointerUp);
+      };
+
+      window.addEventListener("pointermove", handlePointerMove);
+      window.addEventListener("pointerup", handlePointerUp);
+    },
+    [copilotLauncherPosition],
+  );
+
+  const onCopilotWindowDragStart = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (typeof window === "undefined" || window.innerWidth < COPILOT_DESKTOP_BREAKPOINT || event.button !== 0) {
+        return;
+      }
+
+      event.preventDefault();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const startRect = copilotWindowRect;
+      const originalUserSelect = document.body.style.userSelect;
+      document.body.style.userSelect = "none";
+
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        setCopilotWindowRect(
+          clampCopilotWindowRect(
+            {
+              ...startRect,
+              x: startRect.x + (moveEvent.clientX - startX),
+              y: startRect.y + (moveEvent.clientY - startY),
+            },
+            viewportWidth,
+            viewportHeight,
+          ),
+        );
+      };
+
+      const handlePointerUp = () => {
+        document.body.style.userSelect = originalUserSelect;
+        window.removeEventListener("pointermove", handlePointerMove);
+        window.removeEventListener("pointerup", handlePointerUp);
+      };
+
+      window.addEventListener("pointermove", handlePointerMove);
+      window.addEventListener("pointerup", handlePointerUp);
+    },
+    [copilotWindowRect],
+  );
+
+  const onCopilotResizeStart = useCallback(
+    (direction: CopilotResizeDirection, event: React.PointerEvent<HTMLDivElement>) => {
+      if (typeof window === "undefined" || window.innerWidth < COPILOT_DESKTOP_BREAKPOINT || event.button !== 0) {
+        return;
+      }
+
+      event.stopPropagation();
+      event.preventDefault();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const startRect = copilotWindowRect;
+      const startRight = startRect.x + startRect.width;
+      const startBottom = startRect.y + startRect.height;
+      const originalUserSelect = document.body.style.userSelect;
+      document.body.style.userSelect = "none";
+
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        const maxWidth = Math.max(
+          COPILOT_WINDOW_WIDTH_MIN,
+          Math.min(COPILOT_WINDOW_WIDTH_MAX, viewportWidth - COPILOT_FLOATING_MARGIN * 2),
+        );
+        const maxHeight = Math.max(
+          COPILOT_WINDOW_HEIGHT_MIN,
+          Math.min(COPILOT_WINDOW_HEIGHT_MAX, viewportHeight - COPILOT_FLOATING_MARGIN * 2),
+        );
+        let left = startRect.x;
+        let right = startRight;
+        let top = startRect.y;
+        let bottom = startBottom;
+
+        if (direction.includes("e")) {
+          right = clampNumber(
+            startRight + (moveEvent.clientX - startX),
+            left + COPILOT_WINDOW_WIDTH_MIN,
+            Math.min(viewportWidth - COPILOT_FLOATING_MARGIN, left + maxWidth),
+          );
+        }
+        if (direction.includes("w")) {
+          left = clampNumber(
+            startRect.x + (moveEvent.clientX - startX),
+            Math.max(COPILOT_FLOATING_MARGIN, right - maxWidth),
+            right - COPILOT_WINDOW_WIDTH_MIN,
+          );
+        }
+        if (direction.includes("s")) {
+          bottom = clampNumber(
+            startBottom + (moveEvent.clientY - startY),
+            top + COPILOT_WINDOW_HEIGHT_MIN,
+            Math.min(viewportHeight - COPILOT_FLOATING_MARGIN, top + maxHeight),
+          );
+        }
+        if (direction.includes("n")) {
+          top = clampNumber(
+            startRect.y + (moveEvent.clientY - startY),
+            Math.max(COPILOT_FLOATING_MARGIN, bottom - maxHeight),
+            bottom - COPILOT_WINDOW_HEIGHT_MIN,
+          );
+        }
+
+        setCopilotWindowRect({
+          x: left,
+          y: top,
+          width: right - left,
+          height: bottom - top,
+        });
+      };
+
+      const handlePointerUp = () => {
+        document.body.style.userSelect = originalUserSelect;
+        window.removeEventListener("pointermove", handlePointerMove);
+        window.removeEventListener("pointerup", handlePointerUp);
+      };
+
+      window.addEventListener("pointermove", handlePointerMove);
+      window.addEventListener("pointerup", handlePointerUp);
+    },
+    [copilotWindowRect],
+  );
+
+  const onAskCopilot = useCallback(async (questionOverride?: string) => {
+    const question = (questionOverride ?? copilotQuestion).trim();
+    const activeQueryContext = (activeQuery || "").trim();
+    const query = activeQueryContext && activeQueryContext.toLowerCase() !== "saved searches"
+      ? activeQueryContext
+      : q.trim();
+    const listingMap = new Map(filteredResults.map((item) => [getListingKey(item), item]));
+    const selectedListings = copilotSelectedListingKeys
+      .map((listingKey) => listingMap.get(listingKey) ?? null)
+      .filter((item): item is Listing => item !== null);
+    const sourceListings =
+      (selectedListings.length > 0 ? selectedListings : filteredResults).slice(0, 25);
+    const listingContext = sourceListings.map(buildCopilotListingContext);
+
+    if (!question) {
+      setCopilotError("Ask about an item, or load listings to include the current search results.");
+      return;
+    }
+
+    const userMessage: CopilotMessage = {
+      id: createCopilotMessageId(),
+      role: "user",
+      content: question,
+    };
+    const conversationPayload: CopilotConversationPayload[] = copilotMessages
+      .slice(-12)
+      .map((message) => ({
+        role: message.role,
+        content: message.answer?.trim() || message.content,
+      }));
+    const sessionVersion = copilotSessionVersionRef.current;
+
+    setCopilotOpen(true);
+    setCopilotMessages((prev) => [...prev, userMessage]);
+    setCopilotQuestion("");
+    setCopilotLoading(true);
+    setCopilotError(null);
+    try {
+      const res = await fetch(`${API_BASE}/copilot/query`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...(query ? { query } : {}),
+          user_question: question,
+          listings: listingContext,
+          conversation: conversationPayload,
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`POST /copilot/query failed (${res.status}): ${text}`);
+      }
+      const json = (await res.json()) as CopilotResponse;
+      if (copilotSessionVersionRef.current !== sessionVersion) return;
+      setLatestShortlist(json.shortlist);
+      setCopilotMessages((prev) => [
+        ...prev,
+        {
+          id: createCopilotMessageId(),
+          role: "assistant",
+          content: buildAssistantConversationContent(json),
+          answer: json.answer,
+          seller_questions: json.seller_questions,
+          red_flags: json.red_flags,
+          available: json.available,
+          error_message: json.error_message ?? null,
+        },
+      ]);
+      if (!json.available && json.error_message) {
+        setCopilotError(json.error_message);
+      }
+    } catch (err: unknown) {
+      if (copilotSessionVersionRef.current !== sessionVersion) return;
+      setCopilotError(err instanceof Error ? err.message : "Failed to query copilot");
+    } finally {
+      if (copilotSessionVersionRef.current === sessionVersion) {
+        setCopilotLoading(false);
+      }
+    }
+  }, [API_BASE, activeQuery, copilotMessages, copilotQuestion, copilotSelectedListingKeys, filteredResults, q]);
+
   const hasSourceErrorEntries = Object.keys(sourceErrors).length > 0;
-  const summarySources = hasSearched && activeSources.length > 0 ? activeSources : sources;
+  const summarySources = sources;
   const totalResultsCount = total ?? rawResults.length;
 
   return (
@@ -2567,19 +4782,18 @@ export default function HomePage() {
       onSearch={onSearch}
       onSaveCurrentSearch={onSaveCurrentSearch}
       limit={limit}
-      locationFilterText={locationFilterText}
-      setLocationFilterText={setLocationFilterText}
+      locationProvince={locationProvince}
+      setLocationProvince={setLocationProvince}
+      locationCityInput={locationCityInput}
+      setLocationCityInput={setLocationCityInput}
+      currentLocation={currentLocation}
+      locationPersistence={locationPersistence}
+      locationSuggestions={locationSuggestions}
+      onApplyManualLocation={onApplyManualLocation}
       onUseMyLocation={onUseMyLocation}
-      onClearMyLocation={onClearMyLocation}
-      locatingDevice={locatingDevice}
-      deviceCoords={deviceCoords}
-      locationFilterError={locationFilterError}
-      travelRangeMilesInput={travelRangeMilesInput}
-      setTravelRangeMilesInput={setTravelRangeMilesInput}
-      hideUnknownDistance={hideUnknownDistance}
-      setHideUnknownDistance={setHideUnknownDistance}
-      distanceFilterPendingLocation={distanceFilterPendingLocation}
-      distanceFilterActive={distanceFilterActive}
+      onClearLocation={onClearLocation}
+      locationBusy={locationBusy}
+      locationError={locationError}
       error={error}
       sourceErrors={sourceErrors}
       hasSourceErrorEntries={hasSourceErrorEntries}
@@ -2597,11 +4811,17 @@ export default function HomePage() {
       saved={saved}
       savedLoading={savedLoading}
       savedError={savedError}
+      notifications={notifications}
+      notificationsLoading={notificationsLoading}
+      notificationsError={notificationsError}
       activeSavedSearchId={activeSavedSearchId}
       fetchSavedSearches={fetchSavedSearches}
+      fetchNotifications={fetchNotifications}
+      onMarkNotificationRead={onMarkNotificationRead}
       runAllSavedSearches={runAllSavedSearches}
       onRunSavedSearch={onRunSavedSearch}
       onDeleteSavedSearch={onDeleteSavedSearch}
+      onToggleSavedSearchAlerts={onToggleSavedSearchAlerts}
       openEdit={openEdit}
       editing={editing}
       closeEdit={closeEdit}
@@ -2611,6 +4831,8 @@ export default function HomePage() {
       setEditQuery={setEditQuery}
       editSources={editSources}
       toggleEditSource={toggleEditSource}
+      editAlertsEnabled={editAlertsEnabled}
+      setEditAlertsEnabled={setEditAlertsEnabled}
       onSaveEdit={onSaveEdit}
       facebookConfigStatus={facebookConfigStatus}
       facebookConfigLoading={facebookConfigLoading}
@@ -2624,6 +4846,29 @@ export default function HomePage() {
       onVerifyFacebookCookies={onVerifyFacebookCookies}
       onDeleteFacebookCookies={onDeleteFacebookCookies}
       onFacebookCookieFileSelected={onFacebookCookieFileSelected}
+      activeQuery={activeQuery}
+      copilotOpen={copilotOpen}
+      openCopilot={openCopilot}
+      closeCopilot={closeCopilot}
+      copilotQuestion={copilotQuestion}
+      setCopilotQuestion={setCopilotQuestion}
+      copilotLoading={copilotLoading}
+      copilotError={copilotError}
+      copilotMessages={copilotMessages}
+      latestShortlist={latestShortlist}
+      copilotSelectionMode={copilotSelectionMode}
+      toggleCopilotSelectionMode={toggleCopilotSelectionMode}
+      copilotSelectedListingKeys={copilotSelectedListingKeys}
+      clearCopilotSelection={clearCopilotSelection}
+      removeListingFromCopilotSelection={removeListingFromCopilotSelection}
+      onToggleListingSelection={onToggleListingSelection}
+      resetCopilotConversation={resetCopilotConversation}
+      copilotWindowRect={copilotWindowRect}
+      copilotLauncherPosition={copilotLauncherPosition}
+      onCopilotLauncherDragStart={onCopilotLauncherDragStart}
+      onCopilotWindowDragStart={onCopilotWindowDragStart}
+      onCopilotResizeStart={onCopilotResizeStart}
+      onAskCopilot={onAskCopilot}
     />
   );
 }

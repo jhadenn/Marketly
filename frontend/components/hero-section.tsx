@@ -2,7 +2,6 @@ import Image from 'next/image'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { InfiniteSlider } from '@/components/ui/infinite-slider'
-import { ProgressiveBlur } from '@/components/ui/progressive-blur'
 import { TextEffect } from "@/components/motion-primitives/text-effect";
 import { AnimatedGroup } from "@/components/motion-primitives/animated-group";
 import DecryptedText from "@/components/DecryptedText";
@@ -99,7 +98,13 @@ export default function HeroSection() {
                         <div className="md:max-w-44 md:border-r md:pr-6">
                             <p className="text-end text-xl font-mono uppercase">Search From</p>
                         </div>
-                        <div className="relative py-6 md:w-[calc(100%-11rem)]">
+                        <div
+                            className="relative py-6 md:w-[calc(100%-11rem)]"
+                            style={{
+                                maskImage: "linear-gradient(to right, transparent, black 10%, black 90%, transparent)",
+                                WebkitMaskImage: "linear-gradient(to right, transparent, black 10%, black 90%, transparent)",
+                            }}
+                        >
                             <InfiniteSlider
                                 speedOnHover={20}
                                 speed={40}
@@ -132,20 +137,6 @@ export default function HeroSection() {
                                     />
                                 </div>
                             </InfiniteSlider>
-                            <div
-                                className="bg-linear-to-r from-background absolute inset-y-0 left-0 w-20"></div>
-                            <div
-                                className="bg-linear-to-l from-background absolute inset-y-0 right-0 w-20"></div>
-                            <ProgressiveBlur
-                                className="pointer-events-none absolute left-0 top-0 h-full w-20"
-                                direction="left"
-                                blurIntensity={1}
-                            />
-                            <ProgressiveBlur
-                                className="pointer-events-none absolute right-0 top-0 h-full w-20"
-                                direction="right"
-                                blurIntensity={1}
-                            />
                         </div>
                     </div>
                 </AnimatedGroup>

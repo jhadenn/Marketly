@@ -1,5 +1,6 @@
-from sqlalchemy import Column, Integer, String, DateTime, func, Index
+from sqlalchemy import Boolean, Column, Integer, String, DateTime, func, Index, text
 from app.db import Base
+
 
 class SavedSearch(Base):
     __tablename__ = "saved_searches"
@@ -9,6 +10,9 @@ class SavedSearch(Base):
 
     query = Column(String, nullable=False)
     sources = Column(String, nullable=False)
+    alerts_enabled = Column(Boolean, nullable=False, default=True, server_default=text("true"))
+    last_alert_checked_at = Column(DateTime(timezone=True), nullable=True)
+    last_alert_notified_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     # OPTIONAL but recommended: prevent exact duplicates per user

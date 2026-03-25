@@ -1,16 +1,29 @@
 import asyncio
 
 from app.models.listing import Listing
+from app.schemas.location import ResolvedLocation
 from app.services import search_service
 
 
-def _listing(idx: int, *, source: str = "ebay") -> Listing:
+def _listing(
+    idx: int,
+    *,
+    source: str = "ebay",
+    posted_at: str | None = None,
+    location: str | None = None,
+    latitude: float | None = None,
+    longitude: float | None = None,
+) -> Listing:
     return Listing(
         source=source,
         source_listing_id=str(idx),
         title=f"item {idx}",
         url=f"https://example.com/{source}/{idx}",
         image_urls=[],
+        posted_at=posted_at,
+        location=location,
+        latitude=latitude,
+        longitude=longitude,
     )
 
 
@@ -28,7 +41,7 @@ def test_unified_search_multi_source_keeps_fetch_window_stable(monkeypatch):
     )
     fetch_limits: list[int] = []
 
-    async def fake_fetch_and_score(query, sources, fetch_limit):
+    async def fake_fetch_and_score(query, sources, fetch_limit, sort, **kwargs):
         fetch_limits.append(fetch_limit)
         if fetch_limit <= limit:
             return (
@@ -108,7 +121,7 @@ def test_unified_search_multi_source_skips_expansion_when_facebook_guard_enabled
     base_pool = [_listing(idx) for idx in range(limit * 2)]
     fetch_limits: list[int] = []
 
-    async def fake_fetch_and_score(query, sources, fetch_limit):
+    async def fake_fetch_and_score(query, sources, fetch_limit, sort, **kwargs):
         fetch_limits.append(fetch_limit)
         return (
             base_pool[:fetch_limit],
@@ -138,7 +151,7 @@ def test_unified_search_multi_source_skips_expansion_when_facebook_guard_enabled
 def test_unified_search_single_source_still_expands_fetch_window(monkeypatch):
     fetch_limits: list[int] = []
 
-    async def fake_fetch_and_score(query, sources, fetch_limit):
+    async def fake_fetch_and_score(query, sources, fetch_limit, sort, **kwargs):
         fetch_limits.append(fetch_limit)
         return [_listing(idx) for idx in range(fetch_limit)], {}, {"ebay": fetch_limit}
 
@@ -161,7 +174,7 @@ def test_unified_search_single_source_first_page_keeps_next_offset(monkeypatch):
     limit = 24
     fetch_limits: list[int] = []
 
-    async def fake_fetch_and_score(query, sources, fetch_limit):
+    async def fake_fetch_and_score(query, sources, fetch_limit, sort, **kwargs):
         fetch_limits.append(fetch_limit)
         pool_size = min(fetch_limit, 50)
         return [_listing(idx) for idx in range(pool_size)], {}, {"ebay": pool_size}
@@ -213,7 +226,7 @@ def test_unified_search_multi_source_balances_sources_for_relevance(monkeypatch)
     monkeypatch.setattr(search_service.settings, "MARKETLY_BALANCE_MULTI_SOURCE_RESULTS", True)
     monkeypatch.setattr(search_service.settings, "MARKETLY_DISABLE_FACEBOOK_MULTI_SOURCE_EXPANSION", True)
 
-    async def fake_fetch_and_score(query, sources, fetch_limit):
+    async def fake_fetch_and_score(query, sources, fetch_limit, sort, **kwargs):
         results = [
             _listing(1, source="ebay"),
             _listing(2, source="ebay"),
@@ -239,6 +252,19 @@ def test_unified_search_multi_source_balances_sources_for_relevance(monkeypatch)
     assert [item.source for item in page] == ["ebay", "facebook", "ebay", "facebook"]
 
 
+def test_sort_results_newest_prefers_timestamps_and_pushes_missing_to_bottom():
+    items = [
+        _listing(1, posted_at="2026-03-20T10:00:00Z"),
+        _listing(2),
+        _listing(3, posted_at="2026-03-24T12:00:00Z"),
+        _listing(4, posted_at="2026-03-24T12:00:00Z"),
+    ]
+
+    ordered = search_service._sort_results(items, sort="newest")
+
+    assert [item.source_listing_id for item in ordered] == ["3", "4", "1", "2"]
+
+
 def test_fetch_source_facebook_requires_auth(monkeypatch):
     monkeypatch.setattr(search_service.settings, "MARKETLY_ENABLE_FACEBOOK", True)
 
@@ -247,6 +273,7 @@ def test_fetch_source_facebook_requires_auth(monkeypatch):
             src="facebook",
             query="bike",
             fetch_limit=10,
+            sort="relevance",
             facebook_runtime_context=search_service.FacebookRuntimeContext(user_id=None),
         )
     )
@@ -265,6 +292,7 @@ def test_fetch_source_facebook_requires_byoc(monkeypatch):
             src="facebook",
             query="bike",
             fetch_limit=10,
+            sort="relevance",
             facebook_runtime_context=search_service.FacebookRuntimeContext(user_id="user-1"),
         )
     )
@@ -294,6 +322,7 @@ def test_fetch_source_facebook_applies_limit_cap(monkeypatch):
             src="facebook",
             query="bike",
             fetch_limit=20,
+            sort="relevance",
             facebook_runtime_context=search_service.FacebookRuntimeContext(
                 user_id="user-1",
                 cookie_payload=[{"name": "c_user"}],
@@ -327,6 +356,7 @@ def test_fetch_source_facebook_multi_source_uses_higher_hard_cap(monkeypatch):
             src="facebook",
             query="bike",
             fetch_limit=48,
+            sort="relevance",
             facebook_runtime_context=search_service.FacebookRuntimeContext(
                 user_id="user-1",
                 cookie_payload=[{"name": "c_user"}],
@@ -359,6 +389,7 @@ def test_fetch_source_facebook_single_source_not_capped(monkeypatch):
             src="facebook",
             query="bike",
             fetch_limit=20,
+            sort="relevance",
             facebook_runtime_context=search_service.FacebookRuntimeContext(
                 user_id="user-1",
                 cookie_payload=[{"name": "c_user"}],
@@ -392,6 +423,7 @@ def test_fetch_source_facebook_timeout_returns_timeout_error(monkeypatch):
             src="facebook",
             query="bike",
             fetch_limit=10,
+            sort="relevance",
             facebook_runtime_context=search_service.FacebookRuntimeContext(
                 user_id="user-1",
                 cookie_payload=[{"name": "c_user"}],
@@ -420,11 +452,129 @@ def test_cache_keys_vary_by_facebook_user_cookie_and_location():
         longitude=-75.69719,
         radius_km=25,
     )
+    loc_a = ResolvedLocation(
+        display_name="Toronto, ON",
+        city="Toronto",
+        province_code="ON",
+        province_name="Ontario",
+        country_code="CA",
+        latitude=43.65321,
+        longitude=-79.38318,
+        mode="manual",
+    )
+    loc_b = ResolvedLocation(
+        display_name="Ottawa, ON",
+        city="Ottawa",
+        province_code="ON",
+        province_name="Ontario",
+        country_code="CA",
+        latitude=45.42153,
+        longitude=-75.69719,
+        mode="manual",
+    )
 
-    key_a = search_service._cache_key("bike", ["facebook"], 24, ctx_a)
-    key_b = search_service._cache_key("bike", ["facebook"], 24, ctx_b)
-    pag_a = search_service._pagination_key("bike", ["facebook"], "relevance", 24, ctx_a)
-    pag_b = search_service._pagination_key("bike", ["facebook"], "relevance", 24, ctx_b)
+    key_a = search_service._cache_key(
+        "bike",
+        ["facebook"],
+        24,
+        "relevance",
+        ctx_a,
+        loc_a,
+    )
+    key_b = search_service._cache_key(
+        "bike",
+        ["facebook"],
+        24,
+        "relevance",
+        ctx_b,
+        loc_b,
+    )
+    pag_a = search_service._pagination_key(
+        "bike",
+        ["facebook"],
+        "relevance",
+        24,
+        ctx_a,
+        loc_a,
+    )
+    pag_b = search_service._pagination_key(
+        "bike",
+        ["facebook"],
+        "relevance",
+        24,
+        ctx_b,
+        loc_b,
+    )
 
     assert key_a != key_b
     assert pag_a != pag_b
+
+
+def test_order_with_location_context_prefers_nearby_local_results(monkeypatch):
+    monkeypatch.setattr(search_service.settings, "MARKETLY_BALANCE_MULTI_SOURCE_RESULTS", True)
+
+    origin = ResolvedLocation(
+        display_name="Toronto, ON",
+        city="Toronto",
+        province_code="ON",
+        province_name="Ontario",
+        country_code="CA",
+        latitude=43.6532,
+        longitude=-79.3832,
+        mode="manual",
+    )
+    items = [
+        _listing(1, source="ebay", location="Toronto, ON"),
+        _listing(2, source="kijiji", location="Vancouver, BC"),
+        _listing(3, source="facebook", location="Toronto, ON"),
+        _listing(4, source="kijiji", location=None),
+        _listing(5, source="kijiji", location="Buffalo, NY, USA"),
+    ]
+    items[0].score = 99
+    items[1].score = 20
+    items[2].score = 10
+    items[3].score = 30
+    items[4].score = 40
+
+    ordered = search_service._order_with_location_context(
+        items,
+        sources=["kijiji", "facebook", "ebay"],
+        sort="relevance",
+        search_location_context=origin,
+    )
+
+    assert [item.source_listing_id for item in ordered] == ["3", "2", "4", "1", "5"]
+    assert ordered[0].distance_km is not None
+    assert ordered[0].distance_km <= ordered[1].distance_km
+    assert ordered[2].distance_km is None
+    assert ordered[3].source == "ebay"
+    assert ordered[4].distance_km is None
+
+
+def test_order_with_location_context_geocodes_canadian_text_without_fabricating_unknown_coords():
+    origin = ResolvedLocation(
+        display_name="Toronto, ON",
+        city="Toronto",
+        province_code="ON",
+        province_name="Ontario",
+        country_code="CA",
+        latitude=43.6532,
+        longitude=-79.3832,
+        mode="manual",
+    )
+    resolvable = _listing(10, source="facebook", location="Toronto, ON")
+    unresolved = _listing(11, source="facebook", location="Somewhere mysterious")
+
+    ordered = search_service._order_with_location_context(
+        [unresolved, resolvable],
+        sources=["facebook"],
+        sort="relevance",
+        search_location_context=origin,
+    )
+
+    assert ordered[0].source_listing_id == "10"
+    assert resolvable.distance_km is not None
+    assert resolvable.distance_is_approximate is True
+    assert unresolved.distance_km is None
+    assert unresolved.latitude is None
+    assert unresolved.longitude is None
