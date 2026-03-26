@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -18,6 +19,18 @@ client = TestClient(app)
 
 def _override_auth():
     return "user-123"
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _sqlite_dt_str(value: datetime) -> str:
+    return str(value.astimezone(timezone.utc).replace(tzinfo=None) if value.tzinfo is not None else value)
 
 
 def _sample_listing() -> Listing:
@@ -46,7 +59,12 @@ def test_saved_search_and_notification_endpoints_include_alert_fields(monkeypatc
     assert create_res.status_code == 200
     payload = create_res.json()
     assert payload["alerts_enabled"] is False
+    assert payload["last_alert_attempted_at"] is None
     assert payload["last_alert_checked_at"] is None
+    assert payload["last_alert_notified_at"] is None
+    assert payload["last_alert_error_code"] is None
+    assert payload["last_alert_error_message"] is None
+    assert payload["next_alert_check_due_at"] is None
 
     db = session_factory()
     try:
@@ -321,6 +339,83 @@ def test_notifications_endpoint_refreshes_alerts_before_listing(monkeypatch):
     engine.dispose()
 
 
+def test_create_saved_search_runs_initial_baseline_and_returns_due_time(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+
+    baseline_time = datetime(2026, 3, 25, 15, 10, tzinfo=timezone.utc)
+
+    async def fake_execute_saved_search_alert_check(db, *, saved_search_id, limit_per_search):
+        row = db.query(SavedSearch).filter(SavedSearch.id == saved_search_id).first()
+        assert row is not None
+        row.last_alert_attempted_at = baseline_time
+        row.last_alert_checked_at = baseline_time
+        row.last_alert_error_code = None
+        row.last_alert_error_message = None
+        db.commit()
+        return SimpleNamespace(error_code=None, error_message=None, notification_created=False)
+
+    monkeypatch.setattr("app.main.execute_saved_search_alert_check", fake_execute_saved_search_alert_check)
+
+    response = client.post(
+        "/saved-searches",
+        json={"query": "iphone 14 pro", "sources": ["ebay"], "alerts_enabled": True},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["alerts_enabled"] is True
+    assert payload["last_alert_attempted_at"] == _sqlite_dt_str(baseline_time)
+    assert payload["last_alert_checked_at"] == _sqlite_dt_str(baseline_time)
+    assert payload["last_alert_error_code"] is None
+    assert payload["last_alert_error_message"] is None
+    assert payload["next_alert_check_due_at"] == str(baseline_time + timedelta(hours=8))
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_create_saved_search_persists_baseline_failure_metadata(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+
+    failure_time = datetime(2026, 3, 25, 15, 10, tzinfo=timezone.utc)
+
+    async def fake_execute_saved_search_alert_check(db, *, saved_search_id, limit_per_search):
+        row = db.query(SavedSearch).filter(SavedSearch.id == saved_search_id).first()
+        assert row is not None
+        row.last_alert_attempted_at = failure_time
+        row.last_alert_checked_at = None
+        row.last_alert_error_code = "LOGIN_REQUIRED"
+        row.last_alert_error_message = "Facebook: Cookies expired."
+        db.commit()
+        return SimpleNamespace(
+            error_code="LOGIN_REQUIRED",
+            error_message="Facebook: Cookies expired.",
+            notification_created=False,
+        )
+
+    monkeypatch.setattr("app.main.execute_saved_search_alert_check", fake_execute_saved_search_alert_check)
+
+    response = client.post(
+        "/saved-searches",
+        json={"query": "mazda miata", "sources": ["facebook"], "alerts_enabled": True},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["last_alert_attempted_at"] == _sqlite_dt_str(failure_time)
+    assert payload["last_alert_checked_at"] is None
+    assert payload["last_alert_error_code"] == "LOGIN_REQUIRED"
+    assert payload["last_alert_error_message"] == "Facebook: Cookies expired."
+    assert payload["next_alert_check_due_at"] is None
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
 def test_notifications_endpoint_returns_existing_rows_when_refresh_session_is_poisoned(monkeypatch):
     engine, session_factory = build_test_session_factory()
     app.dependency_overrides[get_current_user_id] = _override_auth
@@ -395,7 +490,7 @@ def test_notifications_endpoint_returns_existing_rows_when_refresh_session_is_po
     engine.dispose()
 
 
-def test_update_saved_search_resets_alert_baseline_when_query_changes():
+def test_update_saved_search_resets_alert_baseline_when_query_changes(monkeypatch):
     engine, session_factory = build_test_session_factory()
     app.dependency_overrides[get_current_user_id] = _override_auth
     app.dependency_overrides[get_db] = db_override_factory(session_factory)
@@ -407,6 +502,7 @@ def test_update_saved_search_resets_alert_baseline_when_query_changes():
             query="road bike",
             sources="ebay",
             alerts_enabled=True,
+            last_alert_attempted_at=datetime.now(timezone.utc) - timedelta(days=1),
             last_alert_checked_at=datetime.now(timezone.utc) - timedelta(days=1),
             last_alert_notified_at=datetime.now(timezone.utc) - timedelta(hours=8),
         )
@@ -427,6 +523,21 @@ def test_update_saved_search_resets_alert_baseline_when_query_changes():
     finally:
         db.close()
 
+    rerun_time = datetime(2026, 3, 25, 18, 0, tzinfo=timezone.utc)
+
+    async def fake_execute_saved_search_alert_check(db, *, saved_search_id, limit_per_search):
+        row = db.query(SavedSearch).filter(SavedSearch.id == saved_search_id).first()
+        assert row is not None
+        row.last_alert_attempted_at = rerun_time
+        row.last_alert_checked_at = rerun_time
+        row.last_alert_notified_at = None
+        row.last_alert_error_code = None
+        row.last_alert_error_message = None
+        db.commit()
+        return SimpleNamespace(error_code=None, error_message=None, notification_created=False)
+
+    monkeypatch.setattr("app.main.execute_saved_search_alert_check", fake_execute_saved_search_alert_check)
+
     response = client.patch(
         f"/saved-searches/{saved_search_id}",
         json={"query": "acura rsx", "sources": ["ebay"], "alerts_enabled": True},
@@ -443,8 +554,11 @@ def test_update_saved_search_resets_alert_baseline_when_query_changes():
             .all()
         )
         assert updated is not None
-        assert updated.last_alert_checked_at is None
+        assert _as_utc(updated.last_alert_attempted_at) == rerun_time
+        assert _as_utc(updated.last_alert_checked_at) == rerun_time
         assert updated.last_alert_notified_at is None
+        assert updated.last_alert_error_code is None
+        assert updated.last_alert_error_message is None
         assert notifications == []
     finally:
         db.close()
@@ -453,7 +567,7 @@ def test_update_saved_search_resets_alert_baseline_when_query_changes():
     engine.dispose()
 
 
-def test_update_saved_search_resets_alert_baseline_when_reenabled():
+def test_update_saved_search_resets_alert_baseline_when_reenabled(monkeypatch):
     engine, session_factory = build_test_session_factory()
     app.dependency_overrides[get_current_user_id] = _override_auth
     app.dependency_overrides[get_db] = db_override_factory(session_factory)
@@ -465,6 +579,7 @@ def test_update_saved_search_resets_alert_baseline_when_reenabled():
             query="acura rsx",
             sources="ebay",
             alerts_enabled=False,
+            last_alert_attempted_at=datetime.now(timezone.utc) - timedelta(days=3),
             last_alert_checked_at=datetime.now(timezone.utc) - timedelta(days=3),
             last_alert_notified_at=datetime.now(timezone.utc) - timedelta(days=2),
         )
@@ -474,6 +589,21 @@ def test_update_saved_search_resets_alert_baseline_when_reenabled():
         saved_search_id = saved_search.id
     finally:
         db.close()
+
+    rerun_time = datetime(2026, 3, 25, 19, 0, tzinfo=timezone.utc)
+
+    async def fake_execute_saved_search_alert_check(db, *, saved_search_id, limit_per_search):
+        row = db.query(SavedSearch).filter(SavedSearch.id == saved_search_id).first()
+        assert row is not None
+        row.last_alert_attempted_at = rerun_time
+        row.last_alert_checked_at = rerun_time
+        row.last_alert_notified_at = None
+        row.last_alert_error_code = None
+        row.last_alert_error_message = None
+        db.commit()
+        return SimpleNamespace(error_code=None, error_message=None, notification_created=False)
+
+    monkeypatch.setattr("app.main.execute_saved_search_alert_check", fake_execute_saved_search_alert_check)
 
     response = client.patch(
         f"/saved-searches/{saved_search_id}",
@@ -487,10 +617,65 @@ def test_update_saved_search_resets_alert_baseline_when_reenabled():
         updated = db.query(SavedSearch).filter(SavedSearch.id == saved_search_id).first()
         assert updated is not None
         assert updated.alerts_enabled is True
-        assert updated.last_alert_checked_at is None
+        assert _as_utc(updated.last_alert_attempted_at) == rerun_time
+        assert _as_utc(updated.last_alert_checked_at) == rerun_time
         assert updated.last_alert_notified_at is None
+        assert updated.last_alert_error_code is None
+        assert updated.last_alert_error_message is None
     finally:
         db.close()
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_refresh_saved_search_alert_endpoint_retries_incomplete_baseline(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+
+    db = session_factory()
+    try:
+        saved_search = SavedSearch(
+            user_id="user-123",
+            query="transformers jazz",
+            sources="ebay",
+            alerts_enabled=True,
+            last_alert_checked_at=None,
+            last_alert_attempted_at=None,
+            last_alert_error_code=None,
+            last_alert_error_message=None,
+        )
+        db.add(saved_search)
+        db.commit()
+        db.refresh(saved_search)
+        saved_search_id = saved_search.id
+    finally:
+        db.close()
+
+    rerun_time = datetime(2026, 3, 26, 4, 55, tzinfo=timezone.utc)
+
+    async def fake_execute_saved_search_alert_check(db, *, saved_search_id, limit_per_search):
+        row = db.query(SavedSearch).filter(SavedSearch.id == saved_search_id).first()
+        assert row is not None
+        row.last_alert_attempted_at = rerun_time
+        row.last_alert_checked_at = rerun_time
+        row.last_alert_error_code = None
+        row.last_alert_error_message = None
+        db.commit()
+        return SimpleNamespace(error_code=None, error_message=None, notification_created=False)
+
+    monkeypatch.setattr("app.main.execute_saved_search_alert_check", fake_execute_saved_search_alert_check)
+
+    response = client.post(f"/saved-searches/{saved_search_id}/alerts/refresh")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] == saved_search_id
+    assert payload["last_alert_attempted_at"] == _sqlite_dt_str(rerun_time)
+    assert payload["last_alert_checked_at"] == _sqlite_dt_str(rerun_time)
+    assert payload["last_alert_error_code"] is None
+    assert payload["last_alert_error_message"] is None
 
     app.dependency_overrides.clear()
     engine.dispose()

@@ -18,7 +18,12 @@ def _override_auth():
     return "user-123"
 
 
-def _sample_listing(source: str, listing_id: str) -> Listing:
+def _sample_listing(
+    source: str,
+    listing_id: str,
+    *,
+    vehicle_mileage_km: float | None = None,
+) -> Listing:
     return Listing(
         source=source,
         source_listing_id=listing_id,
@@ -29,6 +34,7 @@ def _sample_listing(source: str, listing_id: str) -> Listing:
         location="Toronto",
         condition="used",
         snippet="sample",
+        vehicle_mileage_km=vehicle_mileage_km,
     )
 
 
@@ -338,6 +344,18 @@ def test_search_cache_hit_returns_header(monkeypatch):
     assert response.status_code == 200
     assert response.headers.get("x-cache") == "HIT"
     assert response.json()["count"] == 1
+
+
+def test_search_returns_vehicle_mileage_when_present(monkeypatch):
+    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance", **kwargs):
+        return ([_sample_listing("kijiji", "car-1", vehicle_mileage_km=123456)], 1, None, {})
+
+    monkeypatch.setattr("app.main.unified_search", fake_unified_search)
+
+    response = client.get("/search", params={"q": "civic", "sources": "kijiji"})
+
+    assert response.status_code == 200
+    assert response.json()["results"][0]["vehicle_mileage_km"] == 123456.0
 
 
 def test_search_local_cache_fallback_miss_then_hit(monkeypatch):

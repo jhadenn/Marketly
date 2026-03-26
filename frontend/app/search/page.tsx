@@ -24,6 +24,7 @@ import {
   X,
 } from "lucide-react";
 import Dither from "@/components/Dither";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { useAuth } from "../providers";
 
@@ -155,6 +156,7 @@ type Listing = {
   posted_at?: string | null;
   distance_km?: number | null;
   distance_is_approximate?: boolean;
+  vehicle_mileage_km?: number | null;
   score?: number;
   score_reason?: string | null;
   valuation?: Valuation | null;
@@ -228,8 +230,12 @@ type SavedSearch = {
   query: string;
   sources: string[];
   alerts_enabled: boolean;
+  last_alert_attempted_at?: string | null;
   last_alert_checked_at?: string | null;
   last_alert_notified_at?: string | null;
+  last_alert_error_code?: string | null;
+  last_alert_error_message?: string | null;
+  next_alert_check_due_at?: string | null;
   created_at: string;
 };
 
@@ -393,6 +399,63 @@ function formatPrice(price?: Money | null) {
 function formatMoneyCompact(amount?: number | null, currency = "CAD") {
   if (typeof amount !== "number" || !Number.isFinite(amount)) return null;
   return `${currency} ${Math.round(amount)}`;
+}
+
+function formatVehicleMileageKm(vehicleMileageKm?: number | null) {
+  if (typeof vehicleMileageKm !== "number" || !Number.isFinite(vehicleMileageKm)) return null;
+  return `${Math.round(vehicleMileageKm).toLocaleString()} km`;
+}
+
+const AUTOMOTIVE_MARKER_RE =
+  /\b(?:acura|audi|bmw|buick|cadillac|chevrolet|chevy|chrysler|dodge|ford|gmc|honda|hyundai|infiniti|jeep|kia|lexus|lincoln|mazda|mercedes(?:-benz)?|mini|mitsubishi|nissan|porsche|ram|subaru|tesla|toyota|volkswagen|vw|volvo|car|cars|truck|trucks|suv|sedan|coupe|hatchback|wagon|pickup|minivan|van|crossover|automotive|vehicle|vehicles)\b/i;
+const AUTOMOTIVE_YEAR_RE = /\b(?:19[5-9]\d|20[0-3]\d)\b/;
+const VEHICLE_MILEAGE_RE =
+  /(\d{1,3}(?:[.,]\d{1,2})?|\d{1,3}(?:[,\s]\d{3})+|\d{4,7})(?:\s*([kKmM]))?\s*(?:km|kms|kilomet(?:er|re)s?)\b/gi;
+
+function parseVehicleMileageKm(text: string) {
+  const matcher = new RegExp(VEHICLE_MILEAGE_RE.source, VEHICLE_MILEAGE_RE.flags);
+  let match: RegExpExecArray | null = null;
+
+  while ((match = matcher.exec(text)) !== null) {
+    const rawValue = match[1];
+    if (!rawValue) continue;
+
+    const previousChar = match.index > 0 ? text[match.index - 1] : "";
+    if (/[.\d]/.test(previousChar)) continue;
+
+    const trailingText = text.slice(match.index + match[0].length);
+    if (/^\s*away\b/i.test(trailingText)) continue;
+
+    const scale = match[2]?.toLowerCase();
+    const normalizedValue =
+      scale && rawValue.includes(".")
+        ? rawValue.replace(/,/g, "").replace(/\s/g, "")
+        : scale
+          ? rawValue.replace(",", ".").replace(/\s/g, "")
+          : rawValue.replace(/[,\s]/g, "");
+    const parsed = Number(normalizedValue);
+    if (!Number.isFinite(parsed)) continue;
+
+    if (scale === "k") return parsed * 1_000;
+    if (scale === "m") return parsed * 1_000_000;
+    return parsed;
+  }
+
+  return null;
+}
+
+function inferVehicleMileageKm(item: Pick<Listing, "title" | "snippet" | "vehicle_mileage_km">) {
+  if (typeof item.vehicle_mileage_km === "number" && Number.isFinite(item.vehicle_mileage_km)) {
+    return item.vehicle_mileage_km;
+  }
+
+  const automotiveText = [item.title, item.snippet].filter(Boolean).join(" ");
+  if (!automotiveText) return null;
+  if (!AUTOMOTIVE_MARKER_RE.test(automotiveText) && !AUTOMOTIVE_YEAR_RE.test(automotiveText)) {
+    return null;
+  }
+
+  return parseVehicleMileageKm(automotiveText);
 }
 
 function getListingKey(item: Listing): string {
@@ -653,9 +716,24 @@ function formatSourceLabel(source: string) {
     .join(" ");
 }
 
+function normalizeServerTimestamp(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return trimmed;
+  if (/([zZ]|[+-]\d{2}:\d{2})$/.test(trimmed)) {
+    return trimmed;
+  }
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(trimmed)) {
+    return `${trimmed.replace(" ", "T")}Z`;
+  }
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(trimmed)) {
+    return `${trimmed}Z`;
+  }
+  return trimmed;
+}
+
 function formatTimestamp(value?: string | null) {
   if (!value) return "Just now";
-  const parsed = new Date(value);
+  const parsed = new Date(normalizeServerTimestamp(value));
   if (Number.isNaN(parsed.getTime())) return value;
   return parsed.toLocaleString(undefined, {
     month: "short",
@@ -674,16 +752,40 @@ function getSavedSearchAlertStatus(entry: SavedSearch) {
     return "Alerts off";
   }
 
-  if (!entry.last_alert_checked_at) {
-    return "Waiting for first alert check. The first check sets your baseline.";
+  const lastAttempted = entry.last_alert_attempted_at
+    ? formatTimestamp(entry.last_alert_attempted_at)
+    : null;
+  const lastChecked = entry.last_alert_checked_at
+    ? formatTimestamp(entry.last_alert_checked_at)
+    : null;
+  const lastAlert = entry.last_alert_notified_at
+    ? formatTimestamp(entry.last_alert_notified_at)
+    : null;
+  const nextDue = entry.next_alert_check_due_at
+    ? formatTimestamp(entry.next_alert_check_due_at)
+    : null;
+  const failureReason = entry.last_alert_error_message?.trim();
+
+  if (failureReason) {
+    if (!lastChecked) {
+      return `Baseline failed ${lastAttempted ?? "recently"}: ${failureReason}. Refresh saved searches after fixing the issue.`;
+    }
+    return `Last checked ${lastChecked}. Latest check failed ${lastAttempted ?? "recently"}: ${failureReason}. Next check due after a successful retry.`;
   }
 
-  const lastChecked = formatTimestamp(entry.last_alert_checked_at);
-  if (!entry.last_alert_notified_at) {
-    return `Last checked ${lastChecked}. No new listings since your baseline.`;
+  if (!lastChecked) {
+    return "Baseline pending. Save should create it immediately. Refresh saved searches to retry now.";
   }
 
-  return `Last checked ${lastChecked}. Last alert ${formatTimestamp(entry.last_alert_notified_at)}.`;
+  if (!lastAlert) {
+    return `Last checked ${lastChecked}. Next check due around ${nextDue ?? "later today"}.`;
+  }
+
+  return `Last checked ${lastChecked}. Last alert ${lastAlert}. Next check due around ${nextDue ?? "later today"}.`;
+}
+
+function hasIncompleteSavedSearchBaseline(entry: SavedSearch) {
+  return Boolean(entry.alerts_enabled) && !entry.last_alert_checked_at;
 }
 
 function normalizeNotificationError(error: unknown, fallback: string) {
@@ -758,6 +860,7 @@ type SearchPageViewProps = {
   toggleSource: (source: SourceOption) => void;
   searchLoading: boolean;
   loadingMore: boolean;
+  savingSearch: boolean;
   onSearch: (e: React.FormEvent) => Promise<void>;
   onSaveCurrentSearch: () => Promise<void>;
   limit: number;
@@ -795,7 +898,10 @@ type SearchPageViewProps = {
   notificationsError: string | null;
   activeSavedSearchId: number | null;
   fetchSavedSearches: () => Promise<SavedSearch[] | null>;
-  fetchNotifications: () => Promise<SavedSearchNotification[] | null>;
+  onRefreshSavedSearches: () => Promise<void>;
+  fetchNotifications: (
+    options?: { refreshSavedSearches?: boolean },
+  ) => Promise<SavedSearchNotification[] | null>;
   onMarkNotificationRead: (id: number) => Promise<void>;
   runAllSavedSearches: (savedSearches: SavedSearch[]) => Promise<void>;
   onRunSavedSearch: (id: number) => Promise<void>;
@@ -880,6 +986,7 @@ type SearchControlsRailProps = Pick<
   | "onSaveCurrentSearch"
   | "searchLoading"
   | "loadingMore"
+  | "savingSearch"
   | "sources"
   | "toggleSource"
   | "sortBy"
@@ -924,6 +1031,7 @@ type SavedSearchRailProps = Pick<
   | "searchLoading"
   | "loadingMore"
   | "fetchSavedSearches"
+  | "onRefreshSavedSearches"
   | "runAllSavedSearches"
   | "onRunSavedSearch"
   | "onDeleteSavedSearch"
@@ -1208,11 +1316,15 @@ function SearchControlsRail(props: SearchControlsRailProps) {
             <button
               type="button"
               onClick={() => void props.onSaveCurrentSearch()}
-              disabled={!props.q.trim() || props.sources.length === 0}
+              disabled={props.savingSearch || !props.q.trim() || props.sources.length === 0}
               className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-zinc-100 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <Bookmark className="size-4" />
-              Save search
+              {props.savingSearch ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Bookmark className="size-4" />
+              )}
+              {props.savingSearch ? "Creating baseline..." : "Save search"}
             </button>
           </div>
 
@@ -1390,7 +1502,7 @@ function SavedSearchRail(props: SavedSearchRailProps) {
 
           <button
             className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.02] px-2.5 py-1 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
-            onClick={() => void props.fetchSavedSearches()}
+            onClick={() => void props.onRefreshSavedSearches()}
             disabled={props.savedLoading}
             type="button"
           >
@@ -1405,6 +1517,7 @@ function SavedSearchRail(props: SavedSearchRailProps) {
           {props.savedError}
         </div>
       ) : null}
+
 
       {props.saved.length === 0 ? (
         <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-4">
@@ -1553,14 +1666,18 @@ function AlertsRail(props: AlertsRailProps) {
               {props.authLoading ? "Checking your account..." : "Log in to receive saved search alerts."}
             </p>
             <p className="mt-1 text-xs text-zinc-500">
-              Alerts appear when Marketly finds new listings for one of your alert-enabled saved searches.
+              Alerts appear when Marketly finds new listings for one of your alert-enabled saved
+              searches. Checks run when alerts are refreshed or by the server scheduler. Saved
+              Searches refresh retries incomplete baselines immediately.
             </p>
           </div>
         ) : props.notifications.length === 0 ? (
           <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-4">
             <p className="text-sm text-zinc-300">No saved search alerts yet.</p>
             <p className="mt-1 text-xs text-zinc-500">
-              Enable alerts on a saved search and new-listing alerts will show up here.
+              Saving a search creates its baseline immediately. After that, new checks are due about
+              every 8 hours after the last successful check. Use Saved Searches refresh if a baseline
+              is still pending.
             </p>
           </div>
         ) : (
@@ -1734,7 +1851,7 @@ function PreviewListingCard({ listing }: { listing: PreviewListing }) {
 
   return (
     <article className="overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/80">
-      <div className="relative aspect-[5/4] bg-zinc-900">
+      <div className="relative aspect-[4/3] bg-zinc-900">
         <Image
           src={imageSrc}
           alt={listing.title}
@@ -2099,18 +2216,22 @@ function InsightPill({
   label: string;
   tone: "emerald" | "amber" | "red" | "slate";
 }) {
-  const toneClasses = {
-    emerald: "border-emerald-300/25 bg-emerald-400/10 text-emerald-100",
-    amber: "border-amber-300/25 bg-amber-300/10 text-amber-100",
-    red: "border-red-300/25 bg-red-400/10 text-red-100",
-    slate: "border-white/10 bg-white/[0.03] text-zinc-300",
-  }[tone];
+  const toneClasses = insightPillToneClasses(tone);
 
   return (
     <span className={cn("rounded-full border px-2 py-0.5 text-[10px] font-medium", toneClasses)}>
       {label}
     </span>
   );
+}
+
+function insightPillToneClasses(tone: "emerald" | "amber" | "red" | "slate") {
+  return {
+    emerald: "border-emerald-300/25 bg-emerald-400/10 text-emerald-100",
+    amber: "border-amber-300/25 bg-amber-300/10 text-amber-100",
+    red: "border-red-300/25 bg-red-400/10 text-red-100",
+    slate: "border-white/10 bg-white/[0.03] text-zinc-300",
+  }[tone];
 }
 
 function valuationTone(valuation?: Valuation | null): "emerald" | "amber" | "red" | "slate" {
@@ -2133,6 +2254,24 @@ function valuationLabel(valuation?: Valuation | null) {
   return `Value: ${valuation.verdict.replace("_", " ")}`;
 }
 
+function valuationTooltipLines(valuation?: Valuation | null) {
+  if (!valuation) return null;
+
+  const lines: string[] = [];
+  const explanation = valuation.explanation?.trim();
+  if (explanation) {
+    lines.push(explanation);
+  }
+
+  const estimateLow = formatMoneyCompact(valuation.estimated_low, valuation.currency);
+  const estimateHigh = formatMoneyCompact(valuation.estimated_high, valuation.currency);
+  if (estimateLow && estimateHigh) {
+    lines.push(`Estimated range ${estimateLow} - ${estimateHigh}`);
+  }
+
+  return lines.length > 0 ? lines : null;
+}
+
 function formatDistanceKm(distanceKm?: number | null, approximate = false) {
   if (typeof distanceKm !== "number" || !Number.isFinite(distanceKm)) return null;
   if (distanceKm < 10) {
@@ -2146,12 +2285,19 @@ function formatDistanceKm(distanceKm?: number | null, approximate = false) {
 function ListingCardBody({
   item,
   titleClassName,
+  allowTooltipFocus = true,
 }: {
   item: Listing;
   titleClassName?: string;
+  allowTooltipFocus?: boolean;
 }) {
   const imageUrl = item.image_urls?.[0];
   const distanceLabel = formatDistanceKm(item.distance_km, item.distance_is_approximate);
+  const vehicleMileageLabel = formatVehicleMileageKm(inferVehicleMileageKm(item));
+  const footerLabel = vehicleMileageLabel ?? item.condition?.toUpperCase() ?? null;
+  const valuationLabelText = valuationLabel(item.valuation) ?? "Value: pending";
+  const valuationTooltipText = valuationTooltipLines(item.valuation);
+  const valuationToneValue = valuationTone(item.valuation);
 
   return (
     <>
@@ -2174,7 +2320,7 @@ function ListingCardBody({
         </div>
       </div>
 
-      <div className="flex min-h-[196px] flex-1 flex-col gap-2 overflow-hidden p-3.5">
+      <div className="flex min-h-[152px] flex-1 flex-col gap-2.5 overflow-hidden p-3.5">
         <div className="flex items-start justify-between gap-2">
           <p className="text-base font-semibold tracking-tight text-white">{formatPrice(item.price)}</p>
           {distanceLabel ? (
@@ -2199,32 +2345,54 @@ function ListingCardBody({
 
         <div className="flex flex-wrap gap-1.5">
           {item.valuation ? (
-            <InsightPill
-              label={valuationLabel(item.valuation) ?? "Value: pending"}
-              tone={valuationTone(item.valuation)}
-            />
+            valuationTooltipText ? (
+              <TooltipProvider delayDuration={120}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span
+                      className={cn(
+                        "inline-flex cursor-help rounded-full border px-2 py-0.5 text-[10px] font-medium outline-none",
+                        allowTooltipFocus && "focus-visible:ring-2 focus-visible:ring-white/30 focus-visible:ring-offset-0",
+                        insightPillToneClasses(valuationToneValue),
+                      )}
+                      tabIndex={allowTooltipFocus ? 0 : -1}
+                    >
+                      {valuationLabelText}
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent
+                    side="top"
+                    align="start"
+                    className="max-w-64 border border-white/10 bg-zinc-950/95 px-3 py-2 text-[11px] leading-relaxed text-zinc-100 shadow-2xl"
+                  >
+                    <div className="space-y-1">
+                      {valuationTooltipText.map((line) => (
+                        <p key={line} className="text-zinc-200">
+                          {line}
+                        </p>
+                      ))}
+                    </div>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            ) : (
+              <InsightPill label={valuationLabelText} tone={valuationToneValue} />
+            )
           ) : null}
         </div>
 
-        <div className="mt-auto space-y-1">
-          {typeof item.score === "number" ? (
-            <p className="text-[11px] text-zinc-500">Score {item.score.toFixed(2)}</p>
-          ) : null}
-          {item.valuation?.explanation ? (
-            <p className="line-clamp-2 text-xs leading-relaxed text-zinc-400">
-              {item.valuation.explanation}
-              {item.valuation.estimated_low != null && item.valuation.estimated_high != null
-                ? ` | ${formatMoneyCompact(item.valuation.estimated_low, item.valuation.currency)}-${formatMoneyCompact(item.valuation.estimated_high, item.valuation.currency)}`
-                : ""}
+        <div className="mt-auto min-h-[16px]">
+          {footerLabel ? (
+            <p
+              className={cn(
+                "line-clamp-1 text-zinc-500",
+                vehicleMileageLabel
+                  ? "text-xs font-medium tracking-[0.02em] text-zinc-400"
+                  : "text-[11px] uppercase tracking-[0.12em]",
+              )}
+            >
+              {footerLabel}
             </p>
-          ) : null}
-          {item.condition ? (
-            <p className="line-clamp-1 text-[11px] uppercase tracking-[0.12em] text-zinc-500">
-              {item.condition}
-            </p>
-          ) : null}
-          {item.snippet ? (
-            <p className="line-clamp-2 text-xs leading-relaxed text-zinc-500">{item.snippet}</p>
           ) : null}
         </div>
       </div>
@@ -2243,7 +2411,7 @@ function MarketplaceResultCard({
   copilotSelected: boolean;
   onToggleSelection: (item: Listing) => void;
 }) {
-  const content = <ListingCardBody item={item} />;
+  const content = <ListingCardBody item={item} allowTooltipFocus={!selectionMode} />;
 
   return (
     <li className="h-full">
@@ -2289,7 +2457,7 @@ function CopilotShortlistCard({
 }) {
   const body = (
     <div className="flex flex-1 flex-col">
-      <ListingCardBody item={item} titleClassName="text-[15px]" />
+      <ListingCardBody item={item} titleClassName="text-[15px]" allowTooltipFocus={!selectionMode} />
     </div>
   );
 
@@ -2848,6 +3016,7 @@ export default function HomePage() {
 
   const [saved, setSaved] = useState<SavedSearch[]>([]);
   const [savedLoading, setSavedLoading] = useState(false);
+  const [savingSearch, setSavingSearch] = useState(false);
   const [savedError, setSavedError] = useState<string | null>(null);
   const [notifications, setNotifications] = useState<SavedSearchNotification[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(false);
@@ -3400,7 +3569,7 @@ export default function HomePage() {
           setLocationPersistence("account");
           setLocationError(null);
         }
-      } catch (error: unknown) {
+      } catch {
         if (!cancelled && !currentLocationRef.current) {
           setLocationPersistence(null);
         }
@@ -3600,7 +3769,55 @@ export default function HomePage() {
     }
   }
 
-  async function fetchNotifications(): Promise<SavedSearchNotification[] | null> {
+  async function refreshSavedSearchAlert(searchId: number): Promise<SavedSearch | null> {
+    if (!accessToken) throw new Error("Please log in to refresh saved search alerts.");
+
+    const res = await fetch(`${API_BASE}/saved-searches/${searchId}/alerts/refresh`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`POST /saved-searches/${searchId}/alerts/refresh failed (${res.status}): ${text}`);
+    }
+
+    const updated = (await res.json()) as SavedSearch;
+    setSaved((prev) => prev.map((entry) => (entry.id === updated.id ? updated : entry)));
+    return updated;
+  }
+
+  async function onRefreshSavedSearches() {
+    const fetched = await fetchSavedSearches();
+    if (!fetched || fetched.length === 0) {
+      return;
+    }
+
+    const pendingEntries = fetched.filter(hasIncompleteSavedSearchBaseline);
+    if (pendingEntries.length === 0) {
+      return;
+    }
+
+    setSavedLoading(true);
+    setSavedError(null);
+    try {
+      for (const entry of pendingEntries) {
+        await refreshSavedSearchAlert(entry.id);
+      }
+      await fetchSavedSearches();
+    } catch (err: unknown) {
+      setSavedError(
+        err instanceof Error ? err.message : "Failed to refresh one or more saved search baselines",
+      );
+      await fetchSavedSearches();
+    } finally {
+      setSavedLoading(false);
+    }
+  }
+
+  async function fetchNotifications(
+    options?: { refreshSavedSearches?: boolean },
+  ): Promise<SavedSearchNotification[] | null> {
     setNotificationsLoading(true);
     setNotificationsError(null);
 
@@ -3622,6 +3839,9 @@ export default function HomePage() {
 
       const json = (await res.json()) as SavedSearchNotification[];
       setNotifications(json);
+      if (options?.refreshSavedSearches) {
+        await fetchSavedSearches();
+      }
       return json;
     } catch (err: unknown) {
       setNotificationsError(
@@ -3838,7 +4058,7 @@ export default function HomePage() {
     return () => observer.disconnect();
   }, [hasMore, loadMore, loadingMore, searchLoading]);
 
-  async function runAllSavedSearches(
+  const runAllSavedSearches = useCallback(async (
     savedSearches: SavedSearch[],
     {
       selectedSort = sortBy,
@@ -3847,7 +4067,7 @@ export default function HomePage() {
       selectedSort?: SortOption;
       selectedLimit?: number;
     } = {},
-  ) {
+  ) => {
     if (!accessToken || savedSearches.length === 0 || fetchInFlightRef.current) return;
 
     const previousState = {
@@ -3990,7 +4210,26 @@ export default function HomePage() {
       setSearchLoading(false);
       fetchInFlightRef.current = false;
     }
-  }
+  }, [
+    accessToken,
+    activeLimit,
+    activeQuery,
+    activeSavedSearchId,
+    activeSort,
+    activeSources,
+    fetchSavedSearchPage,
+    hasSearched,
+    limit,
+    nextOffset,
+    rawResults,
+    resetCopilotConversation,
+    resultMode,
+    results,
+    sortBy,
+    sourceErrors,
+    total,
+    savedBatchPagination,
+  ]);
 
   const rerunActiveSearchWithLocation = useCallback(async () => {
     if (!hasSearched) return;
@@ -4158,7 +4397,7 @@ export default function HomePage() {
     if (user) {
       void (async () => {
         const fetched = await fetchSavedSearches();
-        void fetchNotifications();
+        void fetchNotifications({ refreshSavedSearches: true });
         if (!fetched) return;
 
         if (autoLoadedSavedForUserRef.current === user.id) return;
@@ -4195,6 +4434,7 @@ export default function HomePage() {
 
   async function onSaveCurrentSearch() {
     setSavedError(null);
+    setSavingSearch(true);
 
     try {
       if (!accessToken) throw new Error("Please log in to save searches.");
@@ -4216,14 +4456,31 @@ export default function HomePage() {
       });
 
       if (!res.ok) {
+        if (res.status === 409) {
+          throw new Error("That saved search already exists");
+        }
         const text = await res.text();
         throw new Error(`POST /saved-searches failed (${res.status}): ${text}`);
       }
 
-      await fetchSavedSearches();
-      await fetchNotifications();
+      const created = (await res.json()) as SavedSearch;
+      let nextSavedSearch = created;
+      setSaved((prev) => [created, ...prev.filter((entry) => entry.id !== created.id)]);
+      if (
+        hasIncompleteSavedSearchBaseline(created)
+        && !created.last_alert_attempted_at
+        && !created.last_alert_error_message
+      ) {
+        nextSavedSearch = (await refreshSavedSearchAlert(created.id)) ?? created;
+      }
+      setSaved((prev) => [
+        nextSavedSearch,
+        ...prev.filter((entry) => entry.id !== nextSavedSearch.id),
+      ]);
     } catch (err: unknown) {
       setSavedError(err instanceof Error ? err.message : "Failed to save search");
+    } finally {
+      setSavingSearch(false);
     }
   }
 
@@ -4248,7 +4505,6 @@ export default function HomePage() {
         setActiveSavedSearchId(null);
       }
       await fetchSavedSearches();
-      await fetchNotifications();
     } catch (err: unknown) {
       setSavedError(err instanceof Error ? err.message : "Failed to delete saved search");
     }
@@ -4393,6 +4649,11 @@ export default function HomePage() {
       return;
     }
 
+    const queryChanged = editing.query !== trimmedQuery;
+    const sourcesChanged =
+      editing.sources.length !== editSources.length
+      || editing.sources.some((source, index) => source !== editSources[index]);
+
     setEditSaving(true);
     try {
       const res = await fetch(`${API_BASE}/saved-searches/${editing.id}`, {
@@ -4420,7 +4681,9 @@ export default function HomePage() {
 
       const updated = (await res.json()) as SavedSearch;
       setSaved((prev) => prev.map((entry) => (entry.id === updated.id ? updated : entry)));
-      await fetchNotifications();
+      if (queryChanged || sourcesChanged) {
+        setNotifications((prev) => prev.filter((entry) => entry.saved_search_id !== updated.id));
+      }
 
       if (activeSavedSearchId === updated.id) {
         const normalizedSources = updated.sources.filter(isSourceOption);
@@ -4779,6 +5042,7 @@ export default function HomePage() {
       toggleSource={toggleSource}
       searchLoading={searchLoading}
       loadingMore={loadingMore}
+      savingSearch={savingSearch}
       onSearch={onSearch}
       onSaveCurrentSearch={onSaveCurrentSearch}
       limit={limit}
@@ -4816,6 +5080,7 @@ export default function HomePage() {
       notificationsError={notificationsError}
       activeSavedSearchId={activeSavedSearchId}
       fetchSavedSearches={fetchSavedSearches}
+      onRefreshSavedSearches={onRefreshSavedSearches}
       fetchNotifications={fetchNotifications}
       onMarkNotificationRead={onMarkNotificationRead}
       runAllSavedSearches={runAllSavedSearches}

@@ -5,6 +5,10 @@ import re
 from pathlib import Path
 
 from app.connectors.base import MarketplaceConnector
+from app.connectors.vehicle_metadata import (
+    extract_vehicle_mileage_km,
+    looks_like_automotive_listing,
+)
 from app.connectors.facebook_marketplace.connector import (
     FacebookMarketplaceConnector,
     sanitize_cookie_payload,
@@ -44,6 +48,8 @@ def _looks_like_location_line(line: str) -> bool:
     lowered = line.lower()
     if "seller" in lowered:
         return False
+    if re.search(r"\d", line) and re.search(r"\b(?:km|kms|kilomet(?:er|re)s?)\b", lowered) and "away" not in lowered:
+        return False
     if "km away" in lowered:
         return True
     if "," in line and len(line.split()) <= 6:
@@ -58,8 +64,14 @@ def _build_listing_snippet(item: FacebookNormalizedListing) -> str | None:
         return None
 
     cleaned_title = _clean_card_line(item.title).lower()
-    snippet_lines: list[str] = []
+    descriptive_lines: list[str] = []
+    mileage_line: str | None = None
     seen: set[str] = set()
+    is_automotive = looks_like_automotive_listing(
+        item.title,
+        item.listing_url,
+        *(lines if isinstance(lines, list) else []),
+    )
     for raw_line in lines:
         line = _clean_card_line(raw_line)
         if not line:
@@ -78,9 +90,21 @@ def _build_listing_snippet(item: FacebookNormalizedListing) -> str | None:
         if lowered in seen:
             continue
         seen.add(lowered)
-        snippet_lines.append(line)
-        if len(snippet_lines) >= 2:
+
+        if (
+            is_automotive
+            and mileage_line is None
+            and extract_vehicle_mileage_km(item.title, item.listing_url, line) is not None
+        ):
+            mileage_line = line
+            continue
+
+        descriptive_lines.append(line)
+        if len(descriptive_lines) >= 2 and (not is_automotive or mileage_line is not None):
             break
+
+    snippet_lines = ([mileage_line] if mileage_line else []) + descriptive_lines
+    snippet_lines = snippet_lines[:2]
 
     if not snippet_lines:
         return None
@@ -110,6 +134,19 @@ def _to_listing(item: FacebookNormalizedListing) -> Listing:
         if item.age_hint:
             snippet_parts.append(item.age_hint)
     snippet = " | ".join(snippet_parts) if snippet_parts else None
+    raw = item.raw if isinstance(item.raw, dict) else {}
+    raw_lines = raw.get("lines") if isinstance(raw.get("lines"), list) else []
+    raw_text = _clean_card_line(raw.get("text")) if isinstance(raw, dict) else ""
+    detail_lines = raw.get("detail_lines") if isinstance(raw.get("detail_lines"), list) else []
+    detail_text = _clean_card_line(raw.get("detail_text")) if isinstance(raw, dict) else ""
+    vehicle_mileage_km = extract_vehicle_mileage_km(
+        item.title,
+        item.listing_url,
+        raw_text,
+        *raw_lines,
+        detail_text,
+        *detail_lines,
+    )
 
     return Listing(
         source="facebook",
@@ -124,6 +161,7 @@ def _to_listing(item: FacebookNormalizedListing) -> Listing:
         condition=None,
         snippet=snippet,
         posted_at=item.posted_at,
+        vehicle_mileage_km=vehicle_mileage_km,
     )
 
 

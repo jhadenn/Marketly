@@ -2,12 +2,16 @@ from sqlalchemy.orm import Session
 
 from app.models.user_location_preference import UserLocationPreference
 from app.schemas.location import ResolvedLocation
+from app.services.user_ids import normalize_user_id
 
 
-def get_user_location_preference(db: Session, user_id: str) -> UserLocationPreference | None:
+def get_user_location_preference(db: Session, user_id: object | None) -> UserLocationPreference | None:
+    normalized_user_id = normalize_user_id(user_id)
+    if not normalized_user_id:
+        return None
     return (
         db.query(UserLocationPreference)
-        .filter(UserLocationPreference.user_id == user_id)
+        .filter(UserLocationPreference.user_id == normalized_user_id)
         .first()
     )
 
@@ -15,12 +19,16 @@ def get_user_location_preference(db: Session, user_id: str) -> UserLocationPrefe
 def upsert_user_location_preference(
     db: Session,
     *,
-    user_id: str,
+    user_id: object,
     resolved: ResolvedLocation,
 ) -> UserLocationPreference:
-    row = get_user_location_preference(db, user_id)
+    normalized_user_id = normalize_user_id(user_id)
+    if not normalized_user_id:
+        raise ValueError("user_id is required")
+
+    row = get_user_location_preference(db, normalized_user_id)
     if row is None:
-        row = UserLocationPreference(user_id=user_id)
+        row = UserLocationPreference(user_id=normalized_user_id)
         db.add(row)
 
     row.display_name = resolved.display_name
@@ -37,7 +45,7 @@ def upsert_user_location_preference(
     return row
 
 
-def delete_user_location_preference(db: Session, user_id: str) -> bool:
+def delete_user_location_preference(db: Session, user_id: object | None) -> bool:
     row = get_user_location_preference(db, user_id)
     if row is None:
         return False

@@ -213,7 +213,6 @@ Marketly/
 ## Roadmap
 
 - [ ] add feature to see listings within x kms from your city
-- [ ] 
 
 See `https://github.com/jhadenn/Marketly/issues` for open items.
 

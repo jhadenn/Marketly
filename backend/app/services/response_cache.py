@@ -99,7 +99,7 @@ def build_search_response_cache_key(
     search_location_context: Any | None = None,
 ) -> str:
     raw = (
-        f"v1|q={query}"
+        f"v5|q={query}"
         f"|sources={','.join(sorted(sources))}"
         f"|limit={limit}"
         f"|offset={offset}"

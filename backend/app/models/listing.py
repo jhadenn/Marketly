@@ -57,6 +57,7 @@ class Listing(BaseModel):
     posted_at: Optional[str] = None
     distance_km: Optional[float] = None
     distance_is_approximate: bool = False
+    vehicle_mileage_km: Optional[float] = Field(default=None, ge=0)
 
     # Ranking metadata
     score: float = Field(default=0.0, description="Relevance score (higher is better)")

@@ -4,11 +4,16 @@ import asyncio
 import json
 import logging
 import random
+import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 from urllib.parse import urlparse
 
+from app.connectors.vehicle_metadata import (
+    extract_vehicle_mileage_km,
+    looks_like_automotive_listing,
+)
 from app.connectors.facebook_marketplace.errors import (
     FacebookConnectorError,
     FacebookConnectorErrorCode,
@@ -59,7 +64,19 @@ BLOCKED_HINTS = (
 
 EXTRACTION_SCRIPT = """
 () => {
-  const anchors = Array.from(document.querySelectorAll('a[href*="/marketplace/item/"]'));
+  const normalizeText = (value) => (value || "").replace(/\\s+/g, " ").trim();
+  const toLines = (value) =>
+    (value || "")
+      .split(/\\r?\\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  const itemHrefSelector = 'a[href*="/marketplace/item/"]';
+  const countItemAnchors = (node) => {
+    if (!node || typeof node.querySelectorAll !== "function") return 0;
+    return node.querySelectorAll(itemHrefSelector).length;
+  };
+
+  const anchors = Array.from(document.querySelectorAll(itemHrefSelector));
   const seen = new Set();
   const items = [];
 
@@ -69,33 +86,137 @@ EXTRACTION_SCRIPT = """
     seen.add(rawHref);
 
     let container = anchor;
-    for (let i = 0; i < 6; i++) {
-      if (!container.parentElement) break;
-      container = container.parentElement;
+    for (let i = 0; i < 12; i++) {
+      const parent = container.parentElement;
+      if (!parent) break;
+      if (countItemAnchors(parent) > 1) break;
+      container = parent;
     }
 
-    const rawText = container.innerText || anchor.innerText || "";
-    const lines = rawText
-      .split(/\\r?\\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-    const text = rawText.replace(/\\s+/g, " ").trim();
+    const ariaLabel = normalizeText(anchor.getAttribute("aria-label") || "");
+    const rawText = container.innerText || anchor.innerText || ariaLabel || "";
+    const lines = toLines(rawText);
+    const text = normalizeText(rawText);
     const images = Array.from(container.querySelectorAll("img"))
       .map((img) => img.src || "")
       .filter(Boolean);
+    const scopes = [];
+    const seenScopeTexts = new Set();
+    let scopeNode = anchor;
+    for (let depth = 0; depth < 10 && scopeNode; depth += 1, scopeNode = scopeNode.parentElement) {
+      const scopeRawText = scopeNode.innerText || "";
+      const scopeText = normalizeText(scopeRawText);
+      const scopeLines = toLines(scopeRawText).slice(0, 12);
+      if (!scopeText || !scopeLines.length) continue;
+      if (scopeText.length > 420 || scopeLines.length > 12) continue;
+      if (seenScopeTexts.has(scopeText)) continue;
+      seenScopeTexts.add(scopeText);
+      scopes.push({
+        depth,
+        text: scopeText,
+        lines: scopeLines,
+      });
+    }
+    if (ariaLabel && !seenScopeTexts.has(ariaLabel)) {
+      scopes.push({
+        depth: 0,
+        text: ariaLabel,
+        lines: toLines(ariaLabel),
+      });
+    }
 
     items.push({
       href: rawHref,
-      title: (anchor.innerText || anchor.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim(),
+      title: normalizeText(anchor.innerText || ariaLabel || ""),
       text,
       lines,
       image_urls: images.slice(0, 4),
+      scopes,
     });
   }
 
   return items;
 }
 """
+
+
+def _clean_text_block(value: object) -> str:
+    return " ".join(str(value or "").split()).strip()
+
+
+def _record_raw_lines(record: FacebookNormalizedListing) -> list[str]:
+    raw = record.raw if isinstance(record.raw, dict) else {}
+    lines = raw.get("lines")
+    if not isinstance(lines, list):
+        return []
+    return [str(line).strip() for line in lines if str(line).strip()]
+
+
+def _record_raw_text(record: FacebookNormalizedListing) -> str:
+    raw = record.raw if isinstance(record.raw, dict) else {}
+    return _clean_text_block(raw.get("text"))
+
+
+def _record_detail_lines(record: FacebookNormalizedListing) -> list[str]:
+    raw = record.raw if isinstance(record.raw, dict) else {}
+    lines = raw.get("detail_lines")
+    if not isinstance(lines, list):
+        return []
+    return [str(line).strip() for line in lines if str(line).strip()]
+
+
+def _record_detail_text(record: FacebookNormalizedListing) -> str:
+    raw = record.raw if isinstance(record.raw, dict) else {}
+    return _clean_text_block(raw.get("detail_text"))
+
+
+def _record_vehicle_mileage_km(record: FacebookNormalizedListing) -> float | None:
+    return extract_vehicle_mileage_km(
+        record.title,
+        record.listing_url,
+        _record_raw_text(record),
+        *_record_raw_lines(record),
+        _record_detail_text(record),
+        *_record_detail_lines(record),
+    )
+
+
+def _needs_vehicle_detail_enrichment(record: FacebookNormalizedListing) -> bool:
+    if _record_vehicle_mileage_km(record) is not None:
+        return False
+    return looks_like_automotive_listing(
+        record.title,
+        record.listing_url,
+        _record_raw_text(record),
+        *_record_raw_lines(record),
+    )
+
+
+def _apply_vehicle_detail_text(record: FacebookNormalizedListing, detail_text: str) -> None:
+    cleaned_detail_text = _clean_text_block(detail_text)
+    if not cleaned_detail_text:
+        return
+
+    raw = dict(record.raw or {})
+    detail_lines = [line.strip() for line in str(detail_text or "").splitlines() if line.strip()]
+    raw["detail_text"] = cleaned_detail_text
+    raw["detail_lines"] = detail_lines[:80]
+
+    mileage = extract_vehicle_mileage_km(record.title, record.listing_url, cleaned_detail_text, *detail_lines)
+    if mileage is not None:
+        existing_lines = [str(line).strip() for line in raw.get("lines", []) if str(line).strip()]
+        if all(
+            not (
+                re.search(r"\b(?:km|kms|kilomet(?:er|re)s?)\b", line, re.IGNORECASE)
+                and "away" not in line.lower()
+            )
+            for line in existing_lines
+        ):
+            formatted_mileage = f"{int(round(mileage)):,} km"
+            raw["lines"] = [*existing_lines, formatted_mileage]
+            raw["text"] = _clean_text_block(" ".join([*existing_lines, formatted_mileage]))
+
+    record.raw = raw
 
 
 def _is_facebook_cookie_domain(domain: str) -> bool:
@@ -403,6 +524,11 @@ class FacebookMarketplaceConnector:
                 raw_cards,
                 limit=request.limit,
             )
+            await self._enrich_vehicle_records_from_detail_pages(
+                context=context,
+                records=normalized,
+                max_records=(8 if request.multi_source else 12),
+            )
 
             if not normalized:
                 await self._raise_if_blocked(page, extracted_cards=len(raw_cards))
@@ -561,6 +687,46 @@ class FacebookMarketplaceConnector:
             self._log("normalize_skipped_cards", skipped=skipped, total=len(cards))
 
         return records
+
+    async def _enrich_vehicle_records_from_detail_pages(
+        self,
+        *,
+        context,
+        records: list[FacebookNormalizedListing],
+        max_records: int,
+    ) -> None:
+        candidates = [record for record in records if _needs_vehicle_detail_enrichment(record)]
+        if not candidates:
+            return
+
+        detail_page = await context.new_page()
+        detail_page.set_default_timeout(min(self.timeout_ms, 15000))
+        try:
+            for record in candidates[: max(1, max_records)]:
+                try:
+                    await detail_page.goto(record.listing_url, wait_until="domcontentloaded")
+                    try:
+                        await detail_page.wait_for_load_state(
+                            "networkidle",
+                            timeout=min(self.timeout_ms, 2500),
+                        )
+                    except Exception:
+                        pass
+                    detail_text = await detail_page.evaluate(
+                        "() => (document.body ? document.body.innerText : '')"
+                    )
+                    _apply_vehicle_detail_text(record, detail_text)
+                except Exception as exc:
+                    self._log(
+                        "vehicle_detail_enrichment_failed",
+                        url=record.listing_url,
+                        error=str(exc),
+                    )
+        finally:
+            try:
+                await detail_page.close()
+            except Exception:
+                pass
 
     async def _raise_if_blocked(self, page, *, extracted_cards: int = 0) -> None:
         url = (page.url or "").lower()

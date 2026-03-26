@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -18,11 +19,15 @@ from app.services.location import get_user_location_preference
 from app.services.listing_insights import enrich_listings_with_insights, listing_fingerprint, listing_key
 from app.services.listing_snapshots import persist_listing_snapshots, previously_seen_fingerprints
 from app.services.search_service import FacebookRuntimeContext, unified_search
+from app.services.user_ids import normalize_user_id
 
 logger = logging.getLogger(__name__)
 
 ALERT_CONFIDENCE_THRESHOLD = 0.65
 _alerts_refresh_limiter = TTLCache(max_items=2048)
+_ALERT_ERROR_CODE_CHECK_FAILED = "CHECK_FAILED"
+_ALERT_ERROR_CODE_NO_SOURCES = "NO_SOURCES"
+_ALERT_ERROR_CODE_SOURCE_ERRORS = "SOURCE_ERRORS"
 
 
 def _split_sources(raw_sources: str) -> list[str]:
@@ -41,11 +46,12 @@ def _split_sources(raw_sources: str) -> list[str]:
     return deduped
 
 
-def _facebook_runtime_context(db: Session, user_id: str | None) -> FacebookRuntimeContext | None:
-    if not user_id:
+def _facebook_runtime_context(db: Session, user_id: object | None) -> FacebookRuntimeContext | None:
+    normalized_user_id = normalize_user_id(user_id)
+    if not normalized_user_id:
         return None
 
-    location_row = get_user_location_preference(db, user_id)
+    location_row = get_user_location_preference(db, normalized_user_id)
     location = (
         ResolvedLocation(
             display_name=location_row.display_name,
@@ -61,10 +67,10 @@ def _facebook_runtime_context(db: Session, user_id: str | None) -> FacebookRunti
         else None
     )
 
-    row = get_user_facebook_credential(db, user_id)
+    row = get_user_facebook_credential(db, normalized_user_id)
     if row is None:
         return FacebookRuntimeContext(
-            user_id=user_id,
+            user_id=normalized_user_id,
             latitude=location.latitude if location is not None else None,
             longitude=location.longitude if location is not None else None,
         )
@@ -72,15 +78,15 @@ def _facebook_runtime_context(db: Session, user_id: str | None) -> FacebookRunti
     try:
         cookie_payload = decrypt_cookie_payload(row.encrypted_cookie_json)
     except Exception as exc:
-        logger.warning("alert job facebook decrypt failed for user %s: %s", user_id, exc)
+        logger.warning("alert job facebook decrypt failed for user %s: %s", normalized_user_id, exc)
         return FacebookRuntimeContext(
-            user_id=user_id,
+            user_id=normalized_user_id,
             latitude=location.latitude if location is not None else None,
             longitude=location.longitude if location is not None else None,
         )
 
     return FacebookRuntimeContext(
-        user_id=user_id,
+        user_id=normalized_user_id,
         cookie_payload=cookie_payload,
         credential_fingerprint_sha256=row.cookie_fingerprint_sha256,
         latitude=location.latitude if location is not None else None,
@@ -88,10 +94,11 @@ def _facebook_runtime_context(db: Session, user_id: str | None) -> FacebookRunti
     )
 
 
-def _search_location_context(db: Session, user_id: str | None) -> ResolvedLocation | None:
-    if not user_id:
+def _search_location_context(db: Session, user_id: object | None) -> ResolvedLocation | None:
+    normalized_user_id = normalize_user_id(user_id)
+    if not normalized_user_id:
         return None
-    row = get_user_location_preference(db, user_id)
+    row = get_user_location_preference(db, normalized_user_id)
     if row is None:
         return None
     return ResolvedLocation(
@@ -211,6 +218,102 @@ def _as_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
+@dataclass
+class SavedSearchAlertCheckOutcome:
+    successful_check: bool
+    notification_created: bool = False
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+def _clean_error_message(message: object, *, max_length: int = 500) -> str | None:
+    cleaned = " ".join(str(message or "").split()).strip()
+    if not cleaned:
+        return None
+    if len(cleaned) <= max_length:
+        return cleaned
+    return cleaned[: max_length - 3].rstrip() + "..."
+
+
+def _source_label(source: str) -> str:
+    mapping = {
+        "ebay": "eBay",
+        "facebook": "Facebook",
+        "kijiji": "Kijiji",
+    }
+    return mapping.get(source.strip().lower(), source.strip().title())
+
+
+def clear_saved_search_alert_error(saved_search: SavedSearch) -> None:
+    saved_search.last_alert_error_code = None
+    saved_search.last_alert_error_message = None
+
+
+def record_saved_search_alert_failure(
+    saved_search: SavedSearch,
+    *,
+    attempted_at: datetime,
+    error_code: str | None,
+    error_message: str | None,
+) -> None:
+    saved_search.last_alert_attempted_at = attempted_at
+    saved_search.last_alert_error_code = (str(error_code).strip()[:100] if error_code else None) or None
+    saved_search.last_alert_error_message = _clean_error_message(error_message)
+
+
+def _mark_saved_search_alert_success(
+    saved_search: SavedSearch,
+    *,
+    attempted_at: datetime,
+) -> None:
+    saved_search.last_alert_attempted_at = attempted_at
+    saved_search.last_alert_checked_at = attempted_at
+    clear_saved_search_alert_error(saved_search)
+
+
+def _source_error_summary(
+    source_errors: dict[str, object],
+    *,
+    source_order: list[str],
+) -> tuple[str, str]:
+    if not source_errors:
+        return _ALERT_ERROR_CODE_SOURCE_ERRORS, "Saved search alert check failed."
+
+    order = {source: idx for idx, source in enumerate(source_order)}
+    summarized: list[tuple[str, str, str]] = []
+    for source, error in source_errors.items():
+        code = str(getattr(error, "code", "") or _ALERT_ERROR_CODE_SOURCE_ERRORS)
+        message = _clean_error_message(getattr(error, "message", None)) or "Source unavailable."
+        summarized.append((source, code, f"{_source_label(source)}: {message}"))
+    summarized.sort(key=lambda item: (order.get(item[0], len(order)), item[0]))
+
+    if len(summarized) == 1:
+        _, code, message = summarized[0]
+        return code, message
+
+    combined_message = _clean_error_message("; ".join(message for _, _, message in summarized))
+    return _ALERT_ERROR_CODE_SOURCE_ERRORS, combined_message or "Saved search alert check failed."
+
+
+def _persist_listing_snapshots_or_raise(
+    *,
+    db: Session,
+    query: str,
+    listings: list[Listing],
+    user_id: str | None,
+    saved_search_id: int,
+) -> None:
+    persisted = persist_listing_snapshots(
+        db=db,
+        query=query,
+        listings=listings,
+        user_id=user_id,
+        saved_search_id=saved_search_id,
+    )
+    if listings and persisted <= 0:
+        raise RuntimeError("Failed to persist listing snapshots for this alert check.")
+
+
 def _saved_search_is_stale(saved_search: SavedSearch, *, now: datetime) -> bool:
     last_checked_at = _as_utc(getattr(saved_search, "last_alert_checked_at", None))
     if last_checked_at is None:
@@ -240,9 +343,14 @@ async def refresh_saved_search_alerts_for_user(
     if not any(_saved_search_is_stale(row, now=now) for row in saved_searches):
         return False
 
+    bypass_refresh_window = any(getattr(row, "last_alert_checked_at", None) is None for row in saved_searches)
     refresh_window_seconds = max(0, int(settings.MARKETLY_ALERTS_AUTO_REFRESH_WINDOW_SECONDS))
     cache_key = f"saved-search-alert-refresh:{user_id}"
-    if refresh_window_seconds > 0 and _alerts_refresh_limiter.get(cache_key) is not None:
+    if (
+        refresh_window_seconds > 0
+        and not bypass_refresh_window
+        and _alerts_refresh_limiter.get(cache_key) is not None
+    ):
         return False
     if refresh_window_seconds > 0:
         _alerts_refresh_limiter.set(cache_key, True, ttl_seconds=refresh_window_seconds)
@@ -261,6 +369,160 @@ async def refresh_saved_search_alerts_for_user(
         return False
 
     return True
+
+
+async def run_saved_search_alert_check(
+    db: Session,
+    *,
+    saved_search: SavedSearch,
+    limit_per_search: int,
+) -> SavedSearchAlertCheckOutcome:
+    source_list = _split_sources(saved_search.sources)
+    attempted_at = _utc_now()
+    saved_search_user_id = normalize_user_id(saved_search.user_id)
+    if not source_list:
+        message = "Saved search has no supported sources configured."
+        record_saved_search_alert_failure(
+            saved_search,
+            attempted_at=attempted_at,
+            error_code=_ALERT_ERROR_CODE_NO_SOURCES,
+            error_message=message,
+        )
+        return SavedSearchAlertCheckOutcome(
+            successful_check=False,
+            error_code=_ALERT_ERROR_CODE_NO_SOURCES,
+            error_message=message,
+        )
+
+    facebook_runtime_context = None
+    search_location_context = _search_location_context(db, saved_search_user_id)
+    if "facebook" in source_list:
+        facebook_runtime_context = _facebook_runtime_context(db, saved_search_user_id)
+
+    results, _, _, source_errors = await unified_search(
+        query=saved_search.query,
+        sources=source_list,
+        limit=limit_per_search,
+        offset=0,
+        sort="newest",
+        facebook_runtime_context=facebook_runtime_context,
+        search_location_context=search_location_context,
+    )
+    if source_errors:
+        error_code, error_message = _source_error_summary(source_errors, source_order=source_list)
+        record_saved_search_alert_failure(
+            saved_search,
+            attempted_at=attempted_at,
+            error_code=error_code,
+            error_message=error_message,
+        )
+        return SavedSearchAlertCheckOutcome(
+            successful_check=False,
+            error_code=error_code,
+            error_message=error_message,
+        )
+
+    enrich_listings_with_insights(db, saved_search.query, results)
+    seen_before = _as_utc(saved_search.last_alert_checked_at)
+    if seen_before is None:
+        _persist_listing_snapshots_or_raise(
+            db=db,
+            query=saved_search.query,
+            listings=results,
+            user_id=saved_search_user_id,
+            saved_search_id=saved_search.id,
+        )
+        _mark_saved_search_alert_success(saved_search, attempted_at=attempted_at)
+        return SavedSearchAlertCheckOutcome(successful_check=True)
+
+    fingerprints = [listing_fingerprint(item) for item in results]
+    seen_fingerprints = previously_seen_fingerprints(
+        db,
+        saved_search_id=saved_search.id,
+        listing_fingerprints=fingerprints,
+        seen_before=seen_before,
+    )
+    _persist_listing_snapshots_or_raise(
+        db=db,
+        query=saved_search.query,
+        listings=results,
+        user_id=saved_search_user_id,
+        saved_search_id=saved_search.id,
+    )
+
+    matched_items: list[dict] = []
+    for item in results:
+        fingerprint = listing_fingerprint(item)
+        if fingerprint in seen_fingerprints:
+            continue
+
+        confidence, why_matched = compute_match_confidence(item)
+        if confidence < ALERT_CONFIDENCE_THRESHOLD:
+            continue
+        matched_items.append(_notification_item_from_listing(item, confidence, why_matched))
+
+    _mark_saved_search_alert_success(saved_search, attempted_at=attempted_at)
+    if not matched_items:
+        return SavedSearchAlertCheckOutcome(successful_check=True)
+
+    new_count = len(matched_items)
+    db.add(
+        SavedSearchNotification(
+            user_id=saved_search_user_id or "",
+            saved_search_id=saved_search.id,
+            saved_search_query=saved_search.query,
+            summary_text=build_notification_summary(saved_search.query, new_count),
+            items_json=matched_items,
+        )
+    )
+    saved_search.last_alert_notified_at = attempted_at
+    return SavedSearchAlertCheckOutcome(
+        successful_check=True,
+        notification_created=True,
+    )
+
+
+async def execute_saved_search_alert_check(
+    db: Session,
+    *,
+    saved_search_id: int,
+    limit_per_search: int,
+) -> SavedSearchAlertCheckOutcome:
+    saved_search = db.query(SavedSearch).filter(SavedSearch.id == saved_search_id).first()
+    if saved_search is None:
+        return SavedSearchAlertCheckOutcome(
+            successful_check=False,
+            error_code=_ALERT_ERROR_CODE_CHECK_FAILED,
+            error_message="Saved search not found.",
+        )
+
+    try:
+        outcome = await run_saved_search_alert_check(
+            db,
+            saved_search=saved_search,
+            limit_per_search=limit_per_search,
+        )
+        db.commit()
+        return outcome
+    except Exception as exc:
+        db.rollback()
+        saved_search = db.query(SavedSearch).filter(SavedSearch.id == saved_search_id).first()
+        if saved_search is not None:
+            record_saved_search_alert_failure(
+                saved_search,
+                attempted_at=_utc_now(),
+                error_code=_ALERT_ERROR_CODE_CHECK_FAILED,
+                error_message=str(exc),
+            )
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+        return SavedSearchAlertCheckOutcome(
+            successful_check=False,
+            error_code=_ALERT_ERROR_CODE_CHECK_FAILED,
+            error_message=_clean_error_message(str(exc)) or "Saved search alert check failed.",
+        )
 
 
 async def run_saved_search_alert_job(
@@ -286,94 +548,23 @@ async def run_saved_search_alert_job(
         saved_search_user_id = saved_search.user_id
         saved_search_query = saved_search.query
 
-        try:
-            source_list = _split_sources(saved_search.sources)
-            if not source_list:
-                continue
-
-            facebook_runtime_context = None
-            search_location_context = _search_location_context(db, saved_search.user_id)
-            if "facebook" in source_list:
-                facebook_runtime_context = _facebook_runtime_context(db, saved_search.user_id)
-
-            results, _, _, _ = await unified_search(
-                query=saved_search.query,
-                sources=source_list,
-                limit=limit_per_search,
-                offset=0,
-                sort="relevance",
-                facebook_runtime_context=facebook_runtime_context,
-                search_location_context=search_location_context,
-            )
-            enrich_listings_with_insights(db, saved_search.query, results)
-            now = _utc_now()
-            seen_before = _as_utc(saved_search.last_alert_checked_at)
-            if seen_before is None:
-                persist_listing_snapshots(
-                    query=saved_search.query,
-                    listings=results,
-                    user_id=saved_search.user_id,
-                    saved_search_id=saved_search.id,
-                )
-                saved_search.last_alert_checked_at = now
-                db.commit()
-                continue
-
-            fingerprints = [listing_fingerprint(item) for item in results]
-            seen_fingerprints = previously_seen_fingerprints(
-                db,
-                saved_search_id=saved_search.id,
-                listing_fingerprints=fingerprints,
-                seen_before=seen_before,
-            )
-
-            persist_listing_snapshots(
-                query=saved_search.query,
-                listings=results,
-                user_id=saved_search.user_id,
-                saved_search_id=saved_search.id,
-            )
-
-            matched_items: list[dict] = []
-            for item in results:
-                fingerprint = listing_fingerprint(item)
-                if fingerprint in seen_fingerprints:
-                    continue
-
-                confidence, why_matched = compute_match_confidence(item)
-                if confidence < ALERT_CONFIDENCE_THRESHOLD:
-                    continue
-                matched_items.append(_notification_item_from_listing(item, confidence, why_matched))
-
-            saved_search.last_alert_checked_at = now
-            created_notification = False
-            if matched_items:
-                new_count = len(matched_items)
-                db.add(
-                    SavedSearchNotification(
-                        user_id=saved_search.user_id or "",
-                        saved_search_id=saved_search.id,
-                        saved_search_query=saved_search.query,
-                        summary_text=build_notification_summary(saved_search.query, new_count),
-                        items_json=matched_items,
-                    )
-                )
-                saved_search.last_alert_notified_at = now
-                created_notification = True
-
-            db.commit()
-            if created_notification:
-                notifications_created += 1
-        except Exception as exc:
-            db.rollback()
+        outcome = await execute_saved_search_alert_check(
+            db,
+            saved_search_id=saved_search_id_value,
+            limit_per_search=limit_per_search,
+        )
+        if outcome.error_code is not None:
             logger.warning(
-                "saved search alert run failed id=%s user_id=%s query=%s error=%s",
+                "saved search alert run incomplete id=%s user_id=%s query=%s code=%s error=%s",
                 saved_search_id_value,
                 saved_search_user_id,
                 saved_search_query,
-                exc,
+                outcome.error_code,
+                outcome.error_message,
             )
             continue
+        if outcome.notification_created:
+            notifications_created += 1
 
     return {
         "checked": checked,
