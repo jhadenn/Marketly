@@ -230,8 +230,12 @@ type SavedSearch = {
   query: string;
   sources: string[];
   alerts_enabled: boolean;
+  last_alert_attempted_at?: string | null;
   last_alert_checked_at?: string | null;
   last_alert_notified_at?: string | null;
+  last_alert_error_code?: string | null;
+  last_alert_error_message?: string | null;
+  next_alert_check_due_at?: string | null;
   created_at: string;
 };
 
@@ -712,9 +716,24 @@ function formatSourceLabel(source: string) {
     .join(" ");
 }
 
+function normalizeServerTimestamp(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return trimmed;
+  if (/([zZ]|[+-]\d{2}:\d{2})$/.test(trimmed)) {
+    return trimmed;
+  }
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(trimmed)) {
+    return `${trimmed.replace(" ", "T")}Z`;
+  }
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(trimmed)) {
+    return `${trimmed}Z`;
+  }
+  return trimmed;
+}
+
 function formatTimestamp(value?: string | null) {
   if (!value) return "Just now";
-  const parsed = new Date(value);
+  const parsed = new Date(normalizeServerTimestamp(value));
   if (Number.isNaN(parsed.getTime())) return value;
   return parsed.toLocaleString(undefined, {
     month: "short",
@@ -733,16 +752,40 @@ function getSavedSearchAlertStatus(entry: SavedSearch) {
     return "Alerts off";
   }
 
-  if (!entry.last_alert_checked_at) {
-    return "Waiting for first alert check. The first check sets your baseline.";
+  const lastAttempted = entry.last_alert_attempted_at
+    ? formatTimestamp(entry.last_alert_attempted_at)
+    : null;
+  const lastChecked = entry.last_alert_checked_at
+    ? formatTimestamp(entry.last_alert_checked_at)
+    : null;
+  const lastAlert = entry.last_alert_notified_at
+    ? formatTimestamp(entry.last_alert_notified_at)
+    : null;
+  const nextDue = entry.next_alert_check_due_at
+    ? formatTimestamp(entry.next_alert_check_due_at)
+    : null;
+  const failureReason = entry.last_alert_error_message?.trim();
+
+  if (failureReason) {
+    if (!lastChecked) {
+      return `Baseline failed ${lastAttempted ?? "recently"}: ${failureReason}. Refresh saved searches after fixing the issue.`;
+    }
+    return `Last checked ${lastChecked}. Latest check failed ${lastAttempted ?? "recently"}: ${failureReason}. Next check due after a successful retry.`;
   }
 
-  const lastChecked = formatTimestamp(entry.last_alert_checked_at);
-  if (!entry.last_alert_notified_at) {
-    return `Last checked ${lastChecked}. No new listings since your baseline.`;
+  if (!lastChecked) {
+    return "Baseline pending. Save should create it immediately. Refresh saved searches to retry now.";
   }
 
-  return `Last checked ${lastChecked}. Last alert ${formatTimestamp(entry.last_alert_notified_at)}.`;
+  if (!lastAlert) {
+    return `Last checked ${lastChecked}. Next check due around ${nextDue ?? "later today"}.`;
+  }
+
+  return `Last checked ${lastChecked}. Last alert ${lastAlert}. Next check due around ${nextDue ?? "later today"}.`;
+}
+
+function hasIncompleteSavedSearchBaseline(entry: SavedSearch) {
+  return Boolean(entry.alerts_enabled) && !entry.last_alert_checked_at;
 }
 
 function normalizeNotificationError(error: unknown, fallback: string) {
@@ -817,6 +860,7 @@ type SearchPageViewProps = {
   toggleSource: (source: SourceOption) => void;
   searchLoading: boolean;
   loadingMore: boolean;
+  savingSearch: boolean;
   onSearch: (e: React.FormEvent) => Promise<void>;
   onSaveCurrentSearch: () => Promise<void>;
   limit: number;
@@ -854,7 +898,10 @@ type SearchPageViewProps = {
   notificationsError: string | null;
   activeSavedSearchId: number | null;
   fetchSavedSearches: () => Promise<SavedSearch[] | null>;
-  fetchNotifications: () => Promise<SavedSearchNotification[] | null>;
+  onRefreshSavedSearches: () => Promise<void>;
+  fetchNotifications: (
+    options?: { refreshSavedSearches?: boolean },
+  ) => Promise<SavedSearchNotification[] | null>;
   onMarkNotificationRead: (id: number) => Promise<void>;
   runAllSavedSearches: (savedSearches: SavedSearch[]) => Promise<void>;
   onRunSavedSearch: (id: number) => Promise<void>;
@@ -939,6 +986,7 @@ type SearchControlsRailProps = Pick<
   | "onSaveCurrentSearch"
   | "searchLoading"
   | "loadingMore"
+  | "savingSearch"
   | "sources"
   | "toggleSource"
   | "sortBy"
@@ -983,6 +1031,7 @@ type SavedSearchRailProps = Pick<
   | "searchLoading"
   | "loadingMore"
   | "fetchSavedSearches"
+  | "onRefreshSavedSearches"
   | "runAllSavedSearches"
   | "onRunSavedSearch"
   | "onDeleteSavedSearch"
@@ -1267,11 +1316,15 @@ function SearchControlsRail(props: SearchControlsRailProps) {
             <button
               type="button"
               onClick={() => void props.onSaveCurrentSearch()}
-              disabled={!props.q.trim() || props.sources.length === 0}
+              disabled={props.savingSearch || !props.q.trim() || props.sources.length === 0}
               className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-zinc-100 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <Bookmark className="size-4" />
-              Save search
+              {props.savingSearch ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Bookmark className="size-4" />
+              )}
+              {props.savingSearch ? "Creating baseline..." : "Save search"}
             </button>
           </div>
 
@@ -1449,7 +1502,7 @@ function SavedSearchRail(props: SavedSearchRailProps) {
 
           <button
             className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.02] px-2.5 py-1 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
-            onClick={() => void props.fetchSavedSearches()}
+            onClick={() => void props.onRefreshSavedSearches()}
             disabled={props.savedLoading}
             type="button"
           >
@@ -1464,6 +1517,7 @@ function SavedSearchRail(props: SavedSearchRailProps) {
           {props.savedError}
         </div>
       ) : null}
+
 
       {props.saved.length === 0 ? (
         <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-4">
@@ -1612,14 +1666,18 @@ function AlertsRail(props: AlertsRailProps) {
               {props.authLoading ? "Checking your account..." : "Log in to receive saved search alerts."}
             </p>
             <p className="mt-1 text-xs text-zinc-500">
-              Alerts appear when Marketly finds new listings for one of your alert-enabled saved searches.
+              Alerts appear when Marketly finds new listings for one of your alert-enabled saved
+              searches. Checks run when alerts are refreshed or by the server scheduler. Saved
+              Searches refresh retries incomplete baselines immediately.
             </p>
           </div>
         ) : props.notifications.length === 0 ? (
           <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-4">
             <p className="text-sm text-zinc-300">No saved search alerts yet.</p>
             <p className="mt-1 text-xs text-zinc-500">
-              Enable alerts on a saved search and new-listing alerts will show up here.
+              Saving a search creates its baseline immediately. After that, new checks are due about
+              every 8 hours after the last successful check. Use Saved Searches refresh if a baseline
+              is still pending.
             </p>
           </div>
         ) : (
@@ -2958,6 +3016,7 @@ export default function HomePage() {
 
   const [saved, setSaved] = useState<SavedSearch[]>([]);
   const [savedLoading, setSavedLoading] = useState(false);
+  const [savingSearch, setSavingSearch] = useState(false);
   const [savedError, setSavedError] = useState<string | null>(null);
   const [notifications, setNotifications] = useState<SavedSearchNotification[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(false);
@@ -3510,7 +3569,7 @@ export default function HomePage() {
           setLocationPersistence("account");
           setLocationError(null);
         }
-      } catch (error: unknown) {
+      } catch {
         if (!cancelled && !currentLocationRef.current) {
           setLocationPersistence(null);
         }
@@ -3710,7 +3769,55 @@ export default function HomePage() {
     }
   }
 
-  async function fetchNotifications(): Promise<SavedSearchNotification[] | null> {
+  async function refreshSavedSearchAlert(searchId: number): Promise<SavedSearch | null> {
+    if (!accessToken) throw new Error("Please log in to refresh saved search alerts.");
+
+    const res = await fetch(`${API_BASE}/saved-searches/${searchId}/alerts/refresh`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`POST /saved-searches/${searchId}/alerts/refresh failed (${res.status}): ${text}`);
+    }
+
+    const updated = (await res.json()) as SavedSearch;
+    setSaved((prev) => prev.map((entry) => (entry.id === updated.id ? updated : entry)));
+    return updated;
+  }
+
+  async function onRefreshSavedSearches() {
+    const fetched = await fetchSavedSearches();
+    if (!fetched || fetched.length === 0) {
+      return;
+    }
+
+    const pendingEntries = fetched.filter(hasIncompleteSavedSearchBaseline);
+    if (pendingEntries.length === 0) {
+      return;
+    }
+
+    setSavedLoading(true);
+    setSavedError(null);
+    try {
+      for (const entry of pendingEntries) {
+        await refreshSavedSearchAlert(entry.id);
+      }
+      await fetchSavedSearches();
+    } catch (err: unknown) {
+      setSavedError(
+        err instanceof Error ? err.message : "Failed to refresh one or more saved search baselines",
+      );
+      await fetchSavedSearches();
+    } finally {
+      setSavedLoading(false);
+    }
+  }
+
+  async function fetchNotifications(
+    options?: { refreshSavedSearches?: boolean },
+  ): Promise<SavedSearchNotification[] | null> {
     setNotificationsLoading(true);
     setNotificationsError(null);
 
@@ -3732,6 +3839,9 @@ export default function HomePage() {
 
       const json = (await res.json()) as SavedSearchNotification[];
       setNotifications(json);
+      if (options?.refreshSavedSearches) {
+        await fetchSavedSearches();
+      }
       return json;
     } catch (err: unknown) {
       setNotificationsError(
@@ -3948,7 +4058,7 @@ export default function HomePage() {
     return () => observer.disconnect();
   }, [hasMore, loadMore, loadingMore, searchLoading]);
 
-  async function runAllSavedSearches(
+  const runAllSavedSearches = useCallback(async (
     savedSearches: SavedSearch[],
     {
       selectedSort = sortBy,
@@ -3957,7 +4067,7 @@ export default function HomePage() {
       selectedSort?: SortOption;
       selectedLimit?: number;
     } = {},
-  ) {
+  ) => {
     if (!accessToken || savedSearches.length === 0 || fetchInFlightRef.current) return;
 
     const previousState = {
@@ -4100,7 +4210,26 @@ export default function HomePage() {
       setSearchLoading(false);
       fetchInFlightRef.current = false;
     }
-  }
+  }, [
+    accessToken,
+    activeLimit,
+    activeQuery,
+    activeSavedSearchId,
+    activeSort,
+    activeSources,
+    fetchSavedSearchPage,
+    hasSearched,
+    limit,
+    nextOffset,
+    rawResults,
+    resetCopilotConversation,
+    resultMode,
+    results,
+    sortBy,
+    sourceErrors,
+    total,
+    savedBatchPagination,
+  ]);
 
   const rerunActiveSearchWithLocation = useCallback(async () => {
     if (!hasSearched) return;
@@ -4268,7 +4397,7 @@ export default function HomePage() {
     if (user) {
       void (async () => {
         const fetched = await fetchSavedSearches();
-        void fetchNotifications();
+        void fetchNotifications({ refreshSavedSearches: true });
         if (!fetched) return;
 
         if (autoLoadedSavedForUserRef.current === user.id) return;
@@ -4305,6 +4434,7 @@ export default function HomePage() {
 
   async function onSaveCurrentSearch() {
     setSavedError(null);
+    setSavingSearch(true);
 
     try {
       if (!accessToken) throw new Error("Please log in to save searches.");
@@ -4326,14 +4456,31 @@ export default function HomePage() {
       });
 
       if (!res.ok) {
+        if (res.status === 409) {
+          throw new Error("That saved search already exists");
+        }
         const text = await res.text();
         throw new Error(`POST /saved-searches failed (${res.status}): ${text}`);
       }
 
-      await fetchSavedSearches();
-      await fetchNotifications();
+      const created = (await res.json()) as SavedSearch;
+      let nextSavedSearch = created;
+      setSaved((prev) => [created, ...prev.filter((entry) => entry.id !== created.id)]);
+      if (
+        hasIncompleteSavedSearchBaseline(created)
+        && !created.last_alert_attempted_at
+        && !created.last_alert_error_message
+      ) {
+        nextSavedSearch = (await refreshSavedSearchAlert(created.id)) ?? created;
+      }
+      setSaved((prev) => [
+        nextSavedSearch,
+        ...prev.filter((entry) => entry.id !== nextSavedSearch.id),
+      ]);
     } catch (err: unknown) {
       setSavedError(err instanceof Error ? err.message : "Failed to save search");
+    } finally {
+      setSavingSearch(false);
     }
   }
 
@@ -4358,7 +4505,6 @@ export default function HomePage() {
         setActiveSavedSearchId(null);
       }
       await fetchSavedSearches();
-      await fetchNotifications();
     } catch (err: unknown) {
       setSavedError(err instanceof Error ? err.message : "Failed to delete saved search");
     }
@@ -4503,6 +4649,11 @@ export default function HomePage() {
       return;
     }
 
+    const queryChanged = editing.query !== trimmedQuery;
+    const sourcesChanged =
+      editing.sources.length !== editSources.length
+      || editing.sources.some((source, index) => source !== editSources[index]);
+
     setEditSaving(true);
     try {
       const res = await fetch(`${API_BASE}/saved-searches/${editing.id}`, {
@@ -4530,7 +4681,9 @@ export default function HomePage() {
 
       const updated = (await res.json()) as SavedSearch;
       setSaved((prev) => prev.map((entry) => (entry.id === updated.id ? updated : entry)));
-      await fetchNotifications();
+      if (queryChanged || sourcesChanged) {
+        setNotifications((prev) => prev.filter((entry) => entry.saved_search_id !== updated.id));
+      }
 
       if (activeSavedSearchId === updated.id) {
         const normalizedSources = updated.sources.filter(isSourceOption);
@@ -4889,6 +5042,7 @@ export default function HomePage() {
       toggleSource={toggleSource}
       searchLoading={searchLoading}
       loadingMore={loadingMore}
+      savingSearch={savingSearch}
       onSearch={onSearch}
       onSaveCurrentSearch={onSaveCurrentSearch}
       limit={limit}
@@ -4926,6 +5080,7 @@ export default function HomePage() {
       notificationsError={notificationsError}
       activeSavedSearchId={activeSavedSearchId}
       fetchSavedSearches={fetchSavedSearches}
+      onRefreshSavedSearches={onRefreshSavedSearches}
       fetchNotifications={fetchNotifications}
       onMarkNotificationRead={onMarkNotificationRead}
       runAllSavedSearches={runAllSavedSearches}

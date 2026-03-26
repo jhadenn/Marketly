@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timedelta, timezone
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Header, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,6 +51,7 @@ from app.services.response_cache import (
 )
 from app.services.alerts import (
     delete_notifications_for_saved_search,
+    execute_saved_search_alert_check,
     list_notifications,
     mark_notification_read,
     refresh_saved_search_alerts_for_user,
@@ -104,9 +106,75 @@ def _dt_str(value) -> str | None:
     return str(value)
 
 
+def _as_utc_dt(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _saved_search_next_due_at(row: SavedSearch) -> datetime | None:
+    last_checked_at = _as_utc_dt(getattr(row, "last_alert_checked_at", None))
+    if last_checked_at is None:
+        return None
+    stale_after_seconds = max(1, int(settings.MARKETLY_ALERTS_STALE_AFTER_SECONDS))
+    return last_checked_at + timedelta(seconds=stale_after_seconds)
+
+
 def _reset_saved_search_alert_baseline(row: SavedSearch) -> None:
+    row.last_alert_attempted_at = None
     row.last_alert_checked_at = None
     row.last_alert_notified_at = None
+    row.last_alert_error_code = None
+    row.last_alert_error_message = None
+
+
+def _saved_search_has_alert_state(row: SavedSearch) -> bool:
+    return any(
+        (
+            getattr(row, "last_alert_attempted_at", None),
+            getattr(row, "last_alert_checked_at", None),
+            getattr(row, "last_alert_error_code", None),
+            getattr(row, "last_alert_error_message", None),
+        )
+    )
+
+
+async def _run_saved_search_baseline(
+    db: Session,
+    *,
+    row: SavedSearch,
+) -> SavedSearch:
+    outcome = await execute_saved_search_alert_check(
+        db,
+        saved_search_id=int(row.id),
+        limit_per_search=max(1, int(settings.MARKETLY_ALERTS_SEARCH_LIMIT)),
+    )
+    if outcome.error_code is not None:
+        logger.warning(
+            "saved search baseline incomplete id=%s user_id=%s query=%s code=%s error=%s",
+            row.id,
+            row.user_id,
+            row.query,
+            outcome.error_code,
+            outcome.error_message,
+        )
+    refreshed = db.query(SavedSearch).filter(SavedSearch.id == row.id).first()
+    target = refreshed or row
+    if bool(getattr(target, "alerts_enabled", False)) and not _saved_search_has_alert_state(target):
+        target.last_alert_attempted_at = datetime.now(timezone.utc)
+        target.last_alert_error_code = outcome.error_code or "CHECK_FAILED"
+        target.last_alert_error_message = (
+            outcome.error_message
+            or "Saved search baseline did not persist alert state. Refresh saved searches to retry."
+        )
+        try:
+            db.commit()
+            db.refresh(target)
+        except Exception:
+            db.rollback()
+    return target
 
 
 def _facebook_status_response(
@@ -176,8 +244,12 @@ def _saved_search_out(row: SavedSearch) -> SavedSearchOut:
         query=row.query,
         sources=[s.strip() for s in row.sources.split(",") if s.strip()],
         alerts_enabled=bool(getattr(row, "alerts_enabled", True)),
+        last_alert_attempted_at=_dt_str(getattr(row, "last_alert_attempted_at", None)),
         last_alert_checked_at=_dt_str(getattr(row, "last_alert_checked_at", None)),
         last_alert_notified_at=_dt_str(getattr(row, "last_alert_notified_at", None)),
+        last_alert_error_code=getattr(row, "last_alert_error_code", None),
+        last_alert_error_message=getattr(row, "last_alert_error_message", None),
+        next_alert_check_due_at=_dt_str(_saved_search_next_due_at(row)),
         created_at=str(row.created_at),
     )
 
@@ -693,7 +765,7 @@ def delete_facebook_connector_cookies(
 
 
 @app.post("/saved-searches", response_model=SavedSearchOut)
-def create_saved_search(
+async def create_saved_search(
     payload: SavedSearchCreate,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
@@ -714,8 +786,17 @@ def create_saved_search(
         alerts_enabled=payload.alerts_enabled,
     )
     db.add(row)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Saved search already exists with the same query and sources.",
+        )
     db.refresh(row)
+    if bool(row.alerts_enabled):
+        row = await _run_saved_search_baseline(db, row=row)
 
     return _saved_search_out(row)
 
@@ -764,7 +845,7 @@ def delete_saved_search(
 
 
 @app.patch("/saved-searches/{search_id}", response_model=SavedSearchOut)
-def update_saved_search(
+async def update_saved_search(
     search_id: int,
     payload: SavedSearchUpdate,
     db: Session = Depends(get_db),
@@ -810,6 +891,38 @@ def update_saved_search(
         )
 
     db.refresh(row)
+    should_run_baseline = bool(row.alerts_enabled) and (query_changed or sources_changed or re_enabled)
+    if should_run_baseline:
+        row = await _run_saved_search_baseline(db, row=row)
+    return _saved_search_out(row)
+
+
+@app.post("/saved-searches/{search_id}/alerts/refresh", response_model=SavedSearchOut)
+async def refresh_saved_search_alert(
+    search_id: int,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    limited = _apply_rate_limit(
+        bucket="saved_mutation_user",
+        identifier=user_id,
+        limit=int(settings.MARKETLY_RATE_LIMIT_SAVED_MUTATION_PER_MIN),
+        window_seconds=60,
+    )
+    if limited is not None:
+        return limited
+
+    row = (
+        db.query(SavedSearch)
+        .filter(SavedSearch.id == search_id, SavedSearch.user_id == user_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Saved search not found")
+    if not bool(row.alerts_enabled):
+        raise HTTPException(status_code=400, detail="Alerts are disabled for this saved search")
+
+    row = await _run_saved_search_baseline(db, row=row)
     return _saved_search_out(row)
 
 

@@ -14,7 +14,7 @@
 ## AI insights, alerts, and copilot
 
 - Search results now expose fair-value and risk metadata directly on each listing.
-- Saved searches support `alerts_enabled` and daily in-app digests via:
+- Saved searches support `alerts_enabled`, immediate baseline creation on save, and in-app alerts via:
   - `GET /me/notifications`
   - `POST /me/notifications/{id}/read`
 - `GET /me/notifications` now auto-refreshes stale alert-enabled saved searches before returning the latest digests.
@@ -70,7 +70,7 @@ MARKETLY_SEARCH_FETCH_CACHE_MAX_ITEMS=32
 MARKETLY_SEARCH_PAGINATION_CACHE_MAX_ITEMS=8
 
 MARKETLY_ALERTS_SEARCH_LIMIT=20
-MARKETLY_ALERTS_STALE_AFTER_SECONDS=86400
+MARKETLY_ALERTS_STALE_AFTER_SECONDS=28800
 MARKETLY_ALERTS_AUTO_REFRESH_WINDOW_SECONDS=300
 MARKETLY_VALUATION_LOOKBACK_DAYS=120
 MARKETLY_GEMINI_MODEL=gemini-2.5-flash-lite

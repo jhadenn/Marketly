@@ -19,6 +19,7 @@ from app.connectors.facebook_marketplace import FacebookConnectorError, Facebook
 from app.connectors.facebook_marketplace.connector import sanitize_cookie_payload
 from app.core.config import settings
 from app.models.user_facebook_credential import UserFacebookCredential
+from app.services.user_ids import normalize_user_id
 
 MAX_COOKIE_JSON_BYTES = 256 * 1024
 
@@ -109,19 +110,30 @@ def decrypt_cookie_payload(encrypted_token: str) -> Any:
     return json.loads(decrypted.decode("utf-8"))
 
 
-def get_user_facebook_credential(db: Session, user_id: str) -> UserFacebookCredential | None:
+def get_user_facebook_credential(db: Session, user_id: object | None) -> UserFacebookCredential | None:
+    normalized_user_id = normalize_user_id(user_id)
+    if not normalized_user_id:
+        return None
     return (
-        db.query(UserFacebookCredential).filter(UserFacebookCredential.user_id == user_id).first()
+        db.query(UserFacebookCredential)
+        .filter(UserFacebookCredential.user_id == normalized_user_id)
+        .first()
     )
 
 
-def upsert_user_facebook_credential(db: Session, user_id: str, payload: Any) -> UserFacebookCredential:
+def upsert_user_facebook_credential(
+    db: Session, user_id: object, payload: Any
+) -> UserFacebookCredential:
     sanitized, meta = parse_and_validate_cookie_payload(payload)
     encrypted = encrypt_cookie_payload(sanitized)
 
-    row = get_user_facebook_credential(db, user_id)
+    normalized_user_id = normalize_user_id(user_id)
+    if not normalized_user_id:
+        raise ValueError("user_id is required")
+
+    row = get_user_facebook_credential(db, normalized_user_id)
     if row is None:
-        row = UserFacebookCredential(user_id=user_id)
+        row = UserFacebookCredential(user_id=normalized_user_id)
         db.add(row)
 
     row.encrypted_cookie_json = encrypted
@@ -136,7 +148,7 @@ def upsert_user_facebook_credential(db: Session, user_id: str, payload: Any) -> 
     return row
 
 
-def delete_user_facebook_credential(db: Session, user_id: str) -> bool:
+def delete_user_facebook_credential(db: Session, user_id: object | None) -> bool:
     row = get_user_facebook_credential(db, user_id)
     if row is None:
         return False

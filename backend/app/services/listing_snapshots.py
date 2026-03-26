@@ -9,6 +9,7 @@ from app.db import SessionLocal
 from app.models.listing import Listing
 from app.models.listing_snapshot import ListingSnapshot
 from app.services.listing_insights import listing_fingerprint, valuation_key_for_listing
+from app.services.user_ids import normalize_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -17,17 +18,20 @@ def persist_listing_snapshots(
     *,
     query: str,
     listings: list[Listing],
-    user_id: str | None = None,
+    user_id: object | None = None,
     saved_search_id: int | None = None,
+    db: Session | None = None,
 ) -> int:
     if not listings:
         return 0
 
-    db = SessionLocal()
+    owns_session = db is None
+    session = db or SessionLocal()
+    normalized_user_id = normalize_user_id(user_id)
     try:
         rows = [
             ListingSnapshot(
-                user_id=user_id,
+                user_id=normalized_user_id,
                 saved_search_id=saved_search_id,
                 source=item.source,
                 source_listing_id=item.source_listing_id or item.url,
@@ -45,15 +49,19 @@ def persist_listing_snapshots(
             )
             for item in listings
         ]
-        db.add_all(rows)
-        db.commit()
+        session.add_all(rows)
+        if owns_session:
+            session.commit()
+        else:
+            session.flush()
         return len(rows)
     except Exception as exc:
-        db.rollback()
+        session.rollback()
         logger.warning("listing snapshot persistence failed: %s", exc)
         return 0
     finally:
-        db.close()
+        if owns_session:
+            session.close()
 
 
 def previously_seen_fingerprints(
