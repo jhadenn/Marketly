@@ -406,25 +406,38 @@ const AUTOMOTIVE_MARKER_RE =
   /\b(?:acura|audi|bmw|buick|cadillac|chevrolet|chevy|chrysler|dodge|ford|gmc|honda|hyundai|infiniti|jeep|kia|lexus|lincoln|mazda|mercedes(?:-benz)?|mini|mitsubishi|nissan|porsche|ram|subaru|tesla|toyota|volkswagen|vw|volvo|car|cars|truck|trucks|suv|sedan|coupe|hatchback|wagon|pickup|minivan|van|crossover|automotive|vehicle|vehicles)\b/i;
 const AUTOMOTIVE_YEAR_RE = /\b(?:19[5-9]\d|20[0-3]\d)\b/;
 const VEHICLE_MILEAGE_RE =
-  /(?<![\d.])(?<value>\d{1,3}(?:[.,]\d{1,2})?|\d{1,3}(?:[,\s]\d{3})+|\d{4,7})(?:\s*(?<scale>[kKmM]))?\s*(?:km|kms|kilomet(?:er|re)s?)\b(?!\s*away\b)/i;
+  /(\d{1,3}(?:[.,]\d{1,2})?|\d{1,3}(?:[,\s]\d{3})+|\d{4,7})(?:\s*([kKmM]))?\s*(?:km|kms|kilomet(?:er|re)s?)\b/gi;
 
 function parseVehicleMileageKm(text: string) {
-  const match = VEHICLE_MILEAGE_RE.exec(text);
-  if (!match?.groups?.value) return null;
+  const matcher = new RegExp(VEHICLE_MILEAGE_RE.source, VEHICLE_MILEAGE_RE.flags);
+  let match: RegExpExecArray | null = null;
 
-  const scale = match.groups.scale?.toLowerCase();
-  const normalizedValue =
-    scale && match.groups.value.includes(".")
-      ? match.groups.value.replace(/,/g, "")
-      : scale
-        ? match.groups.value.replace(",", ".").replace(/\s/g, "")
-        : match.groups.value.replace(/[,\s]/g, "");
-  const parsed = Number(normalizedValue);
-  if (!Number.isFinite(parsed)) return null;
+  while ((match = matcher.exec(text)) !== null) {
+    const rawValue = match[1];
+    if (!rawValue) continue;
 
-  if (scale === "k") return parsed * 1_000;
-  if (scale === "m") return parsed * 1_000_000;
-  return parsed;
+    const previousChar = match.index > 0 ? text[match.index - 1] : "";
+    if (/[.\d]/.test(previousChar)) continue;
+
+    const trailingText = text.slice(match.index + match[0].length);
+    if (/^\s*away\b/i.test(trailingText)) continue;
+
+    const scale = match[2]?.toLowerCase();
+    const normalizedValue =
+      scale && rawValue.includes(".")
+        ? rawValue.replace(/,/g, "").replace(/\s/g, "")
+        : scale
+          ? rawValue.replace(",", ".").replace(/\s/g, "")
+          : rawValue.replace(/[,\s]/g, "");
+    const parsed = Number(normalizedValue);
+    if (!Number.isFinite(parsed)) continue;
+
+    if (scale === "k") return parsed * 1_000;
+    if (scale === "m") return parsed * 1_000_000;
+    return parsed;
+  }
+
+  return null;
 }
 
 function inferVehicleMileageKm(item: Pick<Listing, "title" | "snippet" | "vehicle_mileage_km">) {
