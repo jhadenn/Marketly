@@ -6,6 +6,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from app.connectors.base import MarketplaceConnector
+from app.connectors.vehicle_metadata import extract_vehicle_mileage_km
 from app.core.time_utils import parse_absolute_date_to_utc_iso, parse_relative_age_to_utc_iso
 from app.models.listing import Listing, Money, SearchSort
 
@@ -132,6 +133,9 @@ class KijijiScrapeConnector(MarketplaceConnector):
 
         return None
 
+    def _extract_vehicle_mileage_km(self, title: str, blob: str, listing_url: str) -> float | None:
+        return extract_vehicle_mileage_km(title, blob, listing_url)
+
     def _extract_candidates(
         self,
         *,
@@ -255,6 +259,7 @@ class KijijiScrapeConnector(MarketplaceConnector):
                     condition=None,
                     snippet=self._clean_snippet(title, blob),
                     posted_at=self._extract_posted_at(blob),
+                    vehicle_mileage_km=self._extract_vehicle_mileage_km(title, blob, listing_url),
                 )
             )
 

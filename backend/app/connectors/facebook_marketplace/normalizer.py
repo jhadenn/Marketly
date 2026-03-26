@@ -57,6 +57,14 @@ def _clean_line(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "")).strip()
 
 
+def _looks_like_mileage_detail(line: str) -> bool:
+    lowered = line.lower()
+    return bool(
+        re.search(r"\b(?:km|kms|kilomet(?:er|re)s?)\b", lowered)
+        and "away" not in lowered
+    )
+
+
 def _normalize_url(url: str) -> str:
     if not url:
         return ""
@@ -112,6 +120,8 @@ def _looks_like_location(line: str) -> bool:
         return False
     lowered = line.lower()
     if "seller" in lowered:
+        return False
+    if re.search(r"\d", line) and re.search(r"\b(?:km|kms|kilomet(?:er|re)s?)\b", lowered) and "away" not in lowered:
         return False
     if LOCATION_TOKEN_RE.search(lowered):
         return True
@@ -182,6 +192,80 @@ def _fallback_title_from_url(listing_url: str) -> str:
     return base.replace("-", " ")
 
 
+def _card_text_scope(card: dict[str, Any]) -> tuple[list[str], str]:
+    base_lines = [_clean_line(str(line)) for line in (card.get("lines") or []) if _clean_line(str(line))]
+    base_text = _clean_line(str(card.get("text") or " ".join(base_lines)))
+    title_hint = _clean_line(str(card.get("title") or "")).lower()
+    raw_scopes = card.get("scopes")
+
+    scopes: list[dict[str, Any]] = []
+    seen_texts: set[str] = set()
+
+    def add_scope(lines: list[str], text: str, depth: int) -> None:
+        normalized_lines = [_clean_line(line) for line in lines if _clean_line(line)]
+        normalized_text = _clean_line(text or " ".join(normalized_lines))
+        if not normalized_lines and not normalized_text:
+            return
+        if normalized_text in seen_texts:
+            return
+        seen_texts.add(normalized_text)
+        scopes.append(
+            {
+                "depth": max(0, depth),
+                "lines": normalized_lines,
+                "text": normalized_text,
+            }
+        )
+
+    add_scope(base_lines, base_text, 0)
+
+    if isinstance(raw_scopes, list):
+        for index, scope in enumerate(raw_scopes[:8]):
+            if not isinstance(scope, dict):
+                continue
+            scope_lines = scope.get("lines") if isinstance(scope.get("lines"), list) else []
+            scope_text = str(scope.get("text") or "")
+            try:
+                scope_depth = int(scope.get("depth"))
+            except (TypeError, ValueError):
+                scope_depth = index
+            add_scope([str(line) for line in scope_lines], scope_text, scope_depth)
+
+    def scope_key(scope: dict[str, Any]) -> tuple[int, int, int, int]:
+        lines = scope["lines"]
+        text = scope["text"]
+        depth = int(scope["depth"])
+        score = 0
+        if title_hint and title_hint in text.lower():
+            score += 18
+        if any(PRICE_TEXT_RE.match(line) for line in lines):
+            score += 10
+        if any(_looks_like_location(line) for line in lines):
+            score += 6
+        if any(_looks_like_mileage_detail(line) for line in lines):
+            score += 10
+        if len(lines) <= 8:
+            score += len(lines) * 3
+        else:
+            score += 24 - ((len(lines) - 8) * 6)
+        if len(text) <= 360:
+            score += 6
+        else:
+            score -= min(24, max(1, (len(text) - 360) // 20))
+        score -= depth
+        return (
+            score,
+            1 if any(_looks_like_mileage_detail(line) for line in lines) else 0,
+            len(lines),
+            -depth,
+        )
+
+    best = max(scopes, key=scope_key, default={"lines": base_lines, "text": base_text})
+    selected_lines = list(best["lines"]) if isinstance(best["lines"], list) else base_lines
+    selected_text = str(best["text"] or base_text)
+    return selected_lines, selected_text
+
+
 def normalize_marketplace_card(
     card: dict[str, Any],
     *,
@@ -192,8 +276,7 @@ def normalize_marketplace_card(
     if "/marketplace/item/" not in listing_url:
         return None
 
-    lines = [_clean_line(str(line)) for line in (card.get("lines") or []) if _clean_line(str(line))]
-    text = _clean_line(str(card.get("text") or " ".join(lines)))
+    lines, text = _card_text_scope(card)
 
     price_value: float | None = None
     price_currency: str | None = None
@@ -255,6 +338,9 @@ def normalize_marketplace_card(
             first_image_url=(images[0] if images else None),
         )
     )
+    normalized_raw = dict(card)
+    normalized_raw["lines"] = lines
+    normalized_raw["text"] = text
 
     return FacebookNormalizedListing(
         source="facebook",
@@ -269,7 +355,7 @@ def normalize_marketplace_card(
         listing_url=listing_url,
         seller_name=_extract_seller(lines),
         posted_at=posted_at,
-        raw=card,
+        raw=normalized_raw,
         price_bucket=compute_price_bucket(price_value),
         title_keywords=extract_title_keywords(title),
         has_images=bool(images),

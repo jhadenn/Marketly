@@ -5,6 +5,10 @@ from app.connectors.facebook_marketplace import (
     FacebookConnectorErrorCode,
     FacebookNormalizedListing,
 )
+from app.connectors.facebook_marketplace.connector import (
+    _apply_vehicle_detail_text,
+    _needs_vehicle_detail_enrichment,
+)
 from app.main import app
 
 client = TestClient(app)
@@ -63,7 +67,7 @@ def test_facebook_search_success(monkeypatch):
     assert payload["count"] == 1
     assert payload["upserted_count"] == 1
     assert payload["error"] is None
-    assert payload["records"][0]["source"] == "facebook_marketplace"
+    assert payload["records"][0]["source"] == "facebook"
 
 
 def test_facebook_search_typed_error(monkeypatch):
@@ -110,3 +114,38 @@ def test_facebook_search_disabled_by_feature_flag(monkeypatch):
     payload = response.json()
     assert payload["count"] == 0
     assert payload["error"]["code"] == "disabled"
+
+
+def test_vehicle_detail_text_enrichment_adds_mileage_to_raw_record():
+    record = FacebookNormalizedListing(
+        source="facebook",
+        external_id="vehicle-raw-1",
+        title="2008 Honda civic",
+        price_value=2200.0,
+        price_currency="CAD",
+        location_text="Toronto, ON",
+        latitude=None,
+        longitude=None,
+        image_urls=["https://example.com/image.jpg"],
+        listing_url="https://www.facebook.com/marketplace/item/vehicle-raw-1/",
+        seller_name="Seller",
+        posted_at=None,
+        raw={
+            "href": "/marketplace/item/vehicle-raw-1/",
+            "lines": ["$2,200", "2008 Honda civic", "Toronto, ON"],
+            "text": "$2,200 2008 Honda civic Toronto, ON",
+        },
+        price_bucket="1500-3000",
+        title_keywords=["honda", "civic"],
+        has_images=True,
+        location_quality=0.95,
+        age_hint="2 days ago",
+        dedup_key="facebook:vehicle-raw-1",
+    )
+
+    assert _needs_vehicle_detail_enrichment(record) is True
+
+    _apply_vehicle_detail_text(record, "2008 Honda civic\n231,000 km\nAutomatic")
+
+    assert record.raw["detail_text"] == "2008 Honda civic 231,000 km Automatic"
+    assert "231,000 km" in record.raw["lines"]

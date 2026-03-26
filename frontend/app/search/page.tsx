@@ -24,6 +24,7 @@ import {
   X,
 } from "lucide-react";
 import Dither from "@/components/Dither";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { useAuth } from "../providers";
 
@@ -155,6 +156,7 @@ type Listing = {
   posted_at?: string | null;
   distance_km?: number | null;
   distance_is_approximate?: boolean;
+  vehicle_mileage_km?: number | null;
   score?: number;
   score_reason?: string | null;
   valuation?: Valuation | null;
@@ -393,6 +395,50 @@ function formatPrice(price?: Money | null) {
 function formatMoneyCompact(amount?: number | null, currency = "CAD") {
   if (typeof amount !== "number" || !Number.isFinite(amount)) return null;
   return `${currency} ${Math.round(amount)}`;
+}
+
+function formatVehicleMileageKm(vehicleMileageKm?: number | null) {
+  if (typeof vehicleMileageKm !== "number" || !Number.isFinite(vehicleMileageKm)) return null;
+  return `${Math.round(vehicleMileageKm).toLocaleString()} km`;
+}
+
+const AUTOMOTIVE_MARKER_RE =
+  /\b(?:acura|audi|bmw|buick|cadillac|chevrolet|chevy|chrysler|dodge|ford|gmc|honda|hyundai|infiniti|jeep|kia|lexus|lincoln|mazda|mercedes(?:-benz)?|mini|mitsubishi|nissan|porsche|ram|subaru|tesla|toyota|volkswagen|vw|volvo|car|cars|truck|trucks|suv|sedan|coupe|hatchback|wagon|pickup|minivan|van|crossover|automotive|vehicle|vehicles)\b/i;
+const AUTOMOTIVE_YEAR_RE = /\b(?:19[5-9]\d|20[0-3]\d)\b/;
+const VEHICLE_MILEAGE_RE =
+  /(?<![\d.])(?<value>\d{1,3}(?:[.,]\d{1,2})?|\d{1,3}(?:[,\s]\d{3})+|\d{4,7})(?:\s*(?<scale>[kKmM]))?\s*(?:km|kms|kilomet(?:er|re)s?)\b(?!\s*away\b)/i;
+
+function parseVehicleMileageKm(text: string) {
+  const match = VEHICLE_MILEAGE_RE.exec(text);
+  if (!match?.groups?.value) return null;
+
+  const scale = match.groups.scale?.toLowerCase();
+  const normalizedValue =
+    scale && match.groups.value.includes(".")
+      ? match.groups.value.replace(/,/g, "")
+      : scale
+        ? match.groups.value.replace(",", ".").replace(/\s/g, "")
+        : match.groups.value.replace(/[,\s]/g, "");
+  const parsed = Number(normalizedValue);
+  if (!Number.isFinite(parsed)) return null;
+
+  if (scale === "k") return parsed * 1_000;
+  if (scale === "m") return parsed * 1_000_000;
+  return parsed;
+}
+
+function inferVehicleMileageKm(item: Pick<Listing, "title" | "snippet" | "vehicle_mileage_km">) {
+  if (typeof item.vehicle_mileage_km === "number" && Number.isFinite(item.vehicle_mileage_km)) {
+    return item.vehicle_mileage_km;
+  }
+
+  const automotiveText = [item.title, item.snippet].filter(Boolean).join(" ");
+  if (!automotiveText) return null;
+  if (!AUTOMOTIVE_MARKER_RE.test(automotiveText) && !AUTOMOTIVE_YEAR_RE.test(automotiveText)) {
+    return null;
+  }
+
+  return parseVehicleMileageKm(automotiveText);
 }
 
 function getListingKey(item: Listing): string {
@@ -1734,7 +1780,7 @@ function PreviewListingCard({ listing }: { listing: PreviewListing }) {
 
   return (
     <article className="overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/80">
-      <div className="relative aspect-[5/4] bg-zinc-900">
+      <div className="relative aspect-[4/3] bg-zinc-900">
         <Image
           src={imageSrc}
           alt={listing.title}
@@ -2099,18 +2145,22 @@ function InsightPill({
   label: string;
   tone: "emerald" | "amber" | "red" | "slate";
 }) {
-  const toneClasses = {
-    emerald: "border-emerald-300/25 bg-emerald-400/10 text-emerald-100",
-    amber: "border-amber-300/25 bg-amber-300/10 text-amber-100",
-    red: "border-red-300/25 bg-red-400/10 text-red-100",
-    slate: "border-white/10 bg-white/[0.03] text-zinc-300",
-  }[tone];
+  const toneClasses = insightPillToneClasses(tone);
 
   return (
     <span className={cn("rounded-full border px-2 py-0.5 text-[10px] font-medium", toneClasses)}>
       {label}
     </span>
   );
+}
+
+function insightPillToneClasses(tone: "emerald" | "amber" | "red" | "slate") {
+  return {
+    emerald: "border-emerald-300/25 bg-emerald-400/10 text-emerald-100",
+    amber: "border-amber-300/25 bg-amber-300/10 text-amber-100",
+    red: "border-red-300/25 bg-red-400/10 text-red-100",
+    slate: "border-white/10 bg-white/[0.03] text-zinc-300",
+  }[tone];
 }
 
 function valuationTone(valuation?: Valuation | null): "emerald" | "amber" | "red" | "slate" {
@@ -2133,6 +2183,24 @@ function valuationLabel(valuation?: Valuation | null) {
   return `Value: ${valuation.verdict.replace("_", " ")}`;
 }
 
+function valuationTooltipLines(valuation?: Valuation | null) {
+  if (!valuation) return null;
+
+  const lines: string[] = [];
+  const explanation = valuation.explanation?.trim();
+  if (explanation) {
+    lines.push(explanation);
+  }
+
+  const estimateLow = formatMoneyCompact(valuation.estimated_low, valuation.currency);
+  const estimateHigh = formatMoneyCompact(valuation.estimated_high, valuation.currency);
+  if (estimateLow && estimateHigh) {
+    lines.push(`Estimated range ${estimateLow} - ${estimateHigh}`);
+  }
+
+  return lines.length > 0 ? lines : null;
+}
+
 function formatDistanceKm(distanceKm?: number | null, approximate = false) {
   if (typeof distanceKm !== "number" || !Number.isFinite(distanceKm)) return null;
   if (distanceKm < 10) {
@@ -2146,12 +2214,19 @@ function formatDistanceKm(distanceKm?: number | null, approximate = false) {
 function ListingCardBody({
   item,
   titleClassName,
+  allowTooltipFocus = true,
 }: {
   item: Listing;
   titleClassName?: string;
+  allowTooltipFocus?: boolean;
 }) {
   const imageUrl = item.image_urls?.[0];
   const distanceLabel = formatDistanceKm(item.distance_km, item.distance_is_approximate);
+  const vehicleMileageLabel = formatVehicleMileageKm(inferVehicleMileageKm(item));
+  const footerLabel = vehicleMileageLabel ?? item.condition?.toUpperCase() ?? null;
+  const valuationLabelText = valuationLabel(item.valuation) ?? "Value: pending";
+  const valuationTooltipText = valuationTooltipLines(item.valuation);
+  const valuationToneValue = valuationTone(item.valuation);
 
   return (
     <>
@@ -2174,7 +2249,7 @@ function ListingCardBody({
         </div>
       </div>
 
-      <div className="flex min-h-[196px] flex-1 flex-col gap-2 overflow-hidden p-3.5">
+      <div className="flex min-h-[152px] flex-1 flex-col gap-2.5 overflow-hidden p-3.5">
         <div className="flex items-start justify-between gap-2">
           <p className="text-base font-semibold tracking-tight text-white">{formatPrice(item.price)}</p>
           {distanceLabel ? (
@@ -2199,32 +2274,54 @@ function ListingCardBody({
 
         <div className="flex flex-wrap gap-1.5">
           {item.valuation ? (
-            <InsightPill
-              label={valuationLabel(item.valuation) ?? "Value: pending"}
-              tone={valuationTone(item.valuation)}
-            />
+            valuationTooltipText ? (
+              <TooltipProvider delayDuration={120}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span
+                      className={cn(
+                        "inline-flex cursor-help rounded-full border px-2 py-0.5 text-[10px] font-medium outline-none",
+                        allowTooltipFocus && "focus-visible:ring-2 focus-visible:ring-white/30 focus-visible:ring-offset-0",
+                        insightPillToneClasses(valuationToneValue),
+                      )}
+                      tabIndex={allowTooltipFocus ? 0 : -1}
+                    >
+                      {valuationLabelText}
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent
+                    side="top"
+                    align="start"
+                    className="max-w-64 border border-white/10 bg-zinc-950/95 px-3 py-2 text-[11px] leading-relaxed text-zinc-100 shadow-2xl"
+                  >
+                    <div className="space-y-1">
+                      {valuationTooltipText.map((line) => (
+                        <p key={line} className="text-zinc-200">
+                          {line}
+                        </p>
+                      ))}
+                    </div>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            ) : (
+              <InsightPill label={valuationLabelText} tone={valuationToneValue} />
+            )
           ) : null}
         </div>
 
-        <div className="mt-auto space-y-1">
-          {typeof item.score === "number" ? (
-            <p className="text-[11px] text-zinc-500">Score {item.score.toFixed(2)}</p>
-          ) : null}
-          {item.valuation?.explanation ? (
-            <p className="line-clamp-2 text-xs leading-relaxed text-zinc-400">
-              {item.valuation.explanation}
-              {item.valuation.estimated_low != null && item.valuation.estimated_high != null
-                ? ` | ${formatMoneyCompact(item.valuation.estimated_low, item.valuation.currency)}-${formatMoneyCompact(item.valuation.estimated_high, item.valuation.currency)}`
-                : ""}
+        <div className="mt-auto min-h-[16px]">
+          {footerLabel ? (
+            <p
+              className={cn(
+                "line-clamp-1 text-zinc-500",
+                vehicleMileageLabel
+                  ? "text-xs font-medium tracking-[0.02em] text-zinc-400"
+                  : "text-[11px] uppercase tracking-[0.12em]",
+              )}
+            >
+              {footerLabel}
             </p>
-          ) : null}
-          {item.condition ? (
-            <p className="line-clamp-1 text-[11px] uppercase tracking-[0.12em] text-zinc-500">
-              {item.condition}
-            </p>
-          ) : null}
-          {item.snippet ? (
-            <p className="line-clamp-2 text-xs leading-relaxed text-zinc-500">{item.snippet}</p>
           ) : null}
         </div>
       </div>
@@ -2243,7 +2340,7 @@ function MarketplaceResultCard({
   copilotSelected: boolean;
   onToggleSelection: (item: Listing) => void;
 }) {
-  const content = <ListingCardBody item={item} />;
+  const content = <ListingCardBody item={item} allowTooltipFocus={!selectionMode} />;
 
   return (
     <li className="h-full">
@@ -2289,7 +2386,7 @@ function CopilotShortlistCard({
 }) {
   const body = (
     <div className="flex flex-1 flex-col">
-      <ListingCardBody item={item} titleClassName="text-[15px]" />
+      <ListingCardBody item={item} titleClassName="text-[15px]" allowTooltipFocus={!selectionMode} />
     </div>
   );
 

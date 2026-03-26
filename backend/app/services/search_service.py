@@ -70,7 +70,7 @@ def _cache_key(
     search_location_context: ResolvedLocation | None = None,
 ) -> str:
     raw = (
-        f"{query}|{','.join(sorted(sources))}|{fetch_limit}|sort={sort}|"
+        f"v4|{query}|{','.join(sorted(sources))}|{fetch_limit}|sort={sort}|"
         f"facebook_enabled={settings.MARKETLY_ENABLE_FACEBOOK}"
         f"{_facebook_cache_fragment(sources, facebook_runtime_context)}"
         f"{_location_cache_fragment(search_location_context)}"
@@ -87,7 +87,7 @@ def _pagination_key(
     search_location_context: ResolvedLocation | None = None,
 ) -> str:
     raw = (
-        f"{query}|{','.join(sorted(sources))}|sort={sort}|limit={limit}|"
+        f"v4|{query}|{','.join(sorted(sources))}|sort={sort}|limit={limit}|"
         f"facebook_enabled={settings.MARKETLY_ENABLE_FACEBOOK}"
         f"{_facebook_cache_fragment(sources, facebook_runtime_context)}"
         f"{_location_cache_fragment(search_location_context)}"
