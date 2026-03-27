@@ -239,6 +239,9 @@ type SavedSearch = {
   created_at: string;
 };
 
+const DEFAULT_SAVED_SEARCH_MAX_PER_USER = 3;
+const SAVED_SEARCH_MAX_PER_USER_HEADER = "x-saved-search-max-per-user";
+
 type NotificationItem = {
   listing_key: string;
   source: string;
@@ -798,6 +801,16 @@ function normalizeNotificationError(error: unknown, fallback: string) {
   return message;
 }
 
+function normalizeSavedSearchMaxPerUser(value: string | null | undefined) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return DEFAULT_SAVED_SEARCH_MAX_PER_USER;
+  return Math.max(DEFAULT_SAVED_SEARCH_MAX_PER_USER, Math.trunc(parsed));
+}
+
+function selectActiveSavedSearches(savedSearches: SavedSearch[], maxPerUser: number) {
+  return savedSearches.slice(0, Math.max(DEFAULT_SAVED_SEARCH_MAX_PER_USER, maxPerUser));
+}
+
 function isLikelyNetworkError(error: unknown) {
   if (!(error instanceof Error)) return false;
   return /failed to fetch|load failed|networkerror/i.test(error.message);
@@ -864,6 +877,10 @@ type SearchPageViewProps = {
   onSearch: (e: React.FormEvent) => Promise<void>;
   onSaveCurrentSearch: () => Promise<void>;
   limit: number;
+  savedSearchMaxPerUser: number;
+  activeSavedSearchCount: number;
+  savedSearchLimitReached: boolean;
+  hasSavedSearchOverflow: boolean;
   locationProvince: string;
   setLocationProvince: React.Dispatch<React.SetStateAction<string>>;
   locationCityInput: string;
@@ -987,6 +1004,10 @@ type SearchControlsRailProps = Pick<
   | "searchLoading"
   | "loadingMore"
   | "savingSearch"
+  | "saved"
+  | "savedSearchMaxPerUser"
+  | "activeSavedSearchCount"
+  | "savedSearchLimitReached"
   | "sources"
   | "toggleSource"
   | "sortBy"
@@ -1030,6 +1051,9 @@ type SavedSearchRailProps = Pick<
   | "activeSavedSearchId"
   | "searchLoading"
   | "loadingMore"
+  | "savedSearchMaxPerUser"
+  | "activeSavedSearchCount"
+  | "hasSavedSearchOverflow"
   | "fetchSavedSearches"
   | "onRefreshSavedSearches"
   | "runAllSavedSearches"
@@ -1316,7 +1340,12 @@ function SearchControlsRail(props: SearchControlsRailProps) {
             <button
               type="button"
               onClick={() => void props.onSaveCurrentSearch()}
-              disabled={props.savingSearch || !props.q.trim() || props.sources.length === 0}
+              disabled={
+                props.savingSearch
+                || !props.q.trim()
+                || props.sources.length === 0
+                || props.savedSearchLimitReached
+              }
               className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-zinc-100 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
             >
               {props.savingSearch ? (
@@ -1489,14 +1518,16 @@ function SavedSearchRail(props: SavedSearchRailProps) {
         </div>
 
         <div className="flex items-center gap-2">
-          {props.user && props.saved.length > 1 ? (
+          {props.user && props.activeSavedSearchCount > 1 ? (
             <button
               type="button"
               onClick={() => void props.runAllSavedSearches(props.saved)}
               disabled={props.searchLoading || props.loadingMore}
               className="rounded-full border border-white/10 bg-white/[0.02] px-2.5 py-1 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
             >
-              Run all
+              {props.hasSavedSearchOverflow
+                ? `Run newest ${props.savedSearchMaxPerUser}`
+                : "Run all"}
             </button>
           ) : null}
 
@@ -1511,6 +1542,15 @@ function SavedSearchRail(props: SavedSearchRailProps) {
           </button>
         </div>
       </div>
+
+      {props.user ? (
+        <p className="mb-3 text-xs text-zinc-500">
+          {`${props.activeSavedSearchCount}/${props.savedSearchMaxPerUser} saved searches used.`}
+          {props.activeSavedSearchCount >= props.savedSearchMaxPerUser
+            ? " Delete an older saved search to save another."
+            : ""}
+        </p>
+      ) : null}
 
       {props.savedError ? (
         <div className="mb-3 rounded-xl border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-100">
@@ -1533,86 +1573,94 @@ function SavedSearchRail(props: SavedSearchRailProps) {
           </p>
         </div>
       ) : (
-        <ul className="space-y-2">
-          {props.saved.map((entry) => (
-            <li
-              key={entry.id}
-              className={cn(
-                "rounded-xl border border-white/10 bg-white/[0.02] p-3 transition",
-                props.activeSavedSearchId === entry.id && "border-white/20 bg-white/[0.05]",
-              )}
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <p className="line-clamp-1 text-sm font-medium text-zinc-100">{entry.query}</p>
-                  <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
-                    <span>Saved</span>
-                    <span
-                      className={cn(
-                        "rounded-full border px-1.5 py-0.5",
-                        entry.alerts_enabled
-                          ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-100"
-                          : "border-white/10 bg-white/[0.02] text-zinc-400",
-                      )}
-                    >
-                      {entry.alerts_enabled ? "Alerts on" : "Alerts off"}
-                    </span>
+        <div className="space-y-3">
+          {props.hasSavedSearchOverflow ? (
+            <div className="rounded-xl border border-amber-300/20 bg-amber-300/10 p-3 text-xs leading-relaxed text-amber-100">
+              You have more than {props.savedSearchMaxPerUser} saved searches. Automatic runs and alert refreshes only use the newest {props.savedSearchMaxPerUser} until you delete extras.
+            </div>
+          ) : null}
+
+          <ul className="space-y-2">
+            {props.saved.map((entry) => (
+              <li
+                key={entry.id}
+                className={cn(
+                  "rounded-xl border border-white/10 bg-white/[0.02] p-3 transition",
+                  props.activeSavedSearchId === entry.id && "border-white/20 bg-white/[0.05]",
+                )}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="line-clamp-1 text-sm font-medium text-zinc-100">{entry.query}</p>
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+                      <span>Saved</span>
+                      <span
+                        className={cn(
+                          "rounded-full border px-1.5 py-0.5",
+                          entry.alerts_enabled
+                            ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-100"
+                            : "border-white/10 bg-white/[0.02] text-zinc-400",
+                        )}
+                      >
+                        {entry.alerts_enabled ? "Alerts on" : "Alerts off"}
+                      </span>
+                    </div>
+                    <p className="mt-2 text-xs leading-relaxed text-zinc-500">
+                      {getSavedSearchAlertStatus(entry)}
+                    </p>
                   </div>
-                  <p className="mt-2 text-xs leading-relaxed text-zinc-500">
-                    {getSavedSearchAlertStatus(entry)}
-                  </p>
+                  {props.activeSavedSearchId === entry.id ? (
+                    <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-zinc-300">
+                      Active
+                    </span>
+                  ) : null}
                 </div>
-                {props.activeSavedSearchId === entry.id ? (
-                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-zinc-300">
-                    Active
-                  </span>
-                ) : null}
-              </div>
 
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {entry.sources.map((source) => (
-                  <SourceChip key={`saved-source-${entry.id}-${source}`} source={source} compact />
-                ))}
-              </div>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {entry.sources.map((source) => (
+                    <SourceChip key={`saved-source-${entry.id}-${source}`} source={source} compact />
+                  ))}
+                </div>
 
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button
-                  className="rounded-lg bg-white px-3 py-1.5 text-xs font-medium text-black transition hover:bg-zinc-200"
-                  type="button"
-                  onClick={() => void props.onRunSavedSearch(entry.id)}
-                >
-                  Run
-                </button>
-                <button
-                  className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05]"
-                  type="button"
-                  onClick={() => props.openEdit(entry)}
-                >
-                  Edit
-                </button>
-                <button
-                  className={cn(
-                    "rounded-lg border px-3 py-1.5 text-xs transition",
-                    entry.alerts_enabled
-                      ? "border-emerald-300/25 bg-emerald-400/10 text-emerald-100 hover:border-emerald-300/40"
-                      : "border-white/10 bg-white/[0.02] text-zinc-200 hover:border-white/20 hover:bg-white/[0.05]",
-                  )}
-                  type="button"
-                  onClick={() => void props.onToggleSavedSearchAlerts(entry)}
-                >
-                  {entry.alerts_enabled ? "Disable alerts" : "Enable alerts"}
-                </button>
-                <button
-                  className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-200 transition hover:border-red-300/30 hover:bg-red-400/10 hover:text-red-100"
-                  type="button"
-                  onClick={() => void props.onDeleteSavedSearch(entry.id)}
-                >
-                  Delete
-                </button>
-              </div>
-            </li>
-          ))}
-        </ul>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    className="rounded-lg bg-white px-3 py-1.5 text-xs font-medium text-black transition hover:bg-zinc-200"
+                    type="button"
+                    onClick={() => void props.onRunSavedSearch(entry.id)}
+                  >
+                    Run
+                  </button>
+                  <button
+                    className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05]"
+                    type="button"
+                    onClick={() => props.openEdit(entry)}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    className={cn(
+                      "rounded-lg border px-3 py-1.5 text-xs transition",
+                      entry.alerts_enabled
+                        ? "border-emerald-300/25 bg-emerald-400/10 text-emerald-100 hover:border-emerald-300/40"
+                        : "border-white/10 bg-white/[0.02] text-zinc-200 hover:border-white/20 hover:bg-white/[0.05]",
+                    )}
+                    type="button"
+                    onClick={() => void props.onToggleSavedSearchAlerts(entry)}
+                  >
+                    {entry.alerts_enabled ? "Disable alerts" : "Enable alerts"}
+                  </button>
+                  <button
+                    className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-200 transition hover:border-red-300/30 hover:bg-red-400/10 hover:text-red-100"
+                    type="button"
+                    onClick={() => void props.onDeleteSavedSearch(entry.id)}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </GlassPanel>
   );
@@ -3015,6 +3063,7 @@ export default function HomePage() {
   const [savedBatchPagination, setSavedBatchPagination] = useState<SavedBatchPaginationState | null>(null);
 
   const [saved, setSaved] = useState<SavedSearch[]>([]);
+  const [savedSearchMaxPerUser, setSavedSearchMaxPerUser] = useState(DEFAULT_SAVED_SEARCH_MAX_PER_USER);
   const [savedLoading, setSavedLoading] = useState(false);
   const [savingSearch, setSavingSearch] = useState(false);
   const [savedError, setSavedError] = useState<string | null>(null);
@@ -3069,10 +3118,23 @@ export default function HomePage() {
   const seenKeysRef = useRef<Set<string>>(new Set());
   const fetchInFlightRef = useRef(false);
   const autoLoadedSavedForUserRef = useRef<string | null>(null);
+  const savedSearchMaxPerUserRef = useRef(DEFAULT_SAVED_SEARCH_MAX_PER_USER);
   const initializedLocationUserRef = useRef<string | null>(null);
   const savedBatchLaneStartRef = useRef(0);
   const copilotSessionVersionRef = useRef(0);
   const copilotLauncherDragMovedRef = useRef(false);
+
+  const applySavedSearchMaxPerUser = useCallback((nextLimit: number) => {
+    const normalized = Math.max(DEFAULT_SAVED_SEARCH_MAX_PER_USER, Math.trunc(nextLimit));
+    savedSearchMaxPerUserRef.current = normalized;
+    setSavedSearchMaxPerUser(normalized);
+  }, []);
+
+  useEffect(() => {
+    if (savedSearchMaxPerUser < DEFAULT_SAVED_SEARCH_MAX_PER_USER) {
+      applySavedSearchMaxPerUser(DEFAULT_SAVED_SEARCH_MAX_PER_USER);
+    }
+  }, [applySavedSearchMaxPerUser, savedSearchMaxPerUser]);
 
   const savedBatchHasMore =
     resultMode === "saved_batch" &&
@@ -3441,6 +3503,10 @@ export default function HomePage() {
     return fallback;
   }, []);
 
+  const getActiveSavedSearchBatch = useCallback((entries: SavedSearch[]) => {
+    return selectActiveSavedSearches(entries, savedSearchMaxPerUserRef.current);
+  }, []);
+
   const applyResolvedLocation = useCallback((location: ResolvedLocation | null) => {
     currentLocationRef.current = location;
     setCurrentLocation(location);
@@ -3744,6 +3810,7 @@ export default function HomePage() {
 
     try {
       if (!accessToken) {
+        applySavedSearchMaxPerUser(DEFAULT_SAVED_SEARCH_MAX_PER_USER);
         setSaved([]);
         return [];
       }
@@ -3758,6 +3825,9 @@ export default function HomePage() {
         throw new Error(`GET /saved-searches failed (${res.status}): ${text}`);
       }
 
+      applySavedSearchMaxPerUser(
+        normalizeSavedSearchMaxPerUser(res.headers.get(SAVED_SEARCH_MAX_PER_USER_HEADER)),
+      );
       const json = (await res.json()) as SavedSearch[];
       setSaved(json);
       return json;
@@ -3793,7 +3863,7 @@ export default function HomePage() {
       return;
     }
 
-    const pendingEntries = fetched.filter(hasIncompleteSavedSearchBaseline);
+    const pendingEntries = getActiveSavedSearchBatch(fetched).filter(hasIncompleteSavedSearchBaseline);
     if (pendingEntries.length === 0) {
       return;
     }
@@ -4068,7 +4138,8 @@ export default function HomePage() {
       selectedLimit?: number;
     } = {},
   ) => {
-    if (!accessToken || savedSearches.length === 0 || fetchInFlightRef.current) return;
+    const activeEntries = getActiveSavedSearchBatch(savedSearches);
+    if (!accessToken || activeEntries.length === 0 || fetchInFlightRef.current) return;
 
     const previousState = {
       rawResults,
@@ -4101,7 +4172,7 @@ export default function HomePage() {
     setHasSearched(false);
     setActiveSavedSearchId(null);
     seenKeysRef.current = new Set();
-    const seededLaneStart = computeSavedBatchSeed(savedSearches);
+    const seededLaneStart = computeSavedBatchSeed(activeEntries);
     savedBatchLaneStartRef.current = seededLaneStart;
 
     try {
@@ -4112,7 +4183,7 @@ export default function HomePage() {
       const paginationEntries: SavedBatchPaginationEntry[] = [];
       const initialBuckets: SavedSearchResultBucket[] = [];
 
-      for (const entry of savedSearches) {
+      for (const entry of activeEntries) {
         try {
           const payload = await fetchSavedSearchPage(entry, {
             selectedLimit,
@@ -4158,12 +4229,12 @@ export default function HomePage() {
         seenKeysRef.current = seenKeys;
       }
 
-      if (savedSearches.length > 0 && failures.length === savedSearches.length) {
+      if (activeEntries.length > 0 && failures.length === activeEntries.length) {
         throw new Error(`Failed to auto-load saved searches: ${failures[0]}`);
       }
 
       if (failures.length > 0) {
-        setError(`Some saved searches failed to load (${failures.length}/${savedSearches.length}).`);
+        setError(`Some saved searches failed to load (${failures.length}/${activeEntries.length}).`);
       }
 
       setRawResults(dedupedResults);
@@ -4180,7 +4251,7 @@ export default function HomePage() {
       setActiveQuery("Saved searches");
       setActiveSources(
         Array.from(
-          new Set(savedSearches.flatMap((entry) => entry.sources.filter(isSourceOption))),
+          new Set(activeEntries.flatMap((entry) => entry.sources.filter(isSourceOption))),
         ) as SourceOption[],
       );
       setActiveSort(selectedSort);
@@ -4218,6 +4289,7 @@ export default function HomePage() {
     activeSort,
     activeSources,
     fetchSavedSearchPage,
+    getActiveSavedSearchBatch,
     hasSearched,
     limit,
     nextOffset,
@@ -4439,6 +4511,11 @@ export default function HomePage() {
     try {
       if (!accessToken) throw new Error("Please log in to save searches.");
       if (sources.length === 0) throw new Error("Select at least one source.");
+      if (saved.length >= savedSearchMaxPerUserRef.current) {
+        throw new Error(
+          `Saved search limit reached. Maximum is ${savedSearchMaxPerUserRef.current}.`,
+        );
+      }
 
       const payload = {
         query: q.trim(),
@@ -4456,11 +4533,7 @@ export default function HomePage() {
       });
 
       if (!res.ok) {
-        if (res.status === 409) {
-          throw new Error("That saved search already exists");
-        }
-        const text = await res.text();
-        throw new Error(`POST /saved-searches failed (${res.status}): ${text}`);
+        throw new Error(await parseApiError(res, "Failed to save search"));
       }
 
       const created = (await res.json()) as SavedSearch;
@@ -5027,6 +5100,13 @@ export default function HomePage() {
   const hasSourceErrorEntries = Object.keys(sourceErrors).length > 0;
   const summarySources = sources;
   const totalResultsCount = total ?? rawResults.length;
+  const effectiveSavedSearchMaxPerUser = Math.max(
+    savedSearchMaxPerUser,
+    DEFAULT_SAVED_SEARCH_MAX_PER_USER,
+  );
+  const activeSavedSearchCount = Math.min(saved.length, effectiveSavedSearchMaxPerUser);
+  const savedSearchLimitReached = saved.length >= effectiveSavedSearchMaxPerUser;
+  const hasSavedSearchOverflow = saved.length > effectiveSavedSearchMaxPerUser;
 
   return (
     <SearchPageView
@@ -5046,6 +5126,10 @@ export default function HomePage() {
       onSearch={onSearch}
       onSaveCurrentSearch={onSaveCurrentSearch}
       limit={limit}
+      savedSearchMaxPerUser={effectiveSavedSearchMaxPerUser}
+      activeSavedSearchCount={activeSavedSearchCount}
+      savedSearchLimitReached={savedSearchLimitReached}
+      hasSavedSearchOverflow={hasSavedSearchOverflow}
       locationProvince={locationProvince}
       setLocationProvince={setLocationProvince}
       locationCityInput={locationCityInput}

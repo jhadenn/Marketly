@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 import uuid
 
 from app.core.config import settings
@@ -356,6 +357,70 @@ def test_refresh_saved_search_alerts_for_user_bypasses_refresh_window_for_pendin
     engine.dispose()
 
 
+def test_refresh_saved_search_alerts_for_user_ignores_legacy_searches_beyond_cap(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    db = session_factory()
+    now = datetime.now(timezone.utc)
+
+    db.add_all(
+        [
+            SavedSearch(
+                user_id="user-over-limit-refresh",
+                query="newest",
+                sources="ebay",
+                alerts_enabled=True,
+                last_alert_checked_at=now - timedelta(minutes=10),
+                created_at=now,
+            ),
+            SavedSearch(
+                user_id="user-over-limit-refresh",
+                query="newer",
+                sources="ebay",
+                alerts_enabled=True,
+                last_alert_checked_at=now - timedelta(minutes=11),
+                created_at=now - timedelta(seconds=1),
+            ),
+            SavedSearch(
+                user_id="user-over-limit-refresh",
+                query="new",
+                sources="ebay",
+                alerts_enabled=True,
+                last_alert_checked_at=now - timedelta(minutes=12),
+                created_at=now - timedelta(seconds=2),
+            ),
+            SavedSearch(
+                user_id="user-over-limit-refresh",
+                query="old",
+                sources="ebay",
+                alerts_enabled=True,
+                last_alert_checked_at=None,
+                created_at=now - timedelta(days=1),
+            ),
+        ]
+    )
+    db.commit()
+
+    calls: list[str] = []
+
+    async def fake_run_saved_search_alert_job(db, *, limit_per_search, user_id=None, saved_search_id=None):
+        calls.append(str(user_id))
+        return {"checked": 0, "notifications_created": 0}
+
+    monkeypatch.setattr(settings, "MARKETLY_SAVED_SEARCH_MAX_PER_USER", 3)
+    monkeypatch.setattr(settings, "MARKETLY_ALERTS_STALE_AFTER_SECONDS", 28800)
+    monkeypatch.setattr("app.services.alerts.run_saved_search_alert_job", fake_run_saved_search_alert_job)
+
+    refreshed = asyncio.run(
+        refresh_saved_search_alerts_for_user(db, user_id="user-over-limit-refresh")
+    )
+
+    assert refreshed is False
+    assert calls == []
+
+    db.close()
+    engine.dispose()
+
+
 def test_run_saved_search_alert_job_rolls_back_failed_search_and_continues(monkeypatch):
     engine, session_factory = build_test_session_factory()
     db = session_factory()
@@ -434,6 +499,110 @@ def test_run_saved_search_alert_job_rolls_back_failed_search_and_continues(monke
     assert notifications[0].summary_text == "1 new listing for working search"
     assert failing_search.last_alert_notified_at is None
     assert succeeding_search.last_alert_notified_at is not None
+
+    db.close()
+    engine.dispose()
+
+
+def test_run_saved_search_alert_job_limits_global_batch_to_newest_saved_searches_per_user(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    db = session_factory()
+    now = datetime.now(timezone.utc)
+
+    user_one_rows = [
+        SavedSearch(
+            user_id="user-limit-a",
+            query=f"user-a-{index}",
+            sources="ebay",
+            alerts_enabled=True,
+            last_alert_checked_at=now - timedelta(days=1),
+            created_at=now - timedelta(seconds=index),
+        )
+        for index in range(4)
+    ]
+    user_two_row = SavedSearch(
+        user_id="user-limit-b",
+        query="user-b-0",
+        sources="ebay",
+        alerts_enabled=True,
+        last_alert_checked_at=now - timedelta(days=1),
+        created_at=now - timedelta(seconds=10),
+    )
+    db.add_all([*user_one_rows, user_two_row])
+    db.commit()
+    for row in [*user_one_rows, user_two_row]:
+        db.refresh(row)
+
+    checked_ids: list[int] = []
+
+    async def fake_execute_saved_search_alert_check(db, *, saved_search_id, limit_per_search):
+        checked_ids.append(saved_search_id)
+        return SimpleNamespace(error_code=None, error_message=None, notification_created=False)
+
+    monkeypatch.setattr(settings, "MARKETLY_SAVED_SEARCH_MAX_PER_USER", 3)
+    monkeypatch.setattr(
+        "app.services.alerts.execute_saved_search_alert_check",
+        fake_execute_saved_search_alert_check,
+    )
+
+    result = asyncio.run(run_saved_search_alert_job(db, limit_per_search=20))
+
+    assert result["checked"] == 4
+    assert checked_ids == [
+        user_one_rows[0].id,
+        user_one_rows[1].id,
+        user_one_rows[2].id,
+        user_two_row.id,
+    ]
+    assert user_one_rows[3].id not in checked_ids
+
+    db.close()
+    engine.dispose()
+
+
+def test_run_saved_search_alert_job_allows_explicit_saved_search_beyond_cap(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    db = session_factory()
+    now = datetime.now(timezone.utc)
+
+    rows = [
+        SavedSearch(
+            user_id="user-explicit",
+            query=f"user-explicit-{index}",
+            sources="ebay",
+            alerts_enabled=True,
+            last_alert_checked_at=now - timedelta(days=1),
+            created_at=now - timedelta(seconds=index),
+        )
+        for index in range(4)
+    ]
+    db.add_all(rows)
+    db.commit()
+    for row in rows:
+        db.refresh(row)
+
+    checked_ids: list[int] = []
+
+    async def fake_execute_saved_search_alert_check(db, *, saved_search_id, limit_per_search):
+        checked_ids.append(saved_search_id)
+        return SimpleNamespace(error_code=None, error_message=None, notification_created=False)
+
+    monkeypatch.setattr(settings, "MARKETLY_SAVED_SEARCH_MAX_PER_USER", 3)
+    monkeypatch.setattr(
+        "app.services.alerts.execute_saved_search_alert_check",
+        fake_execute_saved_search_alert_check,
+    )
+
+    result = asyncio.run(
+        run_saved_search_alert_job(
+            db,
+            limit_per_search=20,
+            saved_search_id=rows[3].id,
+        )
+    )
+
+    assert result["checked"] == 1
+    assert checked_ids == [rows[3].id]
 
     db.close()
     engine.dispose()

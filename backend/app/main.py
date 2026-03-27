@@ -67,6 +67,7 @@ from app.services.location import (
     resolve_coordinates,
     upsert_user_location_preference,
 )
+from app.services.saved_searches import get_saved_search_max_per_user, ordered_saved_search_query
 from app.services.search_service import FacebookRuntimeContext, unified_search
 from app.services.supabase_ingestion import upsert_facebook_records
 
@@ -252,6 +253,14 @@ def _saved_search_out(row: SavedSearch) -> SavedSearchOut:
         next_alert_check_due_at=_dt_str(_saved_search_next_due_at(row)),
         created_at=str(row.created_at),
     )
+
+
+def _saved_search_limit_detail(max_saved_searches: int) -> str:
+    return f"Saved search limit reached. Maximum is {max_saved_searches}."
+
+
+def _set_saved_search_limit_header(response: Response) -> None:
+    response.headers["X-Saved-Search-Max-Per-User"] = str(get_saved_search_max_per_user())
 
 
 def _resolved_location_from_row(row: UserLocationPreference | None) -> ResolvedLocation | None:
@@ -779,10 +788,34 @@ async def create_saved_search(
     if limited is not None:
         return limited
 
+    next_sources = ",".join(payload.sources)
+    duplicate = (
+        db.query(SavedSearch)
+        .filter(
+            SavedSearch.user_id == user_id,
+            SavedSearch.query == payload.query,
+            SavedSearch.sources == next_sources,
+        )
+        .first()
+    )
+    if duplicate is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Saved search already exists with the same query and sources.",
+        )
+
+    max_saved_searches = get_saved_search_max_per_user()
+    saved_search_count = db.query(SavedSearch).filter(SavedSearch.user_id == user_id).count()
+    if saved_search_count >= max_saved_searches:
+        raise HTTPException(
+            status_code=409,
+            detail=_saved_search_limit_detail(max_saved_searches),
+        )
+
     row = SavedSearch(
         user_id=user_id,
         query=payload.query,
-        sources=",".join(payload.sources),
+        sources=next_sources,
         alerts_enabled=payload.alerts_enabled,
     )
     db.add(row)
@@ -803,15 +836,14 @@ async def create_saved_search(
 
 @app.get("/saved-searches", response_model=list[SavedSearchOut])
 def list_saved_searches(
+    response: Response,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    rows = (
-        db.query(SavedSearch)
-        .filter(SavedSearch.user_id == user_id)
-        .order_by(SavedSearch.created_at.desc())
-        .all()
-    )
+    _set_saved_search_limit_header(response)
+    rows = ordered_saved_search_query(
+        db.query(SavedSearch).filter(SavedSearch.user_id == user_id)
+    ).all()
 
     return [_saved_search_out(r) for r in rows]
 
