@@ -7,7 +7,7 @@ def _valid_cookie_metadata(_payload):
     return 4, {"c_user", "xs", "fr", "datr"}
 
 
-def test_automotive_multi_source_caps_fetch_depth(monkeypatch):
+def test_automotive_multi_source_keeps_requested_fetch_depth(monkeypatch):
     connector = FacebookUnifiedConnector()
     captured: dict[str, int] = {}
 
@@ -27,8 +27,7 @@ def test_automotive_multi_source_caps_fetch_depth(monkeypatch):
         )
     )
 
-    assert captured["limit"] == 12
-
+    assert captured["limit"] == 24
 
 def test_automotive_single_source_removes_overfetch(monkeypatch):
     connector = FacebookUnifiedConnector()

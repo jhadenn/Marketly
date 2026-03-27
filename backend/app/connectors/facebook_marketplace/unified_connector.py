@@ -287,11 +287,6 @@ class FacebookUnifiedConnector(MarketplaceConnector):
         # Keep overfetch bounded to protect low-memory hosts.
         scrape_limit = min(max_scrape_limit, requested_limit + overfetch_buffer)
         scrape_limit = max(requested_limit, scrape_limit)
-        if vehicle_query and multi_source:
-            scrape_limit = min(
-                scrape_limit,
-                max(1, int(settings.MARKETLY_FACEBOOK_MAX_FETCH_LIMIT)),
-            )
 
         effective_auth_mode = (auth_mode or settings.MARKETLY_FACEBOOK_AUTH_MODE or "guest").strip().lower()
         if cookie_payload is not None:
