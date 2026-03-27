@@ -385,8 +385,8 @@ def test_vehicle_detail_enrichment_skips_vehicle_queries_even_single_source(monk
     }
 
 
-def test_resolve_scroll_profile_uses_automotive_fast_path():
-    connector = FacebookMarketplaceConnector(timeout_seconds=20)
+def test_resolve_scroll_profile_keeps_multi_source_automotive_queries_on_default_profile():
+    connector = FacebookMarketplaceConnector(timeout_seconds=20, max_scrolls=30, idle_scroll_limit=4)
 
     multi_source_profile = connector._resolve_scroll_profile(
         multi_source=True,
@@ -401,10 +401,7 @@ def test_resolve_scroll_profile_uses_automotive_fast_path():
         vehicle_query=False,
     )
 
-    assert multi_source_profile == (
-        connector_module.AUTOMOTIVE_MULTI_SOURCE_MAX_SCROLLS,
-        connector_module.AUTOMOTIVE_MULTI_SOURCE_IDLE_SCROLL_LIMIT,
-    )
+    assert multi_source_profile == (30, 4)
     assert single_source_profile == (
         connector_module.AUTOMOTIVE_SINGLE_SOURCE_MAX_SCROLLS,
         connector_module.AUTOMOTIVE_SINGLE_SOURCE_IDLE_SCROLL_LIMIT,
@@ -412,7 +409,7 @@ def test_resolve_scroll_profile_uses_automotive_fast_path():
     assert generic_single_source_profile == (40, 5)
 
 
-def test_load_search_results_page_uses_commit_for_automotive_queries():
+def test_load_search_results_page_uses_commit_for_single_source_automotive_queries():
     connector = FacebookMarketplaceConnector(timeout_seconds=20)
     page = _FakeSearchPage()
 
@@ -422,12 +419,31 @@ def test_load_search_results_page_uses_commit_for_automotive_queries():
             search_url="https://www.facebook.com/marketplace/search/?query=mazda+miata",
             auth_mode="cookie",
             vehicle_query=True,
+            multi_source=False,
         )
     )
 
     assert page.goto_calls[0][1]["wait_until"] == "commit"
     assert page.selector_calls[0][0] == connector_module.ITEM_HREF_SELECTOR
     assert page.selector_calls[0][1]["timeout"] == connector_module.AUTOMOTIVE_SEARCH_RESULTS_WAIT_TIMEOUT_MS
+
+
+def test_load_search_results_page_keeps_domcontentloaded_for_multi_source_automotive_queries():
+    connector = FacebookMarketplaceConnector(timeout_seconds=20)
+    page = _FakeSearchPage()
+
+    asyncio.run(
+        connector._load_search_results_page(
+            page=page,
+            search_url="https://www.facebook.com/marketplace/search/?query=mazda+miata",
+            auth_mode="cookie",
+            vehicle_query=True,
+            multi_source=True,
+        )
+    )
+
+    assert page.goto_calls[0][1]["wait_until"] == "domcontentloaded"
+    assert page.selector_calls == []
 
 
 def test_load_search_results_page_keeps_domcontentloaded_for_non_automotive_queries():
@@ -440,6 +456,7 @@ def test_load_search_results_page_keeps_domcontentloaded_for_non_automotive_quer
             search_url="https://www.facebook.com/marketplace/search/?query=sofa",
             auth_mode="cookie",
             vehicle_query=False,
+            multi_source=False,
         )
     )
 

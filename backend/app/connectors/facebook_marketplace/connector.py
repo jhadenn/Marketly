@@ -494,6 +494,15 @@ class FacebookMarketplaceConnector:
             multi_source=request.multi_source,
             vehicle_query=vehicle_query,
         )
+        load_strategy = self._search_results_load_strategy(
+            multi_source=request.multi_source,
+            vehicle_query=vehicle_query,
+        )
+        fast_path_version = (
+            FACEBOOK_FAST_PATH_VERSION
+            if load_strategy == "automotive_single_source_fast_path"
+            else None
+        )
         started_at = time.perf_counter()
         self._log(
             "facebook_search_start",
@@ -503,9 +512,11 @@ class FacebookMarketplaceConnector:
             query=request.query,
             url=search_url,
             vehicle_query=vehicle_query,
+            multi_source=request.multi_source,
             max_scrolls=max_scrolls,
             idle_scroll_limit=idle_scroll_limit,
-            fast_path_version=FACEBOOK_FAST_PATH_VERSION,
+            load_strategy=load_strategy,
+            fast_path_version=fast_path_version,
         )
 
         browser = await self._get_browser()
@@ -532,6 +543,7 @@ class FacebookMarketplaceConnector:
                 search_url=search_url,
                 auth_mode=request.auth_mode,
                 vehicle_query=vehicle_query,
+                multi_source=request.multi_source,
             )
             raw_cards = await self._scroll_and_extract(
                 page=page,
@@ -553,6 +565,18 @@ class FacebookMarketplaceConnector:
             )
 
             if not normalized:
+                self._log(
+                    "facebook_search_empty",
+                    query=request.query,
+                    vehicle_query=vehicle_query,
+                    multi_source=request.multi_source,
+                    raw_card_count=len(raw_cards),
+                    normalized_count=len(normalized),
+                    max_scrolls=max_scrolls,
+                    idle_scroll_limit=idle_scroll_limit,
+                    load_strategy=load_strategy,
+                    elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+                )
                 await self._raise_if_blocked(page, extracted_cards=len(raw_cards))
                 raise FacebookConnectorError(
                     FacebookConnectorErrorCode.empty_results,
@@ -566,6 +590,8 @@ class FacebookMarketplaceConnector:
                 normalized=len(normalized),
                 query=request.query,
                 vehicle_query=vehicle_query,
+                multi_source=request.multi_source,
+                load_strategy=load_strategy,
                 elapsed_ms=int((time.perf_counter() - started_at) * 1000),
             )
             return normalized
@@ -574,6 +600,10 @@ class FacebookMarketplaceConnector:
                 "facebook_search_failed",
                 query=request.query,
                 vehicle_query=vehicle_query,
+                multi_source=request.multi_source,
+                max_scrolls=max_scrolls,
+                idle_scroll_limit=idle_scroll_limit,
+                load_strategy=load_strategy,
                 elapsed_ms=int((time.perf_counter() - started_at) * 1000),
                 error=str(exc),
             )
@@ -656,18 +686,18 @@ class FacebookMarketplaceConnector:
                 int(settings.MARKETLY_FACEBOOK_IDLE_SCROLL_LIMIT_SINGLE_SOURCE),
             )
 
-        if not vehicle_query:
+        if multi_source or not vehicle_query:
             return max_scrolls, idle_scroll_limit
-
-        if multi_source:
-            return (
-                min(max_scrolls, AUTOMOTIVE_MULTI_SOURCE_MAX_SCROLLS),
-                min(idle_scroll_limit, AUTOMOTIVE_MULTI_SOURCE_IDLE_SCROLL_LIMIT),
-            )
         return (
             min(max_scrolls, AUTOMOTIVE_SINGLE_SOURCE_MAX_SCROLLS),
             min(idle_scroll_limit, AUTOMOTIVE_SINGLE_SOURCE_IDLE_SCROLL_LIMIT),
         )
+
+    @staticmethod
+    def _search_results_load_strategy(*, multi_source: bool, vehicle_query: bool) -> str:
+        if vehicle_query and not multi_source:
+            return "automotive_single_source_fast_path"
+        return "default_domcontentloaded"
 
     @staticmethod
     def _vehicle_detail_skip_reason(*, multi_source: bool, vehicle_query: bool) -> str | None:
@@ -684,12 +714,17 @@ class FacebookMarketplaceConnector:
         search_url: str,
         auth_mode: str,
         vehicle_query: bool,
+        multi_source: bool,
     ) -> None:
         if settings.MARKETLY_FACEBOOK_BOOTSTRAP_HOME and auth_mode == "cookie":
             await page.goto("https://www.facebook.com/", wait_until="domcontentloaded")
             await self._jitter_sleep()
 
-        if not vehicle_query:
+        load_strategy = self._search_results_load_strategy(
+            multi_source=multi_source,
+            vehicle_query=vehicle_query,
+        )
+        if load_strategy == "default_domcontentloaded":
             await page.goto(search_url, wait_until="domcontentloaded")
             return
 
