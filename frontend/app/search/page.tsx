@@ -2192,6 +2192,8 @@ function EditSavedSearchModal(
     | "editAlertsEnabled"
     | "setEditAlertsEnabled"
     | "onSaveEdit"
+    | "facebookSourceAvailable"
+    | "facebookSourceDisabledReason"
   >,
 ) {
   if (!props.editing) return null;
