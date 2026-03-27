@@ -307,6 +307,189 @@ def test_me_location_crud_and_saved_search_run_use_stored_location(monkeypatch):
     engine.dispose()
 
 
+def test_saved_search_run_cache_hit_returns_header(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+
+    db = session_factory()
+    try:
+        saved_search = SavedSearch(
+            user_id="user-123",
+            query="road bike",
+            sources="ebay",
+            alerts_enabled=True,
+        )
+        db.add(saved_search)
+        db.commit()
+        db.refresh(saved_search)
+        saved_search_id = saved_search.id
+    finally:
+        db.close()
+
+    calls = {"unified_search": 0}
+
+    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance", **kwargs):
+        calls["unified_search"] += 1
+        return ([_sample_listing("ebay", "1")], 1, None, {})
+
+    monkeypatch.setattr("app.main.unified_search", fake_unified_search)
+    monkeypatch.setattr("app.main._enrich_results", lambda db, *, query, results: results)
+    monkeypatch.setattr("app.main.persist_listing_snapshots", lambda **kwargs: 1)
+    monkeypatch.setattr("app.main.settings.MARKETLY_RESPONSE_CACHE_ENABLED", True)
+    monkeypatch.setattr("app.main.settings.MARKETLY_RESPONSE_CACHE_LOCAL_FALLBACK_ENABLED", True)
+    monkeypatch.setattr("app.main.settings.MARKETLY_SAVED_SEARCH_RUN_CACHE_TTL_SECONDS", 300)
+    monkeypatch.setattr("app.services.response_cache.get_redis_client", lambda: None)
+    monkeypatch.setattr("app.services.response_cache._local_response_cache", TTLCache(max_items=8))
+
+    first = client.get(f"/saved-searches/{saved_search_id}/run")
+    second = client.get(f"/saved-searches/{saved_search_id}/run")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.headers.get("x-cache") == "MISS"
+    assert second.headers.get("x-cache") == "HIT"
+    assert calls["unified_search"] == 1
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_saved_search_run_refresh_bypasses_cache(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+
+    db = session_factory()
+    try:
+        saved_search = SavedSearch(
+            user_id="user-123",
+            query="road bike",
+            sources="ebay",
+            alerts_enabled=True,
+        )
+        db.add(saved_search)
+        db.commit()
+        db.refresh(saved_search)
+        saved_search_id = saved_search.id
+    finally:
+        db.close()
+
+    calls = {"unified_search": 0}
+
+    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance", **kwargs):
+        calls["unified_search"] += 1
+        return ([_sample_listing("ebay", str(calls["unified_search"]))], 1, None, {})
+
+    monkeypatch.setattr("app.main.unified_search", fake_unified_search)
+    monkeypatch.setattr("app.main._enrich_results", lambda db, *, query, results: results)
+    monkeypatch.setattr("app.main.persist_listing_snapshots", lambda **kwargs: 1)
+    monkeypatch.setattr("app.main.settings.MARKETLY_RESPONSE_CACHE_ENABLED", True)
+    monkeypatch.setattr("app.main.settings.MARKETLY_RESPONSE_CACHE_LOCAL_FALLBACK_ENABLED", True)
+    monkeypatch.setattr("app.main.settings.MARKETLY_SAVED_SEARCH_RUN_CACHE_TTL_SECONDS", 300)
+    monkeypatch.setattr("app.services.response_cache.get_redis_client", lambda: None)
+    monkeypatch.setattr("app.services.response_cache._local_response_cache", TTLCache(max_items=8))
+
+    first = client.get(f"/saved-searches/{saved_search_id}/run")
+    refreshed = client.get(f"/saved-searches/{saved_search_id}/run", params={"refresh": "true"})
+    third = client.get(f"/saved-searches/{saved_search_id}/run")
+
+    assert first.status_code == 200
+    assert refreshed.status_code == 200
+    assert third.status_code == 200
+    assert first.headers.get("x-cache") == "MISS"
+    assert refreshed.headers.get("x-cache") == "BYPASS"
+    assert third.headers.get("x-cache") == "HIT"
+    assert refreshed.json()["results"][0]["source_listing_id"] == "2"
+    assert third.json()["results"][0]["source_listing_id"] == "2"
+    assert calls["unified_search"] == 2
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_saved_search_run_cache_key_varies_by_facebook_context_and_location(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+
+    db = session_factory()
+    try:
+        saved_search = SavedSearch(
+            user_id="user-123",
+            query="bike",
+            sources="facebook",
+            alerts_enabled=True,
+        )
+        db.add(saved_search)
+        db.commit()
+        db.refresh(saved_search)
+        saved_search_id = saved_search.id
+    finally:
+        db.close()
+
+    calls = {"unified_search": 0}
+    context_state = {
+        "fingerprint": "fp-a",
+        "cookie_payload": [{"name": "c_user"}],
+    }
+
+    def fake_build_context(**kwargs):
+        return SimpleNamespace(
+            user_id="user-123",
+            cookie_payload=context_state["cookie_payload"],
+            credential_fingerprint_sha256=context_state["fingerprint"],
+            latitude=kwargs.get("latitude"),
+            longitude=kwargs.get("longitude"),
+            radius_km=kwargs.get("radius_km"),
+        )
+
+    async def fake_unified_search(query, sources, limit=20, offset=0, sort="relevance", **kwargs):
+        calls["unified_search"] += 1
+        return ([_sample_listing("facebook", str(calls["unified_search"]))], 1, None, {})
+
+    monkeypatch.setattr("app.main._build_facebook_runtime_context", fake_build_context)
+    monkeypatch.setattr("app.main.unified_search", fake_unified_search)
+    monkeypatch.setattr("app.main._enrich_results", lambda db, *, query, results: results)
+    monkeypatch.setattr("app.main.persist_listing_snapshots", lambda **kwargs: 1)
+    monkeypatch.setattr("app.main.settings.MARKETLY_RESPONSE_CACHE_ENABLED", True)
+    monkeypatch.setattr("app.main.settings.MARKETLY_RESPONSE_CACHE_LOCAL_FALLBACK_ENABLED", True)
+    monkeypatch.setattr("app.main.settings.MARKETLY_SAVED_SEARCH_RUN_CACHE_TTL_SECONDS", 300)
+    monkeypatch.setattr("app.services.response_cache.get_redis_client", lambda: None)
+    monkeypatch.setattr("app.services.response_cache._local_response_cache", TTLCache(max_items=8))
+
+    first = client.get(
+        f"/saved-searches/{saved_search_id}/run",
+        params={"latitude": "43.6532", "longitude": "-79.3832"},
+    )
+    second = client.get(
+        f"/saved-searches/{saved_search_id}/run",
+        params={"latitude": "43.6532", "longitude": "-79.3832"},
+    )
+    context_state["fingerprint"] = "fp-b"
+    third = client.get(
+        f"/saved-searches/{saved_search_id}/run",
+        params={"latitude": "43.6532", "longitude": "-79.3832"},
+    )
+    fourth = client.get(
+        f"/saved-searches/{saved_search_id}/run",
+        params={"latitude": "45.4215", "longitude": "-75.6972"},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert third.status_code == 200
+    assert fourth.status_code == 200
+    assert first.headers.get("x-cache") == "MISS"
+    assert second.headers.get("x-cache") == "HIT"
+    assert third.headers.get("x-cache") == "MISS"
+    assert fourth.headers.get("x-cache") == "MISS"
+    assert calls["unified_search"] == 3
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
 def test_search_cache_hit_returns_header(monkeypatch):
     payload = {
         "query": "iphone",

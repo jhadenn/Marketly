@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from app.auth import get_current_user_id
+from app.core.config import settings
 from app.db import get_db
 from app.main import app
 from app.models.listing import Listing, ListingRisk, ListingValuation, Money
@@ -106,6 +107,36 @@ def test_saved_search_and_notification_endpoints_include_alert_fields(monkeypatc
     assert read_res.status_code == 200
     assert read_res.json()["read_at"] is not None
     assert read_res.json()["new_count"] == 1
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_list_saved_searches_includes_max_per_user_header(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+    monkeypatch.setattr(settings, "MARKETLY_SAVED_SEARCH_MAX_PER_USER", 3)
+
+    db = session_factory()
+    try:
+        db.add(
+            SavedSearch(
+                user_id="user-123",
+                query="road bike",
+                sources="ebay",
+                alerts_enabled=True,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.get("/saved-searches")
+
+    assert response.status_code == 200
+    assert response.headers["X-Saved-Search-Max-Per-User"] == "3"
+    assert len(response.json()) == 1
 
     app.dependency_overrides.clear()
     engine.dispose()
@@ -416,6 +447,79 @@ def test_create_saved_search_persists_baseline_failure_metadata(monkeypatch):
     engine.dispose()
 
 
+def test_create_saved_search_returns_limit_conflict_without_running_baseline(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+    monkeypatch.setattr(settings, "MARKETLY_SAVED_SEARCH_MAX_PER_USER", 3)
+
+    db = session_factory()
+    try:
+        for index in range(3):
+            db.add(
+                SavedSearch(
+                    user_id="user-123",
+                    query=f"query-{index}",
+                    sources="ebay",
+                    alerts_enabled=True,
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
+
+    baseline_calls: list[int] = []
+
+    async def fake_execute_saved_search_alert_check(db, *, saved_search_id, limit_per_search):
+        baseline_calls.append(saved_search_id)
+        return SimpleNamespace(error_code=None, error_message=None, notification_created=False)
+
+    monkeypatch.setattr("app.main.execute_saved_search_alert_check", fake_execute_saved_search_alert_check)
+
+    response = client.post(
+        "/saved-searches",
+        json={"query": "query-3", "sources": ["ebay"], "alerts_enabled": True},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Saved search limit reached. Maximum is 3."
+    assert baseline_calls == []
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_create_saved_search_returns_duplicate_conflict_before_limit_check(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+    monkeypatch.setattr(settings, "MARKETLY_SAVED_SEARCH_MAX_PER_USER", 3)
+
+    db = session_factory()
+    try:
+        db.add_all(
+            [
+                SavedSearch(user_id="user-123", query="road bike", sources="ebay", alerts_enabled=True),
+                SavedSearch(user_id="user-123", query="acura rsx", sources="ebay", alerts_enabled=True),
+                SavedSearch(user_id="user-123", query="mazda miata", sources="facebook", alerts_enabled=True),
+            ]
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.post(
+        "/saved-searches",
+        json={"query": "road bike", "sources": ["ebay"], "alerts_enabled": True},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Saved search already exists with the same query and sources."
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
 def test_notifications_endpoint_returns_existing_rows_when_refresh_session_is_poisoned(monkeypatch):
     engine, session_factory = build_test_session_factory()
     app.dependency_overrides[get_current_user_id] = _override_auth
@@ -485,6 +589,38 @@ def test_notifications_endpoint_returns_existing_rows_when_refresh_session_is_po
     assert payload[0]["saved_search_query"] == "road bike"
     assert payload[0]["summary"] == "1 new listing for road bike"
     assert payload[0]["new_count"] == 1
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_update_saved_search_succeeds_when_user_is_already_over_limit(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+    monkeypatch.setattr(settings, "MARKETLY_SAVED_SEARCH_MAX_PER_USER", 3)
+
+    db = session_factory()
+    try:
+        rows = [
+            SavedSearch(user_id="user-123", query="road bike", sources="ebay", alerts_enabled=False),
+            SavedSearch(user_id="user-123", query="acura rsx", sources="ebay", alerts_enabled=False),
+            SavedSearch(user_id="user-123", query="mazda miata", sources="facebook", alerts_enabled=False),
+            SavedSearch(user_id="user-123", query="iphone", sources="kijiji", alerts_enabled=False),
+        ]
+        db.add_all(rows)
+        db.commit()
+        target_id = rows[0].id
+    finally:
+        db.close()
+
+    response = client.patch(
+        f"/saved-searches/{target_id}",
+        json={"query": "road bike carbon", "sources": ["ebay"], "alerts_enabled": False},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["query"] == "road bike carbon"
 
     app.dependency_overrides.clear()
     engine.dispose()

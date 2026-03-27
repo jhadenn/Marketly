@@ -5,6 +5,7 @@ import json
 import logging
 import random
 import re
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -139,6 +140,19 @@ EXTRACTION_SCRIPT = """
 }
 """
 
+FACEBOOK_FAST_PATH_VERSION = "vehicle_fast_path_v2"
+ITEM_HREF_SELECTOR = 'a[href*="/marketplace/item/"]'
+AUTOMOTIVE_SEARCH_RESULTS_WAIT_TIMEOUT_MS = 1500
+AUTOMOTIVE_SEARCH_RESULTS_FALLBACK_WAIT_SECONDS = 0.25
+AUTOMOTIVE_MULTI_SOURCE_MAX_SCROLLS = 6
+AUTOMOTIVE_MULTI_SOURCE_IDLE_SCROLL_LIMIT = 1
+AUTOMOTIVE_SINGLE_SOURCE_MAX_SCROLLS = 12
+AUTOMOTIVE_SINGLE_SOURCE_IDLE_SCROLL_LIMIT = 2
+VEHICLE_DETAIL_ENRICHMENT_MAX_RECORDS = 4
+VEHICLE_DETAIL_ENRICHMENT_GOTO_TIMEOUT_MS = 1500
+VEHICLE_DETAIL_ENRICHMENT_NETWORK_IDLE_TIMEOUT_MS = 1000
+VEHICLE_DETAIL_ENRICHMENT_TIME_BUDGET_SECONDS = 8.0
+
 
 def _clean_text_block(value: object) -> str:
     return " ".join(str(value or "").split()).strip()
@@ -217,6 +231,10 @@ def _apply_vehicle_detail_text(record: FacebookNormalizedListing, detail_text: s
             raw["text"] = _clean_text_block(" ".join([*existing_lines, formatted_mileage]))
 
     record.raw = raw
+
+
+def _query_targets_vehicles(query: str) -> bool:
+    return looks_like_automotive_listing(query)
 
 
 def _is_facebook_cookie_domain(domain: str) -> bool:
@@ -471,12 +489,23 @@ class FacebookMarketplaceConnector:
 
     async def _search_once(self, request: FacebookSearchRequest) -> list[FacebookNormalizedListing]:
         search_url = self._build_search_url(request)
+        vehicle_query = _query_targets_vehicles(request.query)
+        max_scrolls, idle_scroll_limit = self._resolve_scroll_profile(
+            multi_source=request.multi_source,
+            vehicle_query=vehicle_query,
+        )
+        started_at = time.perf_counter()
         self._log(
             "facebook_search_start",
             auth_mode=request.auth_mode,
             limit=request.limit,
+            scrape_limit=request.limit,
             query=request.query,
             url=search_url,
+            vehicle_query=vehicle_query,
+            max_scrolls=max_scrolls,
+            idle_scroll_limit=idle_scroll_limit,
+            fast_path_version=FACEBOOK_FAST_PATH_VERSION,
         )
 
         browser = await self._get_browser()
@@ -498,22 +527,12 @@ class FacebookMarketplaceConnector:
                     await self._load_cookies(context, request.cookie_path)
 
             page = await context.new_page()
-            if settings.MARKETLY_FACEBOOK_BOOTSTRAP_HOME and request.auth_mode == "cookie":
-                await page.goto("https://www.facebook.com/", wait_until="domcontentloaded")
-                await self._jitter_sleep()
-            await page.goto(search_url, wait_until="domcontentloaded")
-
-            if request.multi_source:
-                max_scrolls = self.max_scrolls
-                idle_scroll_limit = self.idle_scroll_limit
-            else:
-                max_scrolls = max(
-                    self.max_scrolls, int(settings.MARKETLY_FACEBOOK_MAX_SCROLLS_SINGLE_SOURCE)
-                )
-                idle_scroll_limit = max(
-                    self.idle_scroll_limit,
-                    int(settings.MARKETLY_FACEBOOK_IDLE_SCROLL_LIMIT_SINGLE_SOURCE),
-                )
+            await self._load_search_results_page(
+                page=page,
+                search_url=search_url,
+                auth_mode=request.auth_mode,
+                vehicle_query=vehicle_query,
+            )
             raw_cards = await self._scroll_and_extract(
                 page=page,
                 target_limit=request.limit,
@@ -527,7 +546,10 @@ class FacebookMarketplaceConnector:
             await self._enrich_vehicle_records_from_detail_pages(
                 context=context,
                 records=normalized,
-                max_records=(8 if request.multi_source else 12),
+                skip_reason=self._vehicle_detail_skip_reason(
+                    multi_source=request.multi_source,
+                    vehicle_query=vehicle_query,
+                ),
             )
 
             if not normalized:
@@ -543,9 +565,18 @@ class FacebookMarketplaceConnector:
                 extracted=len(raw_cards),
                 normalized=len(normalized),
                 query=request.query,
+                vehicle_query=vehicle_query,
+                elapsed_ms=int((time.perf_counter() - started_at) * 1000),
             )
             return normalized
         except Exception as exc:
+            self._log(
+                "facebook_search_failed",
+                query=request.query,
+                vehicle_query=vehicle_query,
+                elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+                error=str(exc),
+            )
             if self._is_browser_closed_error(exc):
                 await self._invalidate_browser()
             raise
@@ -610,6 +641,72 @@ class FacebookMarketplaceConnector:
             cookie_path=cookie_label,
             names=sorted(set(cookie_names)),
         )
+
+    def _resolve_scroll_profile(self, *, multi_source: bool, vehicle_query: bool) -> tuple[int, int]:
+        if multi_source:
+            max_scrolls = self.max_scrolls
+            idle_scroll_limit = self.idle_scroll_limit
+        else:
+            max_scrolls = max(
+                self.max_scrolls,
+                int(settings.MARKETLY_FACEBOOK_MAX_SCROLLS_SINGLE_SOURCE),
+            )
+            idle_scroll_limit = max(
+                self.idle_scroll_limit,
+                int(settings.MARKETLY_FACEBOOK_IDLE_SCROLL_LIMIT_SINGLE_SOURCE),
+            )
+
+        if not vehicle_query:
+            return max_scrolls, idle_scroll_limit
+
+        if multi_source:
+            return (
+                min(max_scrolls, AUTOMOTIVE_MULTI_SOURCE_MAX_SCROLLS),
+                min(idle_scroll_limit, AUTOMOTIVE_MULTI_SOURCE_IDLE_SCROLL_LIMIT),
+            )
+        return (
+            min(max_scrolls, AUTOMOTIVE_SINGLE_SOURCE_MAX_SCROLLS),
+            min(idle_scroll_limit, AUTOMOTIVE_SINGLE_SOURCE_IDLE_SCROLL_LIMIT),
+        )
+
+    @staticmethod
+    def _vehicle_detail_skip_reason(*, multi_source: bool, vehicle_query: bool) -> str | None:
+        if multi_source:
+            return "multi_source_disabled"
+        if vehicle_query:
+            return "vehicle_query_disabled"
+        return None
+
+    async def _load_search_results_page(
+        self,
+        *,
+        page,
+        search_url: str,
+        auth_mode: str,
+        vehicle_query: bool,
+    ) -> None:
+        if settings.MARKETLY_FACEBOOK_BOOTSTRAP_HOME and auth_mode == "cookie":
+            await page.goto("https://www.facebook.com/", wait_until="domcontentloaded")
+            await self._jitter_sleep()
+
+        if not vehicle_query:
+            await page.goto(search_url, wait_until="domcontentloaded")
+            return
+
+        await page.goto(search_url, wait_until="commit")
+        try:
+            await page.wait_for_selector(
+                ITEM_HREF_SELECTOR,
+                timeout=AUTOMOTIVE_SEARCH_RESULTS_WAIT_TIMEOUT_MS,
+            )
+        except Exception:
+            try:
+                await page.wait_for_load_state(
+                    "domcontentloaded",
+                    timeout=AUTOMOTIVE_SEARCH_RESULTS_WAIT_TIMEOUT_MS,
+                )
+            except Exception:
+                await asyncio.sleep(AUTOMOTIVE_SEARCH_RESULTS_FALLBACK_WAIT_SECONDS)
 
     async def _scroll_and_extract(
         self,
@@ -693,22 +790,65 @@ class FacebookMarketplaceConnector:
         *,
         context,
         records: list[FacebookNormalizedListing],
-        max_records: int,
+        skip_reason: str | None = None,
     ) -> None:
         candidates = [record for record in records if _needs_vehicle_detail_enrichment(record)]
         if not candidates:
             return
 
-        detail_page = await context.new_page()
-        detail_page.set_default_timeout(min(self.timeout_ms, 15000))
+        candidate_count = len(candidates)
+        if skip_reason is not None:
+            self._log(
+                "vehicle_detail_enrichment_summary",
+                candidates=candidate_count,
+                enriched=0,
+                skipped=candidate_count,
+                stop_reason=skip_reason,
+            )
+            return
+
         try:
-            for record in candidates[: max(1, max_records)]:
+            detail_page = await context.new_page()
+        except Exception as exc:
+            self._log(
+                "vehicle_detail_enrichment_failed",
+                stage="new_page",
+                error=str(exc),
+            )
+            self._log(
+                "vehicle_detail_enrichment_summary",
+                candidates=candidate_count,
+                enriched=0,
+                skipped=candidate_count,
+                stop_reason=None,
+            )
+            return
+
+        goto_timeout_ms = min(self.timeout_ms, VEHICLE_DETAIL_ENRICHMENT_GOTO_TIMEOUT_MS)
+        networkidle_timeout_ms = min(
+            self.timeout_ms,
+            VEHICLE_DETAIL_ENRICHMENT_NETWORK_IDLE_TIMEOUT_MS,
+        )
+        detail_page.set_default_timeout(goto_timeout_ms)
+        enriched_count = 0
+        stop_reason: str | None = None
+        started_at = time.perf_counter()
+
+        try:
+            for record in candidates[:VEHICLE_DETAIL_ENRICHMENT_MAX_RECORDS]:
+                if time.perf_counter() - started_at >= VEHICLE_DETAIL_ENRICHMENT_TIME_BUDGET_SECONDS:
+                    stop_reason = "budget_exhausted"
+                    break
                 try:
-                    await detail_page.goto(record.listing_url, wait_until="domcontentloaded")
+                    await detail_page.goto(
+                        record.listing_url,
+                        wait_until="domcontentloaded",
+                        timeout=goto_timeout_ms,
+                    )
                     try:
                         await detail_page.wait_for_load_state(
                             "networkidle",
-                            timeout=min(self.timeout_ms, 2500),
+                            timeout=networkidle_timeout_ms,
                         )
                     except Exception:
                         pass
@@ -716,12 +856,28 @@ class FacebookMarketplaceConnector:
                         "() => (document.body ? document.body.innerText : '')"
                     )
                     _apply_vehicle_detail_text(record, detail_text)
+                    enriched_count += 1
+                except PlaywrightTimeoutError as exc:
+                    stop_reason = "per_record_timeout"
+                    self._log(
+                        "vehicle_detail_enrichment_failed",
+                        url=record.listing_url,
+                        error=str(exc),
+                    )
+                    break
                 except Exception as exc:
                     self._log(
                         "vehicle_detail_enrichment_failed",
                         url=record.listing_url,
                         error=str(exc),
                     )
+            self._log(
+                "vehicle_detail_enrichment_summary",
+                candidates=candidate_count,
+                enriched=enriched_count,
+                skipped=max(0, candidate_count - enriched_count),
+                stop_reason=stop_reason,
+            )
         finally:
             try:
                 await detail_page.close()

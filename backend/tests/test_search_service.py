@@ -404,6 +404,78 @@ def test_fetch_source_facebook_single_source_not_capped(monkeypatch):
     assert len(listings) == 1
 
 
+def test_unified_search_multi_source_vehicle_query_returns_facebook_results(monkeypatch):
+    monkeypatch.setattr(search_service.settings, "MARKETLY_ENABLE_FACEBOOK", True)
+    monkeypatch.setattr(search_service.settings, "MARKETLY_DISABLE_FACEBOOK_MULTI_SOURCE_EXPANSION", True)
+    monkeypatch.setattr(search_service, "_cache", search_service.TTLCache())
+    monkeypatch.setattr(search_service, "_pagination_cache", search_service.TTLCache())
+
+    class FakeFacebookConnector:
+        async def search(self, **kwargs):
+            assert kwargs["query"] == "mazda miata"
+            assert kwargs["multi_source"] is True
+            return [_listing(1, source="facebook")]
+
+    class FakeEbayConnector:
+        async def search(self, **kwargs):
+            return [_listing(2, source="ebay")]
+
+    monkeypatch.setitem(search_service.CONNECTORS, "facebook", FakeFacebookConnector())
+    monkeypatch.setitem(search_service.CONNECTORS, "ebay", FakeEbayConnector())
+
+    page, total, next_offset, source_errors = asyncio.run(
+        search_service.unified_search(
+            query="mazda miata",
+            sources=["facebook", "ebay"],
+            limit=24,
+            offset=0,
+            sort="relevance",
+            facebook_runtime_context=search_service.FacebookRuntimeContext(
+                user_id="user-1",
+                cookie_payload=[{"name": "c_user"}],
+            ),
+        )
+    )
+
+    assert source_errors == {}
+    assert [item.source for item in page] == ["facebook", "ebay"]
+    assert total == 2
+    assert next_offset is None
+
+
+def test_unified_search_facebook_only_vehicle_query_returns_results(monkeypatch):
+    monkeypatch.setattr(search_service.settings, "MARKETLY_ENABLE_FACEBOOK", True)
+    monkeypatch.setattr(search_service, "_cache", search_service.TTLCache())
+
+    class FakeFacebookConnector:
+        async def search(self, **kwargs):
+            assert kwargs["query"] == "mazda miata"
+            assert kwargs["multi_source"] is False
+            return [_listing(idx, source="facebook") for idx in range(1, 25)]
+
+    monkeypatch.setitem(search_service.CONNECTORS, "facebook", FakeFacebookConnector())
+
+    page, total, next_offset, source_errors = asyncio.run(
+        search_service.unified_search(
+            query="mazda miata",
+            sources=["facebook"],
+            limit=24,
+            offset=0,
+            sort="relevance",
+            facebook_runtime_context=search_service.FacebookRuntimeContext(
+                user_id="user-1",
+                cookie_payload=[{"name": "c_user"}],
+            ),
+        )
+    )
+
+    assert source_errors == {}
+    assert len(page) == 24
+    assert all(item.source == "facebook" for item in page)
+    assert total is None
+    assert next_offset == 24
+
+
 def test_fetch_source_facebook_timeout_returns_timeout_error(monkeypatch):
     monkeypatch.setattr(search_service.settings, "MARKETLY_ENABLE_FACEBOOK", True)
     monkeypatch.setattr(search_service.settings, "MARKETLY_FACEBOOK_SOURCE_TIMEOUT_SECONDS", 0.001)

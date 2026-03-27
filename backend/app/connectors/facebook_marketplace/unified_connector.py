@@ -263,14 +263,23 @@ class FacebookUnifiedConnector(MarketplaceConnector):
         multi_source: bool = False,
     ) -> list[Listing]:
         requested_limit = max(1, int(limit))
+        vehicle_query = looks_like_automotive_listing(query)
         if multi_source:
-            overfetch_buffer = max(
-                0,
-                int(settings.MARKETLY_FACEBOOK_OVERFETCH_BUFFER_MULTI_SOURCE),
+            overfetch_buffer = (
+                0
+                if vehicle_query
+                else max(
+                    0,
+                    int(settings.MARKETLY_FACEBOOK_OVERFETCH_BUFFER_MULTI_SOURCE),
+                )
             )
             max_scrape_limit = max(1, int(settings.MARKETLY_FACEBOOK_MAX_SCRAPE_LIMIT))
         else:
-            overfetch_buffer = max(0, int(settings.MARKETLY_FACEBOOK_OVERFETCH_BUFFER))
+            overfetch_buffer = (
+                0
+                if vehicle_query
+                else max(0, int(settings.MARKETLY_FACEBOOK_OVERFETCH_BUFFER))
+            )
             max_scrape_limit = max(
                 int(settings.MARKETLY_FACEBOOK_MAX_SCRAPE_LIMIT),
                 int(settings.MARKETLY_FACEBOOK_MAX_SCRAPE_LIMIT_SINGLE_SOURCE),
@@ -278,6 +287,11 @@ class FacebookUnifiedConnector(MarketplaceConnector):
         # Keep overfetch bounded to protect low-memory hosts.
         scrape_limit = min(max_scrape_limit, requested_limit + overfetch_buffer)
         scrape_limit = max(requested_limit, scrape_limit)
+        if vehicle_query and multi_source:
+            scrape_limit = min(
+                scrape_limit,
+                max(1, int(settings.MARKETLY_FACEBOOK_MAX_FETCH_LIMIT)),
+            )
 
         effective_auth_mode = (auth_mode or settings.MARKETLY_FACEBOOK_AUTH_MODE or "guest").strip().lower()
         if cookie_payload is not None:

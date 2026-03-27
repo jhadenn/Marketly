@@ -17,6 +17,7 @@ from app.schemas.notifications import SavedSearchNotificationOut
 from app.services.facebook_credentials import decrypt_cookie_payload, get_user_facebook_credential
 from app.services.location import get_user_location_preference
 from app.services.listing_insights import enrich_listings_with_insights, listing_fingerprint, listing_key
+from app.services.saved_searches import ordered_saved_search_query, select_active_saved_searches
 from app.services.listing_snapshots import persist_listing_snapshots, previously_seen_fingerprints
 from app.services.search_service import FacebookRuntimeContext, unified_search
 from app.services.user_ids import normalize_user_id
@@ -328,22 +329,24 @@ async def refresh_saved_search_alerts_for_user(
     *,
     user_id: str,
 ) -> bool:
-    saved_searches = (
+    saved_searches = ordered_saved_search_query(
         db.query(SavedSearch)
         .filter(
             SavedSearch.user_id == user_id,
             SavedSearch.alerts_enabled.is_(True),
         )
-        .all()
-    )
-    if not saved_searches:
+    ).all()
+    active_saved_searches = select_active_saved_searches(saved_searches)
+    if not active_saved_searches:
         return False
 
     now = _utc_now()
-    if not any(_saved_search_is_stale(row, now=now) for row in saved_searches):
+    if not any(_saved_search_is_stale(row, now=now) for row in active_saved_searches):
         return False
 
-    bypass_refresh_window = any(getattr(row, "last_alert_checked_at", None) is None for row in saved_searches)
+    bypass_refresh_window = any(
+        getattr(row, "last_alert_checked_at", None) is None for row in active_saved_searches
+    )
     refresh_window_seconds = max(0, int(settings.MARKETLY_ALERTS_AUTO_REFRESH_WINDOW_SECONDS))
     cache_key = f"saved-search-alert-refresh:{user_id}"
     if (
@@ -537,7 +540,9 @@ async def run_saved_search_alert_job(
         query = query.filter(SavedSearch.user_id == user_id)
     if saved_search_id is not None:
         query = query.filter(SavedSearch.id == saved_search_id)
-    saved_searches = query.order_by(SavedSearch.created_at.desc()).all()
+    saved_searches = ordered_saved_search_query(query).all()
+    if saved_search_id is None:
+        saved_searches = select_active_saved_searches(saved_searches)
 
     checked = 0
     notifications_created = 0

@@ -67,6 +67,7 @@ from app.services.location import (
     resolve_coordinates,
     upsert_user_location_preference,
 )
+from app.services.saved_searches import get_saved_search_max_per_user, ordered_saved_search_query
 from app.services.search_service import FacebookRuntimeContext, unified_search
 from app.services.supabase_ingestion import upsert_facebook_records
 
@@ -252,6 +253,14 @@ def _saved_search_out(row: SavedSearch) -> SavedSearchOut:
         next_alert_check_due_at=_dt_str(_saved_search_next_due_at(row)),
         created_at=str(row.created_at),
     )
+
+
+def _saved_search_limit_detail(max_saved_searches: int) -> str:
+    return f"Saved search limit reached. Maximum is {max_saved_searches}."
+
+
+def _set_saved_search_limit_header(response: Response) -> None:
+    response.headers["X-Saved-Search-Max-Per-User"] = str(get_saved_search_max_per_user())
 
 
 def _resolved_location_from_row(row: UserLocationPreference | None) -> ResolvedLocation | None:
@@ -779,10 +788,34 @@ async def create_saved_search(
     if limited is not None:
         return limited
 
+    next_sources = ",".join(payload.sources)
+    duplicate = (
+        db.query(SavedSearch)
+        .filter(
+            SavedSearch.user_id == user_id,
+            SavedSearch.query == payload.query,
+            SavedSearch.sources == next_sources,
+        )
+        .first()
+    )
+    if duplicate is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Saved search already exists with the same query and sources.",
+        )
+
+    max_saved_searches = get_saved_search_max_per_user()
+    saved_search_count = db.query(SavedSearch).filter(SavedSearch.user_id == user_id).count()
+    if saved_search_count >= max_saved_searches:
+        raise HTTPException(
+            status_code=409,
+            detail=_saved_search_limit_detail(max_saved_searches),
+        )
+
     row = SavedSearch(
         user_id=user_id,
         query=payload.query,
-        sources=",".join(payload.sources),
+        sources=next_sources,
         alerts_enabled=payload.alerts_enabled,
     )
     db.add(row)
@@ -803,15 +836,14 @@ async def create_saved_search(
 
 @app.get("/saved-searches", response_model=list[SavedSearchOut])
 def list_saved_searches(
+    response: Response,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    rows = (
-        db.query(SavedSearch)
-        .filter(SavedSearch.user_id == user_id)
-        .order_by(SavedSearch.created_at.desc())
-        .all()
-    )
+    _set_saved_search_limit_header(response)
+    rows = ordered_saved_search_query(
+        db.query(SavedSearch).filter(SavedSearch.user_id == user_id)
+    ).all()
 
     return [_saved_search_out(r) for r in rows]
 
@@ -928,11 +960,13 @@ async def refresh_saved_search_alert(
 
 @app.get("/saved-searches/{search_id}/run", response_model=SearchResponse)
 async def run_saved_search(
+    response: Response,
     background_tasks: BackgroundTasks,
     search_id: int,
     limit: int = Query(default=20, ge=1, le=50),
     offset: int = Query(default=0, ge=0),
     sort: SearchSort = Query(default="relevance"),
+    refresh: bool = Query(default=False),
     latitude: float | None = Query(default=None, ge=-90, le=90),
     longitude: float | None = Query(default=None, ge=-180, le=180),
     radius_km: int | None = Query(default=None, ge=1, le=500),
@@ -977,6 +1011,31 @@ async def run_saved_search(
             radius_km=radius_km,
         )
 
+    cache_key = build_search_response_cache_key(
+        query=row.query,
+        sources=source_list,
+        limit=limit,
+        offset=offset,
+        sort=sort,
+        facebook_runtime_context=facebook_runtime_context,
+        search_location_context=search_location_context,
+    )
+    cache_active = is_search_response_cache_active()
+    cached_payload = None
+    if cache_active and not refresh:
+        cached_payload = get_cached_search_response(cache_key)
+    if cached_payload is not None:
+        response.headers["X-Cache"] = "HIT"
+        cached_response = SearchResponse.model_validate(cached_payload)
+        background_tasks.add_task(
+            persist_listing_snapshots,
+            query=row.query,
+            listings=cached_response.results,
+            user_id=user_id,
+            saved_search_id=row.id,
+        )
+        return cached_response
+
     if facebook_runtime_context is None:
         results, total, next_offset, source_errors = await unified_search(
             query=row.query,
@@ -1007,7 +1066,7 @@ async def run_saved_search(
         user_id=user_id,
         saved_search_id=row.id,
     )
-    return SearchResponse(
+    payload = SearchResponse(
         query=row.query,
         sources=typed_sources,
         count=len(results),
@@ -1016,6 +1075,14 @@ async def run_saved_search(
         total=total,
         source_errors=source_errors,
     )
+    if cache_active:
+        set_cached_search_response(
+            cache_key,
+            payload.model_dump(mode="json"),
+            ttl_seconds=settings.MARKETLY_SAVED_SEARCH_RUN_CACHE_TTL_SECONDS,
+        )
+    response.headers["X-Cache"] = "BYPASS" if refresh or not cache_active else "MISS"
+    return payload
 
 
 @app.get("/me/notifications", response_model=list[SavedSearchNotificationOut])

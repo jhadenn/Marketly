@@ -11,8 +11,13 @@ logger = logging.getLogger(__name__)
 _local_response_cache = TTLCache(max_items=int(settings.MARKETLY_RESPONSE_CACHE_LOCAL_MAX_ITEMS))
 
 
-def _response_cache_ttl_seconds() -> int:
-    return max(1, int(settings.MARKETLY_RESPONSE_CACHE_TTL_SECONDS))
+def _response_cache_ttl_seconds(ttl_override_seconds: int | None = None) -> int:
+    ttl_seconds = (
+        settings.MARKETLY_RESPONSE_CACHE_TTL_SECONDS
+        if ttl_override_seconds is None
+        else ttl_override_seconds
+    )
+    return max(1, int(ttl_seconds))
 
 
 def _local_fallback_enabled() -> bool:
@@ -41,12 +46,17 @@ def _get_local_cached_search_response(cache_key: str) -> dict[str, Any] | None:
         return None
 
 
-def _set_local_cached_search_response(cache_key: str, payload: dict[str, Any]) -> None:
+def _set_local_cached_search_response(
+    cache_key: str,
+    payload: dict[str, Any],
+    *,
+    ttl_seconds: int | None = None,
+) -> None:
     try:
         _local_response_cache.set(
             cache_key,
             json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
-            ttl_seconds=_response_cache_ttl_seconds(),
+            ttl_seconds=_response_cache_ttl_seconds(ttl_seconds),
         )
     except Exception as exc:
         logger.warning("search response local cache write failed key=%s error=%s", cache_key, exc)
@@ -141,7 +151,12 @@ def get_cached_search_response(cache_key: str) -> dict[str, Any] | None:
     return None
 
 
-def set_cached_search_response(cache_key: str, payload: dict[str, Any]) -> None:
+def set_cached_search_response(
+    cache_key: str,
+    payload: dict[str, Any],
+    *,
+    ttl_seconds: int | None = None,
+) -> None:
     if not settings.MARKETLY_RESPONSE_CACHE_ENABLED:
         return
 
@@ -150,7 +165,7 @@ def set_cached_search_response(cache_key: str, payload: dict[str, Any]) -> None:
         try:
             client.setex(
                 cache_key,
-                _response_cache_ttl_seconds(),
+                _response_cache_ttl_seconds(ttl_seconds),
                 json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
             )
             return
@@ -158,4 +173,4 @@ def set_cached_search_response(cache_key: str, payload: dict[str, Any]) -> None:
             logger.warning("search response cache write failed key=%s error=%s", cache_key, exc)
 
     if _local_fallback_enabled():
-        _set_local_cached_search_response(cache_key, payload)
+        _set_local_cached_search_response(cache_key, payload, ttl_seconds=ttl_seconds)

@@ -17,6 +17,7 @@
 - Saved searches support `alerts_enabled`, immediate baseline creation on save, and in-app alerts via:
   - `GET /me/notifications`
   - `POST /me/notifications/{id}/read`
+- Saved searches are capped per user with `MARKETLY_SAVED_SEARCH_MAX_PER_USER`, and automatic batch runs only use the newest saved searches up to that cap.
 - `GET /me/notifications` now auto-refreshes stale alert-enabled saved searches before returning the latest digests.
 - The shopping copilot is available at `POST /copilot/query` and can answer broader marketplace-item questions even without loaded listings.
 - Gemini is the only configured AI provider. For low-cost local development, use a Gemini Developer API key from Google AI Studio and set `MARKETLY_GEMINI_MODEL=gemini-2.5-flash-lite`.
@@ -62,6 +63,7 @@ MARKETLY_RATE_LIMIT_LOCAL_MAX_KEYS=5000
 MARKETLY_RATE_LIMIT_SEARCH_IP_PER_MIN=60
 MARKETLY_RATE_LIMIT_SEARCH_USER_PER_MIN=30
 MARKETLY_RATE_LIMIT_SAVED_MUTATION_PER_MIN=20
+MARKETLY_SAVED_SEARCH_MAX_PER_USER=3
 MARKETLY_RATE_LIMIT_FB_COOKIE_PUT_PER_HOUR=6
 MARKETLY_RATE_LIMIT_FB_VERIFY_PER_HOUR=12
 MARKETLY_RATE_LIMIT_FB_DELETE_PER_HOUR=20
