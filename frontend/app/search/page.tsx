@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { DotLottieReact } from "@lottiefiles/dotlottie-react";
@@ -45,6 +45,9 @@ const COPILOT_WINDOW_WIDTH_STORAGE_KEY = "marketly:copilot-window-width";
 const COPILOT_WINDOW_RECT_STORAGE_KEY = "marketly:copilot-window-rect";
 const COPILOT_LAUNCHER_POSITION_STORAGE_KEY = "marketly:copilot-launcher-position";
 const SEARCH_LOCATION_STORAGE_KEY = "marketly:search-location";
+const SAVED_BATCH_CACHE_STORAGE_KEY_PREFIX = "marketly:saved-batch-cache:v1";
+const SAVED_BATCH_CACHE_POINTER_STORAGE_KEY_PREFIX = "marketly:saved-batch-cache-latest:v1";
+const SAVED_BATCH_CACHE_TTL_MS = 5 * 60 * 1000;
 const SORT_OPTIONS = [
   { value: "relevance", label: "Relevance", disabled: false },
   { value: "price_asc", label: "Price: Low -> High", disabled: false },
@@ -333,12 +336,51 @@ type SavedBatchPaginationState = {
   entries: SavedBatchPaginationEntry[];
 };
 
+type SavedSearchRunOptions = {
+  selectedSort?: SortOption;
+  selectedLimit?: number;
+  refresh?: boolean;
+};
+
 type ResultMode = "single" | "saved_batch";
 type SavedSearchResultBucket = { items: Listing[] };
 type InterleavedSavedSearchBucketResult = {
   orderedItems: Listing[];
   seenKeys: Set<string>;
   nextLaneStart: number;
+};
+
+type SavedBatchCacheEntry = {
+  version: 1;
+  userId: string;
+  savedSearchSignature: string;
+  locationSignature: string;
+  expiresAt: number;
+  rawResults: Listing[];
+  sourceErrors: Record<string, SourceErrorEntry>;
+  savedBatchPagination: SavedBatchPaginationState | null;
+  total: number | null;
+  activeQuery: string;
+  activeSources: SourceOption[];
+  activeSort: SortOption;
+  activeLimit: number;
+  seenKeys: string[];
+  laneStart: number;
+};
+
+type SavedBatchCachePointer = {
+  version: 1;
+  key: string;
+  userId: string;
+  savedSearchSignature: string;
+  locationSignature: string;
+  expiresAt: number;
+};
+
+type SavedBatchCacheContext = {
+  userId: string;
+  savedSearchSignature: string;
+  locationSignature: string;
 };
 
 function isSourceOption(value: string): value is SourceOption {
@@ -379,6 +421,146 @@ function writeStoredResolvedLocation(location: ResolvedLocation | null) {
     return;
   }
   window.localStorage.removeItem(SEARCH_LOCATION_STORAGE_KEY);
+}
+
+function hashText(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function buildSavedBatchLocationSignature(location: ResolvedLocation | null): string {
+  if (!location) return "none";
+  return [
+    location.display_name,
+    location.mode,
+    location.latitude.toFixed(4),
+    location.longitude.toFixed(4),
+  ].join("|");
+}
+
+function buildSavedBatchSignature(savedSearches: Pick<SavedSearch, "id" | "query" | "sources">[]): string {
+  return savedSearches
+    .map((entry) => `${entry.id}:${entry.query}:${entry.sources.filter(isSourceOption).join(",")}`)
+    .join("|");
+}
+
+function buildSavedBatchCacheStorageKey({
+  userId,
+  savedSearchSignature,
+  locationSignature,
+  sort,
+  limit,
+}: {
+  userId: string;
+  savedSearchSignature: string;
+  locationSignature: string;
+  sort: SortOption;
+  limit: number;
+}) {
+  const digest = hashText([userId, savedSearchSignature, locationSignature, sort, String(limit)].join("|"));
+  return `${SAVED_BATCH_CACHE_STORAGE_KEY_PREFIX}:${userId}:${digest}`;
+}
+
+function buildSavedBatchCachePointerStorageKey(userId: string) {
+  return `${SAVED_BATCH_CACHE_POINTER_STORAGE_KEY_PREFIX}:${userId}`;
+}
+
+function isSavedBatchPaginationState(value: unknown): value is SavedBatchPaginationState {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<SavedBatchPaginationState>;
+  return (
+    typeof candidate.selectedSort === "string" &&
+    typeof candidate.selectedLimit === "number" &&
+    Array.isArray(candidate.entries)
+  );
+}
+
+function readSavedBatchCacheEntry(key: string): SavedBatchCacheEntry | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.sessionStorage.getItem(key);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<SavedBatchCacheEntry>;
+    if (
+      parsed.version !== 1 ||
+      typeof parsed.userId !== "string" ||
+      typeof parsed.savedSearchSignature !== "string" ||
+      typeof parsed.locationSignature !== "string" ||
+      typeof parsed.expiresAt !== "number" ||
+      !Array.isArray(parsed.rawResults) ||
+      !parsed.sourceErrors ||
+      typeof parsed.sourceErrors !== "object" ||
+      (parsed.savedBatchPagination !== null && !isSavedBatchPaginationState(parsed.savedBatchPagination)) ||
+      (parsed.total !== null && parsed.total !== undefined && typeof parsed.total !== "number") ||
+      typeof parsed.activeQuery !== "string" ||
+      !Array.isArray(parsed.activeSources) ||
+      typeof parsed.activeSort !== "string" ||
+      typeof parsed.activeLimit !== "number" ||
+      !Array.isArray(parsed.seenKeys) ||
+      typeof parsed.laneStart !== "number"
+    ) {
+      return null;
+    }
+    return {
+      ...parsed,
+      total: parsed.total ?? null,
+      savedBatchPagination: parsed.savedBatchPagination ?? null,
+      activeSources: parsed.activeSources.filter(isSourceOption),
+      activeSort: parsed.activeSort as SortOption,
+      seenKeys: parsed.seenKeys.filter((entry): entry is string => typeof entry === "string"),
+    } as SavedBatchCacheEntry;
+  } catch {
+    return null;
+  }
+}
+
+function writeSavedBatchCacheEntry(key: string, entry: SavedBatchCacheEntry) {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.setItem(key, JSON.stringify(entry));
+}
+
+function removeSavedBatchCacheEntry(key: string) {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.removeItem(key);
+}
+
+function readSavedBatchCachePointer(userId: string): SavedBatchCachePointer | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.sessionStorage.getItem(buildSavedBatchCachePointerStorageKey(userId));
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<SavedBatchCachePointer>;
+    if (
+      parsed.version !== 1 ||
+      typeof parsed.key !== "string" ||
+      typeof parsed.userId !== "string" ||
+      typeof parsed.savedSearchSignature !== "string" ||
+      typeof parsed.locationSignature !== "string" ||
+      typeof parsed.expiresAt !== "number"
+    ) {
+      return null;
+    }
+    return parsed as SavedBatchCachePointer;
+  } catch {
+    return null;
+  }
+}
+
+function writeSavedBatchCachePointer(userId: string, pointer: SavedBatchCachePointer) {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.setItem(
+    buildSavedBatchCachePointerStorageKey(userId),
+    JSON.stringify(pointer),
+  );
+}
+
+function removeSavedBatchCachePointer(userId: string) {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.removeItem(buildSavedBatchCachePointerStorageKey(userId));
 }
 
 function toLocationResolveRequest(location: ResolvedLocation): LocationResolveRequest {
@@ -880,6 +1062,8 @@ type SearchPageViewProps = {
   savedSearchMaxPerUser: number;
   activeSavedSearchCount: number;
   savedSearchLimitReached: boolean;
+  runnableSavedSearchCount: number;
+  blockedSavedSearchCount: number;
   hasSavedSearchOverflow: boolean;
   locationProvince: string;
   setLocationProvince: React.Dispatch<React.SetStateAction<string>>;
@@ -896,6 +1080,7 @@ type SearchPageViewProps = {
   error: string | null;
   sourceErrors: Record<string, SourceErrorEntry>;
   hasSourceErrorEntries: boolean;
+  resultsBootstrapping: boolean;
   hasSearched: boolean;
   results: Listing[];
   filteredResults: Listing[];
@@ -920,10 +1105,12 @@ type SearchPageViewProps = {
     options?: { refreshSavedSearches?: boolean },
   ) => Promise<SavedSearchNotification[] | null>;
   onMarkNotificationRead: (id: number) => Promise<void>;
-  runAllSavedSearches: (savedSearches: SavedSearch[]) => Promise<void>;
+  runAllSavedSearches: (savedSearches: SavedSearch[], options?: SavedSearchRunOptions) => Promise<void>;
   onRunSavedSearch: (id: number) => Promise<void>;
   onDeleteSavedSearch: (id: number) => Promise<void>;
   onToggleSavedSearchAlerts: (entry: SavedSearch) => Promise<void>;
+  isSavedSearchBlocked: (entry: SavedSearch) => boolean;
+  getSavedSearchBlockedReason: (entry: SavedSearch) => string | null;
   openEdit: (entry: SavedSearch) => void;
   editing: SavedSearch | null;
   closeEdit: () => void;
@@ -939,6 +1126,8 @@ type SearchPageViewProps = {
   facebookConfigStatus: FacebookConnectorStatus | null;
   facebookConfigLoading: boolean;
   facebookConfigError: string | null;
+  facebookSourceAvailable: boolean;
+  facebookSourceDisabledReason: string | null;
   facebookUploadBusy: boolean;
   facebookVerifyBusy: boolean;
   facebookDeleteBusy: boolean;
@@ -1008,6 +1197,8 @@ type SearchControlsRailProps = Pick<
   | "savedSearchMaxPerUser"
   | "activeSavedSearchCount"
   | "savedSearchLimitReached"
+  | "runnableSavedSearchCount"
+  | "blockedSavedSearchCount"
   | "sources"
   | "toggleSource"
   | "sortBy"
@@ -1030,6 +1221,8 @@ type SearchControlsRailProps = Pick<
   | "facebookConfigStatus"
   | "facebookConfigLoading"
   | "facebookConfigError"
+  | "facebookSourceAvailable"
+  | "facebookSourceDisabledReason"
   | "facebookUploadBusy"
   | "facebookVerifyBusy"
   | "facebookDeleteBusy"
@@ -1053,6 +1246,8 @@ type SavedSearchRailProps = Pick<
   | "loadingMore"
   | "savedSearchMaxPerUser"
   | "activeSavedSearchCount"
+  | "runnableSavedSearchCount"
+  | "blockedSavedSearchCount"
   | "hasSavedSearchOverflow"
   | "fetchSavedSearches"
   | "onRefreshSavedSearches"
@@ -1060,6 +1255,8 @@ type SavedSearchRailProps = Pick<
   | "onRunSavedSearch"
   | "onDeleteSavedSearch"
   | "onToggleSavedSearchAlerts"
+  | "isSavedSearchBlocked"
+  | "getSavedSearchBlockedReason"
   | "openEdit"
 >;
 
@@ -1090,6 +1287,7 @@ type ResultsPanelProps = Pick<
   | "summarySources"
   | "sourceErrors"
   | "hasSourceErrorEntries"
+  | "resultsBootstrapping"
   | "error"
   | "sentinelRef"
   | "loadingMore"
@@ -1383,10 +1581,24 @@ function SearchControlsRail(props: SearchControlsRailProps) {
                   key={`source-toggle-${source}`}
                   source={source}
                   selected={props.sources.includes(source)}
+                  disabled={source === "facebook" && !props.facebookSourceAvailable}
+                  disabledReason={source === "facebook" ? props.facebookSourceDisabledReason : null}
                   onClick={() => props.toggleSource(source)}
                 />
               ))}
             </div>
+            {!props.facebookSourceAvailable && props.facebookSourceDisabledReason ? (
+              <p className="text-xs leading-relaxed text-zinc-400">
+                Facebook is unavailable right now. {props.facebookSourceDisabledReason}{" "}
+                <Link
+                  href="/facebook-configuration"
+                  className="font-medium text-zinc-200 underline underline-offset-2 transition hover:text-white"
+                >
+                  Open Facebook configuration
+                </Link>
+                .
+              </p>
+            ) : null}
           </div>
 
           <div className="space-y-2">
@@ -1521,8 +1733,8 @@ function SavedSearchRail(props: SavedSearchRailProps) {
           {props.user && props.activeSavedSearchCount > 1 ? (
             <button
               type="button"
-              onClick={() => void props.runAllSavedSearches(props.saved)}
-              disabled={props.searchLoading || props.loadingMore}
+              onClick={() => void props.runAllSavedSearches(props.saved, { refresh: true })}
+              disabled={props.searchLoading || props.loadingMore || props.runnableSavedSearchCount === 0}
               className="rounded-full border border-white/10 bg-white/[0.02] px-2.5 py-1 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
             >
               {props.hasSavedSearchOverflow
@@ -1579,86 +1791,103 @@ function SavedSearchRail(props: SavedSearchRailProps) {
               You have more than {props.savedSearchMaxPerUser} saved searches. Automatic runs and alert refreshes only use the newest {props.savedSearchMaxPerUser} until you delete extras.
             </div>
           ) : null}
+          {props.blockedSavedSearchCount > 0 ? (
+            <div className="rounded-xl border border-amber-300/20 bg-amber-300/10 p-3 text-xs leading-relaxed text-amber-100">
+              {props.blockedSavedSearchCount} saved search{props.blockedSavedSearchCount === 1 ? "" : "es"} {props.blockedSavedSearchCount === 1 ? "is" : "are"} paused until Facebook is configured. Batch runs skip {props.blockedSavedSearchCount === 1 ? "it" : "them"}.
+            </div>
+          ) : null}
 
           <ul className="space-y-2">
-            {props.saved.map((entry) => (
-              <li
-                key={entry.id}
-                className={cn(
-                  "rounded-xl border border-white/10 bg-white/[0.02] p-3 transition",
-                  props.activeSavedSearchId === entry.id && "border-white/20 bg-white/[0.05]",
-                )}
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="line-clamp-1 text-sm font-medium text-zinc-100">{entry.query}</p>
-                    <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
-                      <span>Saved</span>
-                      <span
-                        className={cn(
-                          "rounded-full border px-1.5 py-0.5",
-                          entry.alerts_enabled
-                            ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-100"
-                            : "border-white/10 bg-white/[0.02] text-zinc-400",
-                        )}
-                      >
-                        {entry.alerts_enabled ? "Alerts on" : "Alerts off"}
-                      </span>
+            {props.saved.map((entry) => {
+              const blockedReason = props.getSavedSearchBlockedReason(entry);
+              const blocked = blockedReason !== null;
+              return (
+                <li
+                  key={entry.id}
+                  className={cn(
+                    "rounded-xl border border-white/10 bg-white/[0.02] p-3 transition",
+                    props.activeSavedSearchId === entry.id && "border-white/20 bg-white/[0.05]",
+                    blocked && "border-amber-300/20 bg-amber-300/5",
+                  )}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="line-clamp-1 text-sm font-medium text-zinc-100">{entry.query}</p>
+                      <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+                        <span>Saved</span>
+                        <span
+                          className={cn(
+                            "rounded-full border px-1.5 py-0.5",
+                            entry.alerts_enabled
+                              ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-100"
+                              : "border-white/10 bg-white/[0.02] text-zinc-400",
+                          )}
+                        >
+                          {entry.alerts_enabled ? "Alerts on" : "Alerts off"}
+                        </span>
+                      </div>
+                      <p className="mt-2 text-xs leading-relaxed text-zinc-500">
+                        {getSavedSearchAlertStatus(entry)}
+                      </p>
+                      {blockedReason ? (
+                        <p className="mt-2 text-xs leading-relaxed text-amber-100">
+                          {blockedReason}
+                        </p>
+                      ) : null}
                     </div>
-                    <p className="mt-2 text-xs leading-relaxed text-zinc-500">
-                      {getSavedSearchAlertStatus(entry)}
-                    </p>
+                    {props.activeSavedSearchId === entry.id ? (
+                      <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-zinc-300">
+                        Active
+                      </span>
+                    ) : null}
                   </div>
-                  {props.activeSavedSearchId === entry.id ? (
-                    <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-zinc-300">
-                      Active
-                    </span>
-                  ) : null}
-                </div>
 
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {entry.sources.map((source) => (
-                    <SourceChip key={`saved-source-${entry.id}-${source}`} source={source} compact />
-                  ))}
-                </div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {entry.sources.map((source) => (
+                      <SourceChip key={`saved-source-${entry.id}-${source}`} source={source} compact />
+                    ))}
+                  </div>
 
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button
-                    className="rounded-lg bg-white px-3 py-1.5 text-xs font-medium text-black transition hover:bg-zinc-200"
-                    type="button"
-                    onClick={() => void props.onRunSavedSearch(entry.id)}
-                  >
-                    Run
-                  </button>
-                  <button
-                    className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05]"
-                    type="button"
-                    onClick={() => props.openEdit(entry)}
-                  >
-                    Edit
-                  </button>
-                  <button
-                    className={cn(
-                      "rounded-lg border px-3 py-1.5 text-xs transition",
-                      entry.alerts_enabled
-                        ? "border-emerald-300/25 bg-emerald-400/10 text-emerald-100 hover:border-emerald-300/40"
-                        : "border-white/10 bg-white/[0.02] text-zinc-200 hover:border-white/20 hover:bg-white/[0.05]",
-                    )}
-                    type="button"
-                    onClick={() => void props.onToggleSavedSearchAlerts(entry)}
-                  >
-                    {entry.alerts_enabled ? "Disable alerts" : "Enable alerts"}
-                  </button>
-                  <button
-                    className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-200 transition hover:border-red-300/30 hover:bg-red-400/10 hover:text-red-100"
-                    type="button"
-                    onClick={() => void props.onDeleteSavedSearch(entry.id)}
-                  >
-                    Delete
-                  </button>
-                </div>
-              </li>
-            ))}
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      className="rounded-lg bg-white px-3 py-1.5 text-xs font-medium text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+                      type="button"
+                      onClick={() => void props.onRunSavedSearch(entry.id)}
+                      disabled={blocked}
+                      title={blockedReason ?? "Run saved search"}
+                    >
+                      Run
+                    </button>
+                    <button
+                      className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05]"
+                      type="button"
+                      onClick={() => props.openEdit(entry)}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      className={cn(
+                        "rounded-lg border px-3 py-1.5 text-xs transition",
+                        entry.alerts_enabled
+                          ? "border-emerald-300/25 bg-emerald-400/10 text-emerald-100 hover:border-emerald-300/40"
+                          : "border-white/10 bg-white/[0.02] text-zinc-200 hover:border-white/20 hover:bg-white/[0.05]",
+                      )}
+                      type="button"
+                      onClick={() => void props.onToggleSavedSearchAlerts(entry)}
+                    >
+                      {entry.alerts_enabled ? "Disable alerts" : "Enable alerts"}
+                    </button>
+                    <button
+                      className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-200 transition hover:border-red-300/30 hover:bg-red-400/10 hover:text-red-100"
+                      type="button"
+                      onClick={() => void props.onDeleteSavedSearch(entry.id)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}
@@ -1775,6 +2004,7 @@ function AlertsRail(props: AlertsRailProps) {
 function ResultsPanel({
   searchLoading,
   results,
+  resultsBootstrapping,
   hasSearched,
   filteredResults,
   hasActiveClientFilters,
@@ -1792,6 +2022,7 @@ function ResultsPanel({
     () => new Set(copilotSelectedListingKeys),
     [copilotSelectedListingKeys],
   );
+  const showBootstrapLoading = resultsBootstrapping && !hasSearched && results.length === 0;
 
   return (
     <section className="space-y-4">
@@ -1826,9 +2057,9 @@ function ResultsPanel({
         </GlassPanel>
       ) : null}
 
-      {searchLoading && results.length === 0 ? <ListingsLoadingState /> : null}
+      {((searchLoading && results.length === 0) || showBootstrapLoading) ? <ListingsLoadingState /> : null}
 
-      {!searchLoading && !hasSearched ? (
+      {!searchLoading && !showBootstrapLoading && !hasSearched ? (
         <GlassPanel className="overflow-hidden border-dashed p-5 sm:p-6">
           <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_420px]">
             <div>
@@ -2020,10 +2251,24 @@ function EditSavedSearchModal(
                   key={`edit-source-${source}`}
                   source={source}
                   selected={props.editSources.includes(source)}
+                  disabled={source === "facebook" && !props.facebookSourceAvailable}
+                  disabledReason={source === "facebook" ? props.facebookSourceDisabledReason : null}
                   onClick={() => props.toggleEditSource(source)}
                 />
               ))}
             </div>
+            {!props.facebookSourceAvailable && props.facebookSourceDisabledReason ? (
+              <p className="text-xs leading-relaxed text-zinc-400">
+                Facebook was removed from the edit selection. {props.facebookSourceDisabledReason}{" "}
+                <Link
+                  href="/facebook-configuration"
+                  className="font-medium text-zinc-200 underline underline-offset-2 transition hover:text-white"
+                >
+                  Open Facebook configuration
+                </Link>
+                .
+              </p>
+            ) : null}
             {props.editSources.length === 0 ? (
               <p className="text-xs text-red-300">Select at least one source.</p>
             ) : null}
@@ -2119,12 +2364,16 @@ function SourceChip({
   source,
   selected,
   onClick,
+  disabled = false,
+  disabledReason,
   compact = false,
   className,
 }: {
   source: string;
   selected?: boolean;
   onClick?: () => void;
+  disabled?: boolean;
+  disabledReason?: string | null;
   compact?: boolean;
   className?: string;
 }) {
@@ -2160,11 +2409,15 @@ function SourceChip({
       <button
         type="button"
         onClick={onClick}
+        disabled={disabled}
         aria-label={label}
-        title={label}
+        aria-disabled={disabled}
+        title={disabled ? `${label}: ${disabledReason ?? "Unavailable"}` : label}
         className={cn(
           classes,
-          selected
+          disabled
+            ? "cursor-not-allowed border-white/10 bg-white/[0.01] text-zinc-500 opacity-50"
+            : selected
             ? cn(tone.border, tone.bg, tone.text)
             : cn("border-white/10 bg-white/[0.02] text-zinc-300", tone.hover),
         )}
@@ -3064,6 +3317,7 @@ export default function HomePage() {
 
   const [saved, setSaved] = useState<SavedSearch[]>([]);
   const [savedSearchMaxPerUser, setSavedSearchMaxPerUser] = useState(DEFAULT_SAVED_SEARCH_MAX_PER_USER);
+  const [savedSearchBootstrapReady, setSavedSearchBootstrapReady] = useState(false);
   const [savedLoading, setSavedLoading] = useState(false);
   const [savingSearch, setSavingSearch] = useState(false);
   const [savedError, setSavedError] = useState<string | null>(null);
@@ -3121,8 +3375,10 @@ export default function HomePage() {
   const savedSearchMaxPerUserRef = useRef(DEFAULT_SAVED_SEARCH_MAX_PER_USER);
   const initializedLocationUserRef = useRef<string | null>(null);
   const savedBatchLaneStartRef = useRef(0);
+  const savedBatchCacheContextRef = useRef<SavedBatchCacheContext | null>(null);
   const copilotSessionVersionRef = useRef(0);
   const copilotLauncherDragMovedRef = useRef(false);
+  const userId = user?.id ?? null;
 
   const applySavedSearchMaxPerUser = useCallback((nextLimit: number) => {
     const normalized = Math.max(DEFAULT_SAVED_SEARCH_MAX_PER_USER, Math.trunc(nextLimit));
@@ -3135,6 +3391,33 @@ export default function HomePage() {
       applySavedSearchMaxPerUser(DEFAULT_SAVED_SEARCH_MAX_PER_USER);
     }
   }, [applySavedSearchMaxPerUser, savedSearchMaxPerUser]);
+
+  useEffect(() => {
+    if (authLoading) {
+      setSavedSearchBootstrapReady(false);
+      return;
+    }
+    if (!userId) {
+      setSavedSearchBootstrapReady(true);
+      return;
+    }
+    setSavedSearchBootstrapReady(false);
+  }, [authLoading, userId]);
+
+  const facebookSourceDisabledReason = useMemo(() => {
+    if (authLoading) return "Marketly is still checking your account.";
+    if (!user) return "Log in and configure Facebook before searching it.";
+    if (facebookConfigLoading && !facebookConfigStatus) return "Marketly is still checking your Facebook setup.";
+    if (facebookConfigStatus?.feature_enabled === false) {
+      return "Facebook search is currently disabled on the server.";
+    }
+    if (!facebookConfigStatus?.configured) {
+      return "Finish Facebook setup before selecting Facebook as a source.";
+    }
+    return null;
+  }, [authLoading, facebookConfigLoading, facebookConfigStatus, user]);
+
+  const facebookSourceAvailable = facebookSourceDisabledReason === null;
 
   const savedBatchHasMore =
     resultMode === "saved_batch" &&
@@ -3507,6 +3790,152 @@ export default function HomePage() {
     return selectActiveSavedSearches(entries, savedSearchMaxPerUserRef.current);
   }, []);
 
+  const isSavedSearchBlocked = useCallback((entry: Pick<SavedSearch, "sources">) => {
+    return !facebookSourceAvailable && entry.sources.some((source) => source.toLowerCase() === "facebook");
+  }, [facebookSourceAvailable]);
+
+  const getSavedSearchBlockedReason = useCallback((entry: Pick<SavedSearch, "sources">) => {
+    if (!isSavedSearchBlocked(entry)) return null;
+    return facebookSourceDisabledReason ?? "Facebook setup is required before this saved search can run.";
+  }, [facebookSourceDisabledReason, isSavedSearchBlocked]);
+
+  const getRunnableSavedSearchBatch = useCallback((entries: SavedSearch[]) => {
+    return getActiveSavedSearchBatch(entries).filter((entry) => !isSavedSearchBlocked(entry));
+  }, [getActiveSavedSearchBatch, isSavedSearchBlocked]);
+
+  const getBlockedSavedSearchBatch = useCallback((entries: SavedSearch[]) => {
+    return getActiveSavedSearchBatch(entries).filter((entry) => isSavedSearchBlocked(entry));
+  }, [getActiveSavedSearchBatch, isSavedSearchBlocked]);
+
+  const applySavedBatchCacheEntry = useCallback((
+    cachedEntry: SavedBatchCacheEntry,
+    cacheContext: SavedBatchCacheContext,
+  ) => {
+    resetCopilotConversation();
+    setSearchLoading(false);
+    setLoadingMore(false);
+    setError(null);
+    setCopilotError(null);
+    setSortBy(cachedEntry.activeSort);
+    setSortApplying(false);
+    setRawResults(cachedEntry.rawResults);
+    setResults(sortListingsLocal(cachedEntry.rawResults, cachedEntry.activeSort));
+    setNextOffset(null);
+    setTotal(cachedEntry.total);
+    setSourceErrors(cachedEntry.sourceErrors);
+    setSavedBatchPagination(cachedEntry.savedBatchPagination);
+    setHasSearched(true);
+    setResultMode("saved_batch");
+    setActiveSavedSearchId(null);
+    setActiveQuery(cachedEntry.activeQuery);
+    setActiveSources(cachedEntry.activeSources);
+    setActiveSort(cachedEntry.activeSort);
+    setActiveLimit(cachedEntry.activeLimit);
+    seenKeysRef.current = new Set(cachedEntry.seenKeys);
+    savedBatchLaneStartRef.current = cachedEntry.laneStart;
+    savedBatchCacheContextRef.current = cacheContext;
+  }, [resetCopilotConversation]);
+
+  useLayoutEffect(() => {
+    if (authLoading || !userId) return;
+    const latestPointer = readSavedBatchCachePointer(userId);
+    if (!latestPointer) return;
+    if (latestPointer.expiresAt <= Date.now()) {
+      removeSavedBatchCacheEntry(latestPointer.key);
+      removeSavedBatchCachePointer(userId);
+      return;
+    }
+    const cachedEntry = readSavedBatchCacheEntry(latestPointer.key);
+    if (
+      !cachedEntry ||
+      cachedEntry.userId !== userId ||
+      cachedEntry.expiresAt <= Date.now()
+    ) {
+      removeSavedBatchCacheEntry(latestPointer.key);
+      removeSavedBatchCachePointer(userId);
+      return;
+    }
+    applySavedBatchCacheEntry(cachedEntry, {
+      userId,
+      savedSearchSignature: cachedEntry.savedSearchSignature,
+      locationSignature: cachedEntry.locationSignature,
+    });
+  }, [applySavedBatchCacheEntry, authLoading, userId]);
+
+  const restoreSavedBatchFromCache = useCallback((
+    entries: SavedSearch[],
+    {
+      selectedSort = sortBy,
+      selectedLimit = limit,
+    }: {
+      selectedSort?: SortOption;
+      selectedLimit?: number;
+    } = {},
+  ) => {
+    if (!userId) return false;
+
+    const runnableEntries = getRunnableSavedSearchBatch(entries);
+    if (runnableEntries.length === 0) {
+      removeSavedBatchCachePointer(userId);
+      return false;
+    }
+
+    const savedSearchSignature = buildSavedBatchSignature(runnableEntries);
+    const locationSignature = buildSavedBatchLocationSignature(currentLocationRef.current);
+    const expectedDirectKey = buildSavedBatchCacheStorageKey({
+      userId,
+      savedSearchSignature,
+      locationSignature,
+      sort: selectedSort,
+      limit: selectedLimit,
+    });
+    const latestPointer = readSavedBatchCachePointer(userId);
+    const candidateKeys = Array.from(
+      new Set(
+        [latestPointer?.key, expectedDirectKey].filter((key): key is string => typeof key === "string" && key.length > 0),
+      ),
+    );
+
+    for (const key of candidateKeys) {
+      const cachedEntry = readSavedBatchCacheEntry(key);
+      if (
+        !cachedEntry ||
+        cachedEntry.userId !== userId ||
+        cachedEntry.savedSearchSignature !== savedSearchSignature ||
+        cachedEntry.locationSignature !== locationSignature ||
+        cachedEntry.expiresAt <= Date.now()
+      ) {
+        removeSavedBatchCacheEntry(key);
+        continue;
+      }
+
+      const cacheContext: SavedBatchCacheContext = {
+        userId,
+        savedSearchSignature,
+        locationSignature,
+      };
+      applySavedBatchCacheEntry(cachedEntry, cacheContext);
+      writeSavedBatchCachePointer(userId, {
+        version: 1,
+        key,
+        userId,
+        savedSearchSignature,
+        locationSignature,
+        expiresAt: cachedEntry.expiresAt,
+      });
+      return true;
+    }
+
+    removeSavedBatchCachePointer(userId);
+    return false;
+  }, [
+    applySavedBatchCacheEntry,
+    getRunnableSavedSearchBatch,
+    limit,
+    sortBy,
+    userId,
+  ]);
+
   const applyResolvedLocation = useCallback((location: ResolvedLocation | null) => {
     currentLocationRef.current = location;
     setCurrentLocation(location);
@@ -3692,6 +4121,22 @@ export default function HomePage() {
     }
     void fetchFacebookConfigStatus();
   }, [accessToken, fetchFacebookConfigStatus]);
+
+  useEffect(() => {
+    if (facebookSourceAvailable) return;
+    setSources((prev) => (prev.includes("facebook") ? prev.filter((source) => source !== "facebook") : prev));
+    setEditSources((prev) => (prev.includes("facebook") ? prev.filter((source) => source !== "facebook") : prev));
+    if (resultMode === "single") {
+      setActiveSources((prev) => (
+        prev.includes("facebook") ? prev.filter((source) => source !== "facebook") : prev
+      ));
+    }
+  }, [facebookSourceAvailable, resultMode]);
+
+  useEffect(() => {
+    if (userId) return;
+    savedBatchCacheContextRef.current = null;
+  }, [userId]);
 
   const uploadFacebookCookiePayload = useCallback(async (cookiePayload: unknown) => {
     if (!accessToken) {
@@ -3932,10 +4377,12 @@ export default function HomePage() {
       selectedLimit,
       selectedSort,
       offset,
+      refresh = false,
     }: {
       selectedLimit: number;
       selectedSort: SortOption;
       offset: number;
+      refresh?: boolean;
     },
   ): Promise<SearchResponse> => {
     if (!accessToken) throw new Error("Please log in again.");
@@ -3944,6 +4391,9 @@ export default function HomePage() {
     params.set("sort", selectedSort);
     params.set("limit", String(selectedLimit));
     params.set("offset", String(offset));
+    if (refresh) {
+      params.set("refresh", "true");
+    }
     const searchLocation = currentLocationRef.current;
     if (searchLocation) {
       params.set("latitude", String(searchLocation.latitude));
@@ -4133,13 +4583,11 @@ export default function HomePage() {
     {
       selectedSort = sortBy,
       selectedLimit = limit,
-    }: {
-      selectedSort?: SortOption;
-      selectedLimit?: number;
-    } = {},
+      refresh = false,
+    }: SavedSearchRunOptions = {},
   ) => {
-    const activeEntries = getActiveSavedSearchBatch(savedSearches);
-    if (!accessToken || activeEntries.length === 0 || fetchInFlightRef.current) return;
+    const activeEntries = getRunnableSavedSearchBatch(savedSearches);
+    if (!accessToken || !userId || activeEntries.length === 0 || fetchInFlightRef.current) return;
 
     const previousState = {
       rawResults,
@@ -4158,6 +4606,7 @@ export default function HomePage() {
       seenKeys: new Set(seenKeysRef.current),
       laneStart: savedBatchLaneStartRef.current,
     };
+    const previousCacheContext = savedBatchCacheContextRef.current;
     fetchInFlightRef.current = true;
     setSearchLoading(true);
     setLoadingMore(false);
@@ -4174,6 +4623,8 @@ export default function HomePage() {
     seenKeysRef.current = new Set();
     const seededLaneStart = computeSavedBatchSeed(activeEntries);
     savedBatchLaneStartRef.current = seededLaneStart;
+    const savedSearchSignature = buildSavedBatchSignature(activeEntries);
+    const locationSignature = buildSavedBatchLocationSignature(currentLocationRef.current);
 
     try {
       const dedupedResults: Listing[] = [];
@@ -4189,6 +4640,7 @@ export default function HomePage() {
             selectedLimit,
             selectedSort,
             offset: 0,
+            refresh,
           });
           const normalizedSources = entry.sources.filter(isSourceOption);
           paginationEntries.push({
@@ -4258,8 +4710,14 @@ export default function HomePage() {
       setActiveLimit(selectedLimit);
       setResultMode("saved_batch");
       setHasSearched(true);
+      savedBatchCacheContextRef.current = {
+        userId,
+        savedSearchSignature,
+        locationSignature,
+      };
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to auto-load saved searches");
+      savedBatchCacheContextRef.current = previousCacheContext;
       if (previousState.hasSearched) {
         setRawResults(previousState.rawResults);
         setResults(previousState.results);
@@ -4289,7 +4747,7 @@ export default function HomePage() {
     activeSort,
     activeSources,
     fetchSavedSearchPage,
-    getActiveSavedSearchBatch,
+    getRunnableSavedSearchBatch,
     hasSearched,
     limit,
     nextOffset,
@@ -4300,7 +4758,60 @@ export default function HomePage() {
     sortBy,
     sourceErrors,
     total,
+    userId,
     savedBatchPagination,
+  ]);
+
+  useEffect(() => {
+    if (!userId || resultMode !== "saved_batch" || !hasSearched || savedBatchPagination === null) return;
+    const cacheContext = savedBatchCacheContextRef.current;
+    if (!cacheContext || cacheContext.userId !== userId || activeQuery !== "Saved searches") return;
+
+    const expiresAt = Date.now() + SAVED_BATCH_CACHE_TTL_MS;
+    const key = buildSavedBatchCacheStorageKey({
+      userId,
+      savedSearchSignature: cacheContext.savedSearchSignature,
+      locationSignature: cacheContext.locationSignature,
+      sort: activeSort,
+      limit: activeLimit,
+    });
+    writeSavedBatchCacheEntry(key, {
+      version: 1,
+      userId,
+      savedSearchSignature: cacheContext.savedSearchSignature,
+      locationSignature: cacheContext.locationSignature,
+      expiresAt,
+      rawResults,
+      sourceErrors,
+      savedBatchPagination,
+      total,
+      activeQuery,
+      activeSources,
+      activeSort,
+      activeLimit,
+      seenKeys: Array.from(seenKeysRef.current),
+      laneStart: savedBatchLaneStartRef.current,
+    });
+    writeSavedBatchCachePointer(userId, {
+      version: 1,
+      key,
+      userId,
+      savedSearchSignature: cacheContext.savedSearchSignature,
+      locationSignature: cacheContext.locationSignature,
+      expiresAt,
+    });
+  }, [
+    activeLimit,
+    activeQuery,
+    activeSort,
+    activeSources,
+    hasSearched,
+    rawResults,
+    resultMode,
+    savedBatchPagination,
+    sourceErrors,
+    total,
+    userId,
   ]);
 
   const rerunActiveSearchWithLocation = useCallback(async () => {
@@ -4310,6 +4821,7 @@ export default function HomePage() {
       await runAllSavedSearches(saved, {
         selectedSort: activeSort,
         selectedLimit: activeLimit,
+        refresh: true,
       });
       return;
     }
@@ -4468,21 +4980,31 @@ export default function HomePage() {
     if (!accountLocationReady) return;
     if (user) {
       void (async () => {
-        const fetched = await fetchSavedSearches();
-        void fetchNotifications({ refreshSavedSearches: true });
-        if (!fetched) return;
+        try {
+          const fetched = await fetchSavedSearches();
+          void fetchNotifications({ refreshSavedSearches: true });
+          if (!fetched) return;
 
-        if (autoLoadedSavedForUserRef.current === user.id) return;
-        autoLoadedSavedForUserRef.current = user.id;
+          if (autoLoadedSavedForUserRef.current === user.id) return;
+          autoLoadedSavedForUserRef.current = user.id;
 
-        if (fetched.length > 0) {
-          await runAllSavedSearches(fetched);
+          if (restoreSavedBatchFromCache(fetched)) {
+            return;
+          }
+
+          if (getRunnableSavedSearchBatch(fetched).length > 0) {
+            await runAllSavedSearches(fetched, { refresh: false });
+          }
+        } finally {
+          setSavedSearchBootstrapReady(true);
         }
       })();
     } else {
       autoLoadedSavedForUserRef.current = null;
+      savedBatchCacheContextRef.current = null;
       setSaved([]);
       setNotifications([]);
+      setSavedSearchBootstrapReady(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accessToken, accountLocationReady, user]);
@@ -4618,6 +5140,8 @@ export default function HomePage() {
     try {
       const savedSearch = saved.find((entry) => entry.id === id);
       if (!savedSearch) throw new Error("Saved search not found.");
+      const blockedReason = getSavedSearchBlockedReason(savedSearch);
+      if (blockedReason) throw new Error(blockedReason);
 
       const normalizedSources = savedSearch.sources.filter(isSourceOption);
       if (normalizedSources.length === 0) throw new Error("Saved search has no valid sources.");
@@ -4663,6 +5187,7 @@ export default function HomePage() {
       await runAllSavedSearches(saved, {
         selectedSort: nextSort,
         selectedLimit: activeLimit,
+        refresh: true,
       });
       return;
     }
@@ -4678,13 +5203,18 @@ export default function HomePage() {
   }
 
   function toggleSource(source: SourceOption) {
+    if (source === "facebook" && !facebookSourceAvailable) return;
     setSources((prev) => (prev.includes(source) ? prev.filter((s) => s !== source) : [...prev, source]));
   }
 
   function openEdit(entry: SavedSearch) {
     setEditing(entry);
     setEditQuery(entry.query);
-    setEditSources(entry.sources.filter(isSourceOption));
+    setEditSources(
+      entry.sources
+        .filter(isSourceOption)
+        .filter((source) => source !== "facebook" || facebookSourceAvailable),
+    );
     setEditAlertsEnabled(entry.alerts_enabled);
     setEditError(null);
   }
@@ -4697,6 +5227,7 @@ export default function HomePage() {
   }
 
   function toggleEditSource(source: SourceOption) {
+    if (source === "facebook" && !facebookSourceAvailable) return;
     setEditSources((prev) =>
       prev.includes(source) ? prev.filter((s) => s !== source) : [...prev, source],
     );
@@ -5098,6 +5629,7 @@ export default function HomePage() {
   }, [API_BASE, activeQuery, copilotMessages, copilotQuestion, copilotSelectedListingKeys, filteredResults, q]);
 
   const hasSourceErrorEntries = Object.keys(sourceErrors).length > 0;
+  const resultsBootstrapping = authLoading || (userId !== null && !savedSearchBootstrapReady);
   const summarySources = sources;
   const totalResultsCount = total ?? rawResults.length;
   const effectiveSavedSearchMaxPerUser = Math.max(
@@ -5105,6 +5637,8 @@ export default function HomePage() {
     DEFAULT_SAVED_SEARCH_MAX_PER_USER,
   );
   const activeSavedSearchCount = Math.min(saved.length, effectiveSavedSearchMaxPerUser);
+  const runnableSavedSearchCount = getRunnableSavedSearchBatch(saved).length;
+  const blockedSavedSearchCount = getBlockedSavedSearchBatch(saved).length;
   const savedSearchLimitReached = saved.length >= effectiveSavedSearchMaxPerUser;
   const hasSavedSearchOverflow = saved.length > effectiveSavedSearchMaxPerUser;
 
@@ -5129,6 +5663,8 @@ export default function HomePage() {
       savedSearchMaxPerUser={effectiveSavedSearchMaxPerUser}
       activeSavedSearchCount={activeSavedSearchCount}
       savedSearchLimitReached={savedSearchLimitReached}
+      runnableSavedSearchCount={runnableSavedSearchCount}
+      blockedSavedSearchCount={blockedSavedSearchCount}
       hasSavedSearchOverflow={hasSavedSearchOverflow}
       locationProvince={locationProvince}
       setLocationProvince={setLocationProvince}
@@ -5145,6 +5681,7 @@ export default function HomePage() {
       error={error}
       sourceErrors={sourceErrors}
       hasSourceErrorEntries={hasSourceErrorEntries}
+      resultsBootstrapping={resultsBootstrapping}
       hasSearched={hasSearched}
       results={results}
       filteredResults={filteredResults}
@@ -5171,6 +5708,8 @@ export default function HomePage() {
       onRunSavedSearch={onRunSavedSearch}
       onDeleteSavedSearch={onDeleteSavedSearch}
       onToggleSavedSearchAlerts={onToggleSavedSearchAlerts}
+      isSavedSearchBlocked={isSavedSearchBlocked}
+      getSavedSearchBlockedReason={getSavedSearchBlockedReason}
       openEdit={openEdit}
       editing={editing}
       closeEdit={closeEdit}
@@ -5186,6 +5725,8 @@ export default function HomePage() {
       facebookConfigStatus={facebookConfigStatus}
       facebookConfigLoading={facebookConfigLoading}
       facebookConfigError={facebookConfigError}
+      facebookSourceAvailable={facebookSourceAvailable}
+      facebookSourceDisabledReason={facebookSourceDisabledReason}
       facebookUploadBusy={facebookUploadBusy}
       facebookVerifyBusy={facebookVerifyBusy}
       facebookDeleteBusy={facebookDeleteBusy}

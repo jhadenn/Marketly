@@ -960,11 +960,13 @@ async def refresh_saved_search_alert(
 
 @app.get("/saved-searches/{search_id}/run", response_model=SearchResponse)
 async def run_saved_search(
+    response: Response,
     background_tasks: BackgroundTasks,
     search_id: int,
     limit: int = Query(default=20, ge=1, le=50),
     offset: int = Query(default=0, ge=0),
     sort: SearchSort = Query(default="relevance"),
+    refresh: bool = Query(default=False),
     latitude: float | None = Query(default=None, ge=-90, le=90),
     longitude: float | None = Query(default=None, ge=-180, le=180),
     radius_km: int | None = Query(default=None, ge=1, le=500),
@@ -1009,6 +1011,31 @@ async def run_saved_search(
             radius_km=radius_km,
         )
 
+    cache_key = build_search_response_cache_key(
+        query=row.query,
+        sources=source_list,
+        limit=limit,
+        offset=offset,
+        sort=sort,
+        facebook_runtime_context=facebook_runtime_context,
+        search_location_context=search_location_context,
+    )
+    cache_active = is_search_response_cache_active()
+    cached_payload = None
+    if cache_active and not refresh:
+        cached_payload = get_cached_search_response(cache_key)
+    if cached_payload is not None:
+        response.headers["X-Cache"] = "HIT"
+        cached_response = SearchResponse.model_validate(cached_payload)
+        background_tasks.add_task(
+            persist_listing_snapshots,
+            query=row.query,
+            listings=cached_response.results,
+            user_id=user_id,
+            saved_search_id=row.id,
+        )
+        return cached_response
+
     if facebook_runtime_context is None:
         results, total, next_offset, source_errors = await unified_search(
             query=row.query,
@@ -1039,7 +1066,7 @@ async def run_saved_search(
         user_id=user_id,
         saved_search_id=row.id,
     )
-    return SearchResponse(
+    payload = SearchResponse(
         query=row.query,
         sources=typed_sources,
         count=len(results),
@@ -1048,6 +1075,14 @@ async def run_saved_search(
         total=total,
         source_errors=source_errors,
     )
+    if cache_active:
+        set_cached_search_response(
+            cache_key,
+            payload.model_dump(mode="json"),
+            ttl_seconds=settings.MARKETLY_SAVED_SEARCH_RUN_CACHE_TTL_SECONDS,
+        )
+    response.headers["X-Cache"] = "BYPASS" if refresh or not cache_active else "MISS"
+    return payload
 
 
 @app.get("/me/notifications", response_model=list[SavedSearchNotificationOut])
