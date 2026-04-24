@@ -120,6 +120,16 @@ def test_kijiji_connector_extracts_relative_posted_at_and_newest_url():
     assert "sortByName=dateDesc" in newest_url
 
 
+def test_kijiji_connector_extracts_stable_numeric_listing_id():
+    connector = KijijiScrapeConnector()
+
+    listing_id = connector._extract_listing_id(
+        "https://www.kijiji.ca/v-trading-cards/city/mega-rayquaza-ex/1731510626?dc=true"
+    )
+
+    assert listing_id == "1731510626"
+
+
 def test_kijiji_connector_prefers_visible_canadian_location_text_over_url_slug():
     connector = KijijiScrapeConnector()
 

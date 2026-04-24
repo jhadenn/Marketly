@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Marketly Facebook Session Helper",
+  "version": "0.1.0",
+  "description": "Sync fresh facebook.com cookies to Marketly and forward visible Marketplace cards for valuation snapshots.",
+  "permissions": ["cookies", "alarms", "storage", "tabs"],
+  "host_permissions": ["https://www.facebook.com/*", "https://*.facebook.com/*"],
+  "optional_host_permissions": ["http://localhost/*", "http://127.0.0.1/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.facebook.com/marketplace/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html",
+  "action": {
+    "default_title": "Marketly Helper"
+  }
+}

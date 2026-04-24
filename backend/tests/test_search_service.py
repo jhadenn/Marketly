@@ -1,6 +1,6 @@
 import asyncio
 
-from app.models.listing import Listing
+from app.models.listing import Listing, SourceError
 from app.schemas.location import ResolvedLocation
 from app.services import search_service
 
@@ -13,8 +13,9 @@ def _listing(
     location: str | None = None,
     latitude: float | None = None,
     longitude: float | None = None,
+    score: float | None = None,
 ) -> Listing:
-    return Listing(
+    listing = Listing(
         source=source,
         source_listing_id=str(idx),
         title=f"item {idx}",
@@ -25,13 +26,15 @@ def _listing(
         latitude=latitude,
         longitude=longitude,
     )
+    if score is not None:
+        listing.score = score
+    return listing
 
 
 def test_unified_search_multi_source_keeps_fetch_window_stable(monkeypatch):
     limit = 24
     monkeypatch.setattr(search_service.settings, "MARKETLY_DISABLE_FACEBOOK_MULTI_SOURCE_EXPANSION", False)
     monkeypatch.setattr(search_service.settings, "MARKETLY_MULTI_SOURCE_MAX_EXPANSIONS", 4)
-    monkeypatch.setattr(search_service.settings, "MARKETLY_BALANCE_MULTI_SOURCE_RESULTS", False)
     monkeypatch.setattr(search_service, "_pagination_cache", search_service.TTLCache())
     base_pool = [_listing(idx) for idx in range(72)]
     expanded_pool = (
@@ -99,8 +102,10 @@ def test_unified_search_multi_source_keeps_fetch_window_stable(monkeypatch):
     assert [item.source_listing_id for item in page1] == [str(idx) for idx in range(24)]
     assert [item.source_listing_id for item in page2] == [str(idx) for idx in range(24, 48)]
     assert [item.source_listing_id for item in page3] == [str(idx) for idx in range(48, 72)]
-    assert [item.source_listing_id for item in page4] == [str(idx) for idx in range(100, 120)] + [
-        str(idx) for idx in range(200, 204)
+    assert [item.source_listing_id for item in page4] == [
+        str(item_id)
+        for pair_idx in range(12)
+        for item_id in (100 + pair_idx, 200 + pair_idx)
     ]
     assert total1 is None
     assert total2 is None
@@ -116,7 +121,6 @@ def test_unified_search_multi_source_skips_expansion_when_facebook_guard_enabled
     limit = 24
     monkeypatch.setattr(search_service.settings, "MARKETLY_DISABLE_FACEBOOK_MULTI_SOURCE_EXPANSION", True)
     monkeypatch.setattr(search_service.settings, "MARKETLY_MULTI_SOURCE_MAX_EXPANSIONS", 4)
-    monkeypatch.setattr(search_service.settings, "MARKETLY_BALANCE_MULTI_SOURCE_RESULTS", False)
     monkeypatch.setattr(search_service, "_pagination_cache", search_service.TTLCache())
     base_pool = [_listing(idx) for idx in range(limit * 2)]
     fetch_limits: list[int] = []
@@ -222,34 +226,36 @@ def test_unified_search_single_source_first_page_keeps_next_offset(monkeypatch):
     assert next_offset3 is None
 
 
-def test_unified_search_multi_source_balances_sources_for_relevance(monkeypatch):
-    monkeypatch.setattr(search_service.settings, "MARKETLY_BALANCE_MULTI_SOURCE_RESULTS", True)
+def test_unified_search_multi_source_mixes_source_lanes_for_relevance(monkeypatch):
     monkeypatch.setattr(search_service.settings, "MARKETLY_DISABLE_FACEBOOK_MULTI_SOURCE_EXPANSION", True)
 
     async def fake_fetch_and_score(query, sources, fetch_limit, sort, **kwargs):
         results = [
-            _listing(1, source="ebay"),
-            _listing(2, source="ebay"),
-            _listing(3, source="ebay"),
-            _listing(4, source="facebook"),
-            _listing(5, source="facebook"),
+            _listing(1, source="ebay", score=9),
+            _listing(2, source="ebay", score=9),
+            _listing(3, source="ebay", score=7),
+            _listing(4, source="facebook", score=9),
+            _listing(5, source="facebook", score=5),
+            _listing(6, source="kijiji", score=9),
         ]
-        return results, {}, {"ebay": 3, "facebook": 2}
+        return results, {}, {"ebay": 3, "facebook": 2, "kijiji": 1}
 
     monkeypatch.setattr(search_service, "_fetch_and_score", fake_fetch_and_score)
-    monkeypatch.setattr(search_service, "_sort_results", lambda items, sort: items)
 
     page, _, _, _ = asyncio.run(
         search_service.unified_search(
             query="bike",
-            sources=["ebay", "facebook"],
-            limit=4,
+            sources=["ebay", "facebook", "kijiji"],
+            limit=6,
             offset=0,
             sort="relevance",
         )
     )
 
-    assert [item.source for item in page] == ["ebay", "facebook", "ebay", "facebook"]
+    assert [item.source_listing_id for item in page] == ["1", "4", "6", "2", "5", "3"]
+    assert [item.source for item in page[:3]] == ["ebay", "facebook", "kijiji"]
+    assert [item.source_listing_id for item in page if item.source == "ebay"] == ["1", "2", "3"]
+    assert [item.source_listing_id for item in page if item.source == "facebook"] == ["4", "5"]
 
 
 def test_sort_results_newest_prefers_timestamps_and_pushes_missing_to_bottom():
@@ -301,6 +307,32 @@ def test_fetch_source_facebook_requires_byoc(monkeypatch):
     assert listings == []
     assert source_error is not None
     assert source_error.code == "BYOC_REQUIRED"
+
+
+def test_fetch_source_facebook_returns_preflight_error(monkeypatch):
+    monkeypatch.setattr(search_service.settings, "MARKETLY_ENABLE_FACEBOOK", True)
+
+    preflight_error = SourceError(
+        code="LOGIN_REQUIRED",
+        message="Facebook browser helper is disconnected or stale.",
+        retryable=False,
+    )
+    src, listings, source_error = asyncio.run(
+        search_service._fetch_source(
+            src="facebook",
+            query="bike",
+            fetch_limit=10,
+            sort="relevance",
+            facebook_runtime_context=search_service.FacebookRuntimeContext(
+                user_id="user-1",
+                preflight_error=preflight_error,
+            ),
+        )
+    )
+
+    assert src == "facebook"
+    assert listings == []
+    assert source_error == preflight_error
 
 
 def test_fetch_source_facebook_applies_limit_cap(monkeypatch):
@@ -582,9 +614,38 @@ def test_cache_keys_vary_by_facebook_user_cookie_and_location():
     assert pag_a != pag_b
 
 
-def test_order_with_location_context_prefers_nearby_local_results(monkeypatch):
-    monkeypatch.setattr(search_service.settings, "MARKETLY_BALANCE_MULTI_SOURCE_RESULTS", True)
+def test_cache_keys_vary_by_facebook_preflight_error():
+    ctx_ok = search_service.FacebookRuntimeContext(
+        user_id="user-a",
+        credential_fingerprint_sha256="fp-a",
+    )
+    ctx_error = search_service.FacebookRuntimeContext(
+        user_id="user-a",
+        credential_fingerprint_sha256="fp-a",
+        preflight_error=SourceError(
+            code="LOGIN_REQUIRED",
+            message="Facebook session verification failed.",
+            retryable=False,
+        ),
+    )
 
+    key_ok = search_service._cache_key("bike", ["facebook"], 24, "relevance", ctx_ok, None)
+    key_error = search_service._cache_key("bike", ["facebook"], 24, "relevance", ctx_error, None)
+    pag_ok = search_service._pagination_key("bike", ["facebook"], "relevance", 24, ctx_ok, None)
+    pag_error = search_service._pagination_key(
+        "bike",
+        ["facebook"],
+        "relevance",
+        24,
+        ctx_error,
+        None,
+    )
+
+    assert key_ok != key_error
+    assert pag_ok != pag_error
+
+
+def test_order_with_location_context_prefers_nearby_local_results():
     origin = ResolvedLocation(
         display_name="Toronto, ON",
         city="Toronto",
@@ -621,6 +682,35 @@ def test_order_with_location_context_prefers_nearby_local_results(monkeypatch):
     assert ordered[2].distance_km is None
     assert ordered[3].source == "ebay"
     assert ordered[4].distance_km is None
+
+
+def test_order_with_location_context_mixes_resolved_and_unresolved_local_sources():
+    origin = ResolvedLocation(
+        display_name="Toronto, ON",
+        city="Toronto",
+        province_code="ON",
+        province_name="Ontario",
+        country_code="CA",
+        latitude=43.6532,
+        longitude=-79.3832,
+        mode="manual",
+    )
+    items = [
+        _listing(1, source="facebook", location="Toronto, ON", score=20),
+        _listing(2, source="facebook", location="Toronto, ON", score=19),
+        _listing(3, source="kijiji", location=None, score=18),
+        _listing(4, source="kijiji", location=None, score=17),
+    ]
+
+    ordered = search_service._order_with_location_context(
+        items,
+        sources=["kijiji", "facebook"],
+        sort="relevance",
+        search_location_context=origin,
+    )
+
+    assert [item.source_listing_id for item in ordered] == ["1", "3", "2", "4"]
+    assert [item.source for item in ordered] == ["facebook", "kijiji", "facebook", "kijiji"]
 
 
 def test_order_with_location_context_geocodes_canadian_text_without_fabricating_unknown_coords():

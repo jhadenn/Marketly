@@ -23,10 +23,17 @@ type FacebookConnectorStatus = {
   feature_enabled: boolean;
   status?: string | null;
   cookie_count?: number | null;
+  credential_source?: string | null;
+  session_cookie_count?: number | null;
   last_error_code?: string | null;
   last_error_message?: string | null;
   last_validated_at?: string | null;
   last_used_at?: string | null;
+  last_synced_at?: string | null;
+  earliest_cookie_expiry_at?: string | null;
+  helper_connected?: boolean;
+  helper_label?: string | null;
+  stale_reason?: string | null;
   updated_at?: string | null;
 };
 
@@ -35,6 +42,17 @@ type FacebookVerifyResponse = {
   status: FacebookConnectorStatus;
   error_code?: string | null;
   error_message?: string | null;
+};
+
+type FacebookHelperPairingSessionResponse = {
+  pairing_code: string;
+  helper_label: string;
+  expires_at: string;
+};
+
+type FacebookHelperDeleteResponse = {
+  deleted: boolean;
+  revoked_clients: number;
 };
 
 type GuideScreenshotData = {
@@ -221,6 +239,38 @@ function formatLabel(value?: string | null) {
     .join(" ");
 }
 
+function formatStaleReason(reason?: string | null) {
+  switch ((reason ?? "").trim()) {
+    case "helper_disconnected":
+      return "Browser helper disconnected";
+    case "cookie_expired":
+      return "Session expired";
+    case "cookie_expiring_soon":
+      return "Session expiring soon";
+    case "facebook_session_invalid":
+      return "Facebook needs attention";
+    default:
+      return "Healthy";
+  }
+}
+
+function describeStaleReason(status: FacebookConnectorStatus | null) {
+  const reason = (status?.stale_reason ?? "").trim();
+  if (!reason) return null;
+  switch (reason) {
+    case "helper_disconnected":
+      return "The browser helper has stopped checking in. Open Facebook in Chrome or Edge and let the helper sync again, or pair the helper again if you removed the extension.";
+    case "cookie_expired":
+      return "The saved Facebook session has already expired. Open Facebook again so the helper can refresh it, or upload a new manual export.";
+    case "cookie_expiring_soon":
+      return "The current Facebook session is about to expire. Leave Facebook open in Chrome or Edge so the helper can refresh the cookie jar.";
+    case "facebook_session_invalid":
+      return "Facebook challenged the last verification attempt. Open Facebook in your browser, resolve any checkpoint, then let the helper sync again.";
+    default:
+      return status?.last_error_message ?? "Facebook session needs attention.";
+  }
+}
+
 function getSetupState({
   authLoading,
   facebookConfigLoading,
@@ -233,6 +283,7 @@ function getSetupState({
   status: FacebookConnectorStatus | null;
 }): SetupState {
   const statusLabel = (status?.status ?? "").trim().toLowerCase();
+  const staleDescription = describeStaleReason(status);
 
   if (authLoading || (hasUser && facebookConfigLoading)) {
     return {
@@ -267,10 +318,31 @@ function getSetupState({
   if (status?.configured && statusLabel === "active") {
     return {
       badge: "Ready",
-      title: "Cookies are saved and usable",
-      description: "Your account already has a Facebook cookie export. Re-run Verify any time search starts failing again.",
+      title:
+        status?.credential_source === "browser_helper"
+          ? "Browser helper is connected and syncing"
+          : "Cookies are saved and usable",
+      description:
+        status?.credential_source === "browser_helper"
+          ? "Marketly is receiving fresh facebook.com cookies from your local browser helper."
+          : "Your account already has a Facebook cookie export. Re-run Verify any time search starts failing again.",
       panelClassName: "border-emerald-300/20 bg-emerald-400/10",
       badgeClassName: "border-emerald-300/20 bg-emerald-400/15 text-emerald-50",
+    };
+  }
+
+  if (status?.configured && status?.stale_reason) {
+    return {
+      badge: "Needs attention",
+      title:
+        status?.credential_source === "browser_helper"
+          ? "Browser helper or Facebook session needs attention"
+          : "Saved Facebook session needs attention",
+      description:
+        staleDescription ??
+        "Marketly saved your Facebook session, but it needs to be refreshed before saved searches can trust it again.",
+      panelClassName: "border-amber-300/20 bg-amber-400/10",
+      badgeClassName: "border-amber-300/20 bg-amber-400/15 text-amber-50",
     };
   }
 
@@ -315,7 +387,12 @@ export default function FacebookConfigurationPage() {
   const [facebookUploadBusy, setFacebookUploadBusy] = useState(false);
   const [facebookVerifyBusy, setFacebookVerifyBusy] = useState(false);
   const [facebookDeleteBusy, setFacebookDeleteBusy] = useState(false);
+  const [facebookHelperPairBusy, setFacebookHelperPairBusy] = useState(false);
+  const [facebookHelperDeleteBusy, setFacebookHelperDeleteBusy] = useState(false);
   const [facebookCookieJsonText, setFacebookCookieJsonText] = useState("");
+  const [facebookHelperLabel, setFacebookHelperLabel] = useState("Chrome helper");
+  const [facebookHelperPairing, setFacebookHelperPairing] =
+    useState<FacebookHelperPairingSessionResponse | null>(null);
 
   const parseApiError = useCallback(async (res: Response, fallback: string) => {
     const text = await res.text();
@@ -455,16 +532,66 @@ export default function FacebookConfigurationPage() {
       if (!res.ok) {
         throw new Error(await parseApiError(res, "Failed to delete Facebook cookies."));
       }
-      setFacebookConfigStatus({
-        configured: false,
-        feature_enabled: facebookConfigStatus?.feature_enabled ?? true,
-      });
+      setFacebookHelperPairing(null);
+      await fetchFacebookConfigStatus();
     } catch (err: unknown) {
       setFacebookConfigError(err instanceof Error ? err.message : "Failed to delete Facebook cookies.");
     } finally {
       setFacebookDeleteBusy(false);
     }
-  }, [API_BASE, accessToken, facebookConfigStatus?.feature_enabled, parseApiError]);
+  }, [API_BASE, accessToken, fetchFacebookConfigStatus, parseApiError]);
+
+  const onCreateFacebookHelperPairing = useCallback(async () => {
+    if (!accessToken) {
+      setFacebookConfigError("Please log in to pair the Facebook browser helper.");
+      return;
+    }
+    setFacebookHelperPairBusy(true);
+    setFacebookConfigError(null);
+    try {
+      const res = await fetch(`${API_BASE}/me/connectors/facebook/helper/pairing-sessions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ helper_label: facebookHelperLabel }),
+      });
+      if (!res.ok) {
+        throw new Error(await parseApiError(res, "Failed to create a helper pairing code."));
+      }
+      const json = (await res.json()) as FacebookHelperPairingSessionResponse;
+      setFacebookHelperPairing(json);
+    } catch (err: unknown) {
+      setFacebookConfigError(err instanceof Error ? err.message : "Failed to create a helper pairing code.");
+    } finally {
+      setFacebookHelperPairBusy(false);
+    }
+  }, [API_BASE, accessToken, facebookHelperLabel, parseApiError]);
+
+  const onDeleteFacebookHelper = useCallback(async () => {
+    if (!accessToken) {
+      setFacebookConfigError("Please log in to disconnect the Facebook browser helper.");
+      return;
+    }
+    setFacebookHelperDeleteBusy(true);
+    setFacebookConfigError(null);
+    try {
+      const res = await fetch(`${API_BASE}/me/connectors/facebook/helper`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!res.ok) {
+        throw new Error(await parseApiError(res, "Failed to disconnect the browser helper."));
+      }
+      void ((await res.json()) as FacebookHelperDeleteResponse);
+      await fetchFacebookConfigStatus();
+    } catch (err: unknown) {
+      setFacebookConfigError(err instanceof Error ? err.message : "Failed to disconnect the browser helper.");
+    } finally {
+      setFacebookHelperDeleteBusy(false);
+    }
+  }, [API_BASE, accessToken, fetchFacebookConfigStatus, parseApiError]);
 
   const onFacebookCookieFileSelected = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -490,6 +617,7 @@ export default function FacebookConfigurationPage() {
       setFacebookConfigStatus(null);
       setFacebookConfigError(null);
       setFacebookCookieJsonText("");
+      setFacebookHelperPairing(null);
       return;
     }
     void fetchFacebookConfigStatus();
@@ -507,6 +635,13 @@ export default function FacebookConfigurationPage() {
   const featureDisabled = facebookConfigStatus?.feature_enabled === false;
   const lastConnectorMessage =
     !facebookConfigError && facebookConfigStatus?.last_error_message ? facebookConfigStatus.last_error_message : null;
+  const staleReasonDescription = describeStaleReason(facebookConfigStatus);
+  const credentialSourceValue = formatLabel(facebookConfigStatus?.credential_source);
+  const helperStateValue = facebookConfigStatus?.helper_connected
+    ? "Connected"
+    : facebookConfigStatus?.helper_label
+      ? "Disconnected"
+      : "Not paired";
 
   return (
     <main className="dark relative min-h-screen overflow-x-hidden bg-black text-white antialiased">
@@ -599,7 +734,7 @@ export default function FacebookConfigurationPage() {
             Facebook configuration
           </h1>
           <p className="mt-3 max-w-3xl text-sm leading-relaxed text-zinc-400 sm:text-base">
-            Upload your Facebook cookie JSON, verify it, and use the walkthrough below if you need help exporting the file from Chrome.
+            Pair the browser helper for hands-off session refresh, or keep using manual cookie upload if you prefer a one-off export workflow.
           </p>
 
           <div className="mt-6 flex flex-col gap-3 sm:flex-row">
@@ -617,8 +752,27 @@ export default function FacebookConfigurationPage() {
             </Link>
           </div>
 
-          <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
             <MetricCard label="Configured" value={configuredValue} helper="Saved for your account" />
+            <MetricCard
+              label="Source"
+              value={credentialSourceValue}
+              helper="Manual upload or browser helper"
+            />
+            <MetricCard
+              label="Helper"
+              value={helperStateValue}
+              helper={
+                facebookConfigStatus?.helper_label
+                  ? `${facebookConfigStatus.helper_label}${facebookConfigStatus?.helper_connected ? " is checking in" : " needs attention"}`
+                  : "Pair the Chrome or Edge helper"
+              }
+            />
+            <MetricCard
+              label="Last Sync"
+              value={formatTimestamp(facebookConfigStatus?.last_synced_at)}
+              helper="Most recent browser helper heartbeat"
+            />
             <MetricCard label="Cookies" value={cookieCountValue} helper="Found in the current upload" />
             <MetricCard
               label="Last Verified"
@@ -627,7 +781,7 @@ export default function FacebookConfigurationPage() {
             />
             <MetricCard
               label="Status"
-              value={formatLabel(facebookConfigStatus?.status)}
+              value={facebookConfigStatus?.stale_reason ? formatStaleReason(facebookConfigStatus?.stale_reason) : formatLabel(facebookConfigStatus?.status)}
               helper={featureDisabled ? "Facebook is disabled on the server" : "Current connector state"}
             />
           </div>
@@ -669,16 +823,16 @@ export default function FacebookConfigurationPage() {
               </div>
 
               <div className="rounded-[24px] border border-white/10 bg-white/[0.03] p-4">
-                <p className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Finish the setup</p>
+                <p className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Recommended flow</p>
                 <div className="mt-4 space-y-3">
                   <div className="flex gap-3">
                     <div className="mt-0.5 flex size-6 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-[11px] font-semibold text-white">
                       1
                     </div>
                     <div>
-                      <p className="text-sm font-medium text-white">Choose the exported JSON file</p>
+                      <p className="text-sm font-medium text-white">Generate a pairing code for the browser helper</p>
                       <p className="mt-1 text-xs leading-relaxed text-zinc-400">
-                        Selecting a file uploads it immediately. Use the manual textarea only if file upload is not convenient.
+                        Pair once from this page, then let the Chrome or Edge helper keep your Facebook session fresh automatically.
                       </p>
                     </div>
                   </div>
@@ -687,9 +841,9 @@ export default function FacebookConfigurationPage() {
                       2
                     </div>
                     <div>
-                      <p className="text-sm font-medium text-white">Run Verify session</p>
+                      <p className="text-sm font-medium text-white">Leave Facebook open in Chrome or Edge</p>
                       <p className="mt-1 text-xs leading-relaxed text-zinc-400">
-                        This confirms Facebook still accepts the uploaded cookies before you return to Search.
+                        The helper reads only the current facebook.com cookies from your own browser and uploads fresh state on a schedule.
                       </p>
                     </div>
                   </div>
@@ -698,9 +852,9 @@ export default function FacebookConfigurationPage() {
                       3
                     </div>
                     <div>
-                      <p className="text-sm font-medium text-white">Re-export any time the session expires</p>
+                      <p className="text-sm font-medium text-white">Fallback to manual upload any time</p>
                       <p className="mt-1 text-xs leading-relaxed text-zinc-400">
-                        If Facebook logs you out or checkpoints the account, delete the saved cookies and upload a fresh export.
+                        Manual JSON upload still works if you do not want the helper, or if you need to recover quickly after a Facebook checkpoint.
                       </p>
                     </div>
                   </div>
@@ -732,6 +886,89 @@ export default function FacebookConfigurationPage() {
                       <p className="mt-2 leading-relaxed">{lastConnectorMessage}</p>
                     </div>
                   ) : null}
+
+                  {staleReasonDescription ? (
+                    <div className="rounded-[24px] border border-amber-300/20 bg-amber-400/10 p-4 text-sm text-amber-50">
+                      <p className="font-medium">Current recovery step</p>
+                      <p className="mt-2 leading-relaxed">{staleReasonDescription}</p>
+                    </div>
+                  ) : null}
+
+                  <div className="rounded-[24px] border border-white/10 bg-white/[0.03] p-4">
+                    <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                      <div className="max-w-2xl">
+                        <p className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Browser helper</p>
+                        <h3 className="mt-2 text-lg font-semibold text-white">Pair Chrome or Edge once</h3>
+                        <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+                          This is the reliable path for hosted Marketly. The helper keeps uploading fresh <span className="font-mono text-zinc-300">facebook.com</span> cookies from your local logged-in browser so saved searches do not rely on a static export.
+                        </p>
+                      </div>
+                      <div className="rounded-2xl border border-white/10 bg-black/30 px-3 py-2 text-xs text-zinc-400">
+                        Extension path: <span className="font-mono text-zinc-200">extension/facebook-session-helper</span>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                      <div className="space-y-3">
+                        <label className="block text-xs font-medium uppercase tracking-[0.16em] text-zinc-400">
+                          Helper label
+                        </label>
+                        <input
+                          value={facebookHelperLabel}
+                          onChange={(e) => setFacebookHelperLabel(e.target.value)}
+                          placeholder="Chrome helper"
+                          className="w-full rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-white/20 focus:outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => void onCreateFacebookHelperPairing()}
+                          disabled={facebookHelperPairBusy || authLoading || !user}
+                          className="inline-flex items-center justify-center gap-2 rounded-2xl bg-white px-4 py-2.5 text-xs font-medium text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {facebookHelperPairBusy ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                          {facebookHelperPairBusy ? "Creating code..." : "Generate pairing code"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void onDeleteFacebookHelper()}
+                          disabled={facebookHelperDeleteBusy || !facebookConfigStatus?.helper_label || !user}
+                          className="inline-flex items-center justify-center gap-2 rounded-2xl border border-red-300/20 bg-red-400/10 px-4 py-2.5 text-xs text-red-100 transition hover:border-red-300/30 hover:bg-red-400/20 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {facebookHelperDeleteBusy ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                          Disconnect helper
+                        </button>
+                      </div>
+
+                      <div className="rounded-[24px] border border-white/10 bg-black/30 p-4">
+                        <p className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Extension setup</p>
+                        {facebookHelperPairing ? (
+                          <div className="mt-3 space-y-3">
+                            <div>
+                              <p className="text-xs text-zinc-400">Pairing code</p>
+                              <p className="mt-1 break-all rounded-2xl border border-white/10 bg-white/[0.03] px-3 py-2 font-mono text-sm text-white">
+                                {facebookHelperPairing.pairing_code}
+                              </p>
+                            </div>
+                            <p className="text-xs leading-relaxed text-zinc-400">
+                              Expires {formatTimestamp(facebookHelperPairing.expires_at)}. In the extension options page,
+                              paste this code and use <span className="font-mono text-zinc-200">{API_BASE}</span> as the API base.
+                            </p>
+                          </div>
+                        ) : (
+                          <p className="mt-3 text-sm leading-relaxed text-zinc-400">
+                            Generate a code here, then open the unpacked extension options page and paste both the code
+                            and the API base.
+                          </p>
+                        )}
+                        <ol className="mt-4 space-y-2 text-xs leading-relaxed text-zinc-400">
+                          <li>1. Load the unpacked extension from <span className="font-mono text-zinc-200">extension/facebook-session-helper</span>.</li>
+                          <li>2. Open the extension options page.</li>
+                          <li>3. Paste the API base and pairing code, then click Pair helper.</li>
+                          <li>4. Keep Facebook open in Chrome or Edge so periodic syncs can refresh the saved session.</li>
+                        </ol>
+                      </div>
+                    </div>
+                  </div>
 
                   <div className="space-y-2">
                     <label className="block text-xs font-medium uppercase tracking-[0.16em] text-zinc-400">

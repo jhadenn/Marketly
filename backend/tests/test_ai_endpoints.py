@@ -11,6 +11,7 @@ from app.models.listing import Listing, ListingRisk, ListingValuation, Money
 from app.models.saved_search import SavedSearch
 from app.models.saved_search_notification import SavedSearchNotification
 from app.schemas.copilot import CopilotQueryResponse
+from app.services.alerts import ALERT_BASELINE_VERSION
 
 from .utils import build_test_session_factory, db_override_factory
 
@@ -365,6 +366,86 @@ def test_notifications_endpoint_refreshes_alerts_before_listing(monkeypatch):
     assert len(notifications_res.json()) == 1
     assert notifications_res.json()[0]["summary"] == "1 new listing for road bike"
     assert notifications_res.json()[0]["new_count"] == 1
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_notifications_endpoint_rebaselines_invalid_saved_search_and_clears_false_alerts(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+
+    previous_check = datetime(2026, 3, 25, 12, 0, tzinfo=timezone.utc)
+
+    db = session_factory()
+    try:
+        saved_search = SavedSearch(
+            user_id="user-123",
+            query="road bike",
+            sources="ebay",
+            alerts_enabled=True,
+            last_alert_attempted_at=previous_check - timedelta(minutes=5),
+            last_alert_checked_at=previous_check,
+            last_alert_notified_at=previous_check - timedelta(minutes=1),
+        )
+        db.add(saved_search)
+        db.commit()
+        db.refresh(saved_search)
+        db.add(
+            SavedSearchNotification(
+                user_id="user-123",
+                saved_search_id=saved_search.id,
+                saved_search_query="road bike",
+                summary_text="false positive",
+                items_json=[
+                    {
+                        "listing_key": "ebay:listing-1",
+                        "source": "ebay",
+                        "source_listing_id": "listing-1",
+                        "title": "Road bike listing",
+                        "url": "https://example.com/listing-1",
+                        "price": {"amount": 450, "currency": "CAD"},
+                        "location": "Toronto",
+                        "match_confidence": 0.91,
+                        "why_matched": ["Strong keyword match to the saved search."],
+                        "valuation": None,
+                        "risk": None,
+                    }
+                ],
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    async def fake_unified_search(**kwargs):
+        return [_sample_listing()], 1, None, {}
+
+    monkeypatch.setattr("app.services.alerts.unified_search", fake_unified_search)
+    monkeypatch.setattr("app.services.alerts.enrich_listings_with_insights", lambda db, query, results: results)
+    monkeypatch.setattr("app.services.alerts.persist_listing_snapshots", lambda **kwargs: len(kwargs["listings"]))
+
+    notifications_res = client.get("/me/notifications")
+
+    assert notifications_res.status_code == 200
+    assert notifications_res.json() == []
+
+    db = session_factory()
+    try:
+        updated = db.query(SavedSearch).filter(SavedSearch.user_id == "user-123").first()
+        notifications = (
+            db.query(SavedSearchNotification)
+            .filter(SavedSearchNotification.user_id == "user-123")
+            .all()
+        )
+        assert updated is not None
+        assert updated.last_alert_baseline_version == ALERT_BASELINE_VERSION
+        assert updated.last_alert_result_count == 1
+        assert updated.last_alert_notified_at is None
+        assert notifications == []
+    finally:
+        db.close()
 
     app.dependency_overrides.clear()
     engine.dispose()

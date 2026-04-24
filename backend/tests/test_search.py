@@ -1,17 +1,30 @@
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.auth import get_current_user_id
 from app.core.cache import TTLCache
 from app.db import get_db
 from app.main import app
-from app.models.listing import Listing, Money
+from app.models.listing import Listing, Money, SourceError
 from app.models.saved_search import SavedSearch
 
 from .utils import build_test_session_factory, db_override_factory
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_app_db():
+    app.dependency_overrides.clear()
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+    try:
+        yield
+    finally:
+        app.dependency_overrides.clear()
+        engine.dispose()
 
 
 def _override_auth():
@@ -139,6 +152,8 @@ def test_search_can_include_facebook_and_pass_source_errors(monkeypatch):
         )
 
     monkeypatch.setattr("app.main.unified_search", fake_unified_search)
+    monkeypatch.setattr("app.main._enrich_results", lambda db, *, query, results: results)
+    monkeypatch.setattr("app.main.persist_listing_snapshots", lambda **kwargs: 1)
 
     response = client.get(
         "/search",
@@ -204,7 +219,7 @@ def test_search_passes_facebook_runtime_context_and_location(monkeypatch):
             self.longitude = -79.3832
             self.radius_km = 25
 
-    def fake_build_context(**kwargs):
+    async def fake_build_context(**kwargs):
         captured["context_build_kwargs"] = kwargs
         return FakeContext()
 
@@ -234,6 +249,45 @@ def test_search_passes_facebook_runtime_context_and_location(monkeypatch):
     assert captured["context_build_kwargs"]["latitude"] == 43.6532
     assert captured["context_build_kwargs"]["longitude"] == -79.3832
     assert captured["context_build_kwargs"]["radius_km"] == 25
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_search_returns_facebook_preflight_error_instead_of_byoc(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+    monkeypatch.setattr("app.services.search_service.settings.MARKETLY_ENABLE_FACEBOOK", True)
+
+    class FakeContext:
+        def __init__(self):
+            self.user_id = "user-123"
+            self.cookie_payload = None
+            self.credential_fingerprint_sha256 = "abc"
+            self.preflight_error = SourceError(
+                code="LOGIN_REQUIRED",
+                message="Open Facebook in Chrome or Edge so the Marketly browser helper can resync, then try again.",
+                retryable=False,
+            )
+            self.latitude = None
+            self.longitude = None
+            self.radius_km = None
+
+    async def fake_build_context(**kwargs):
+        return FakeContext()
+
+    monkeypatch.setattr("app.main._build_facebook_runtime_context", fake_build_context)
+
+    response = client.get(
+        "/search",
+        params={"q": "bike", "sources": "facebook"},
+        headers={"Authorization": "Bearer invalid"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source_errors"]["facebook"]["code"] == "LOGIN_REQUIRED"
+    assert "browser helper" in payload["source_errors"]["facebook"]["message"].lower()
 
     app.dependency_overrides.clear()
     engine.dispose()
@@ -434,7 +488,7 @@ def test_saved_search_run_cache_key_varies_by_facebook_context_and_location(monk
         "cookie_payload": [{"name": "c_user"}],
     }
 
-    def fake_build_context(**kwargs):
+    async def fake_build_context(**kwargs):
         return SimpleNamespace(
             user_id="user-123",
             cookie_payload=context_state["cookie_payload"],
@@ -554,6 +608,8 @@ def test_search_local_cache_fallback_miss_then_hit(monkeypatch):
     monkeypatch.setattr("app.main.settings.REDIS_URL", "")
     monkeypatch.setattr("app.services.response_cache.get_redis_client", lambda: None)
     monkeypatch.setattr("app.services.response_cache._local_response_cache", TTLCache(max_items=8))
+    monkeypatch.setattr("app.main._enrich_results", lambda db, *, query, results: results)
+    monkeypatch.setattr("app.main.persist_listing_snapshots", lambda **kwargs: 1)
 
     first = client.get("/search", params={"q": "iphone", "sources": "ebay"})
     second = client.get("/search", params={"q": "iphone", "sources": "ebay"})

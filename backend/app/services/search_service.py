@@ -23,6 +23,7 @@ class FacebookRuntimeContext:
     user_id: str | None = None
     cookie_payload: object | None = None
     credential_fingerprint_sha256: str | None = None
+    preflight_error: SourceError | None = None
     latitude: float | None = None
     longitude: float | None = None
     radius_km: int | None = None
@@ -52,12 +53,14 @@ def _facebook_cache_fragment(
         return ""
 
     ctx = facebook_runtime_context or FacebookRuntimeContext()
+    preflight_error = getattr(ctx, "preflight_error", None)
     return (
-        f"|fb_user={ctx.user_id or 'anon'}"
-        f"|fb_fp={ctx.credential_fingerprint_sha256 or ''}"
-        f"|fb_lat={_rounded_coord(ctx.latitude)}"
-        f"|fb_lon={_rounded_coord(ctx.longitude)}"
-        f"|fb_rkm={ctx.radius_km if ctx.radius_km is not None else ''}"
+        f"|fb_user={getattr(ctx, 'user_id', None) or 'anon'}"
+        f"|fb_fp={getattr(ctx, 'credential_fingerprint_sha256', None) or ''}"
+        f"|fb_pf={preflight_error.code if preflight_error is not None else ''}"
+        f"|fb_lat={_rounded_coord(getattr(ctx, 'latitude', None))}"
+        f"|fb_lon={_rounded_coord(getattr(ctx, 'longitude', None))}"
+        f"|fb_rkm={getattr(ctx, 'radius_km', None) if getattr(ctx, 'radius_km', None) is not None else ''}"
     )
 
 
@@ -70,7 +73,7 @@ def _cache_key(
     search_location_context: ResolvedLocation | None = None,
 ) -> str:
     raw = (
-        f"v4|{query}|{','.join(sorted(sources))}|{fetch_limit}|sort={sort}|"
+        f"v6|{query}|{','.join(sorted(sources))}|{fetch_limit}|sort={sort}|"
         f"facebook_enabled={settings.MARKETLY_ENABLE_FACEBOOK}"
         f"{_facebook_cache_fragment(sources, facebook_runtime_context)}"
         f"{_location_cache_fragment(search_location_context)}"
@@ -87,7 +90,7 @@ def _pagination_key(
     search_location_context: ResolvedLocation | None = None,
 ) -> str:
     raw = (
-        f"v4|{query}|{','.join(sorted(sources))}|sort={sort}|limit={limit}|"
+        f"v6|{query}|{','.join(sorted(sources))}|sort={sort}|limit={limit}|"
         f"facebook_enabled={settings.MARKETLY_ENABLE_FACEBOOK}"
         f"{_facebook_cache_fragment(sources, facebook_runtime_context)}"
         f"{_location_cache_fragment(search_location_context)}"
@@ -152,7 +155,14 @@ def _interleave_by_source(items: list[Listing], sources: list[str]) -> list[List
     for item in items:
         buckets.setdefault(item.source, []).append(item)
 
-    source_order = [src for src in sources if src in buckets]
+    source_order: list[str] = []
+    seen_sources: set[str] = set()
+    for item in items:
+        if item.source in seen_sources:
+            continue
+        source_order.append(item.source)
+        seen_sources.add(item.source)
+    source_order.extend(src for src in sources if src in buckets and src not in seen_sources)
     source_order.extend(sorted(src for src in buckets if src not in source_order))
     positions = {src: 0 for src in source_order}
 
@@ -171,6 +181,21 @@ def _interleave_by_source(items: list[Listing], sources: list[str]) -> list[List
             break
 
     return merged
+
+
+def _relevance_score(item: Listing) -> float:
+    return item.score or 0.0
+
+
+def _order_relevance_results(items: list[Listing], sources: list[str]) -> list[Listing]:
+    ordered = _sort_results(items, sort="relevance")
+    return _interleave_by_source(ordered, sources)
+
+
+def _order_results(items: list[Listing], *, sources: list[str], sort: SearchSort) -> list[Listing]:
+    if sort == "relevance":
+        return _order_relevance_results(items, sources)
+    return _sort_results(items, sort=sort)
 
 
 def _sort_results(items: list[Listing], sort: SearchSort) -> list[Listing]:
@@ -204,10 +229,14 @@ def _sort_results(items: list[Listing], sort: SearchSort) -> list[Listing]:
                 -(parsed_posted_at[id(x)].timestamp() if parsed_posted_at[id(x)] is not None else 0.0),
             ),
         )
-    return sorted(items, key=lambda x: x.score, reverse=True)
+    return sorted(items, key=_relevance_score, reverse=True)
 
 
-def _sort_results_with_distance(items: list[Listing], sort: SearchSort) -> list[Listing]:
+def _sort_results_with_distance(
+    items: list[Listing],
+    *,
+    sort: SearchSort,
+) -> list[Listing]:
     ordered = _sort_results(items, sort=sort)
     return sorted(
         ordered,
@@ -247,10 +276,7 @@ def _order_with_location_context(
         or search_location_context.longitude is None
     ):
         _reset_distance_fields(items)
-        ordered = _sort_results(items, sort=sort)
-        if sort == "relevance" and settings.MARKETLY_BALANCE_MULTI_SOURCE_RESULTS:
-            return _interleave_by_source(ordered, sources)
-        return ordered
+        return _order_results(items, sources=sources, sort=sort)
 
     origin_latitude = float(search_location_context.latitude)
     origin_longitude = float(search_location_context.longitude)
@@ -284,18 +310,28 @@ def _order_with_location_context(
         bucket = _location_bucket(item, match.country_code)
         buckets.setdefault(bucket, []).append(item)
 
+    if sort == "relevance":
+        local_marketplace_items = _sort_results_with_distance(
+            buckets.get(0, []) + buckets.get(1, []),
+            sort=sort,
+        )
+        ebay_items = _sort_results(buckets.get(2, []), sort=sort)
+        other_items = _sort_results(buckets.get(3, []), sort=sort)
+        return (
+            _interleave_by_source(local_marketplace_items, sources)
+            + _interleave_by_source(ebay_items, sources)
+            + _interleave_by_source(other_items, sources)
+        )
+
     ordered: list[Listing] = []
     for bucket_index in (0, 1, 2, 3):
         if bucket_index == 0:
-            bucket_items = _sort_results_with_distance(buckets.get(bucket_index, []), sort=sort)
+            bucket_items = _sort_results_with_distance(
+                buckets.get(bucket_index, []),
+                sort=sort,
+            )
         else:
             bucket_items = _sort_results(buckets.get(bucket_index, []), sort=sort)
-        if (
-            bucket_index != 0
-            and sort == "relevance"
-            and settings.MARKETLY_BALANCE_MULTI_SOURCE_RESULTS
-        ):
-            bucket_items = _interleave_by_source(bucket_items, sources)
         ordered.extend(bucket_items)
     return ordered
 
@@ -344,7 +380,18 @@ async def _fetch_source(
             ),
         )
     if src == "facebook":
-        if facebook_runtime_context is None or not facebook_runtime_context.user_id:
+        user_id = getattr(facebook_runtime_context, "user_id", None) if facebook_runtime_context else None
+        preflight_error = (
+            getattr(facebook_runtime_context, "preflight_error", None)
+            if facebook_runtime_context
+            else None
+        )
+        cookie_payload = (
+            getattr(facebook_runtime_context, "cookie_payload", None)
+            if facebook_runtime_context
+            else None
+        )
+        if facebook_runtime_context is None or not user_id:
             return (
                 src,
                 [],
@@ -354,7 +401,13 @@ async def _fetch_source(
                     retryable=False,
                 ),
             )
-        if facebook_runtime_context.cookie_payload is None:
+        if preflight_error is not None:
+            return (
+                src,
+                [],
+                preflight_error,
+            )
+        if cookie_payload is None:
             return (
                 src,
                 [],
@@ -398,10 +451,16 @@ async def _fetch_source(
                     limit=facebook_fetch_limit,
                     sort=sort,
                     auth_mode="cookie",
-                    cookie_payload=facebook_runtime_context.cookie_payload if facebook_runtime_context else None,
-                    latitude=facebook_runtime_context.latitude if facebook_runtime_context else None,
-                    longitude=facebook_runtime_context.longitude if facebook_runtime_context else None,
-                    radius_km=facebook_runtime_context.radius_km if facebook_runtime_context else None,
+                    cookie_payload=cookie_payload,
+                    latitude=getattr(facebook_runtime_context, "latitude", None)
+                    if facebook_runtime_context
+                    else None,
+                    longitude=getattr(facebook_runtime_context, "longitude", None)
+                    if facebook_runtime_context
+                    else None,
+                    radius_km=getattr(facebook_runtime_context, "radius_km", None)
+                    if facebook_runtime_context
+                    else None,
                     multi_source=is_multi_source,
                 ),
                 timeout_seconds,

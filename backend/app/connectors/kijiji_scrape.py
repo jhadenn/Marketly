@@ -15,6 +15,7 @@ BASE = "https://www.kijiji.ca"
 # Matches URLs like:
 # /v-cell-phone/edmonton/iphone-12-and-iphone-xr/1731510626
 LISTING_HREF_RE = re.compile(r"^/v-[^/]+/.+/\d+/?$")
+LISTING_ID_RE = re.compile(r"/(?P<listing_id>\d+)(?:/)?(?:[?#].*)?$")
 
 PRICE_RE = re.compile(r"\$\s*([\d,]+(?:\.\d{1,2})?)")
 RELATIVE_POSTED_RE = re.compile(
@@ -59,6 +60,14 @@ class KijijiScrapeConnector(MarketplaceConnector):
 
     def _abs_url(self, href: str) -> str:
         return urljoin(BASE, href)
+
+    def _extract_listing_id(self, listing_url: str) -> str:
+        match = LISTING_ID_RE.search((listing_url or "").strip())
+        if match:
+            listing_id = match.group("listing_id")
+            if listing_id:
+                return listing_id
+        return listing_url
 
     def _parse_price(self, text: str) -> float | None:
         if not text:
@@ -250,7 +259,7 @@ class KijijiScrapeConnector(MarketplaceConnector):
             results.append(
                 Listing(
                     source="kijiji",
-                    source_listing_id=listing_url,
+                    source_listing_id=self._extract_listing_id(listing_url),
                     title=title,
                     price=Money(amount=price_val or 0.0, currency="CAD"),
                     url=listing_url,

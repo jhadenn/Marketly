@@ -109,14 +109,13 @@ def build_search_response_cache_key(
     search_location_context: Any | None = None,
 ) -> str:
     raw = (
-        f"v5|q={query}"
+        f"v7|q={query}"
         f"|sources={','.join(sorted(sources))}"
         f"|limit={limit}"
         f"|offset={offset}"
         f"|sort={sort}"
         f"|facebook_enabled={settings.MARKETLY_ENABLE_FACEBOOK}"
         f"|disable_fb_multi_expansion={settings.MARKETLY_DISABLE_FACEBOOK_MULTI_SOURCE_EXPANSION}"
-        f"|balance_multi={settings.MARKETLY_BALANCE_MULTI_SOURCE_RESULTS}"
         f"{_facebook_fragment(sources=sources, facebook_runtime_context=facebook_runtime_context)}"
         f"{_location_fragment(search_location_context)}"
     )

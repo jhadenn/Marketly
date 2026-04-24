@@ -733,6 +733,63 @@ def build_listing_valuation(
     )
 
 
+async def apply_cold_start_price_estimate(
+    query: str,
+    listings: list[Listing],
+) -> None:
+    if not settings.MARKETLY_GEMINI_PRICE_ESTIMATE_ENABLED:
+        return
+
+    from app.services.gemini_client import generate_price_estimate, gemini_is_configured
+
+    if not gemini_is_configured():
+        return
+
+    cold_listings = [
+        item
+        for item in listings
+        if item.valuation is not None
+        and item.valuation.estimate_source == "none"
+        and item.valuation.estimated_low is None
+    ]
+    if not cold_listings:
+        return
+
+    sample = cold_listings[0]
+    currency = (sample.price.currency if sample.price else "CAD") or "CAD"
+
+    estimate = await generate_price_estimate(
+        query=query,
+        title=sample.title,
+        snippet=sample.snippet,
+        condition=sample.condition,
+        currency=currency,
+    )
+    if estimate is None:
+        return
+
+    low = float(estimate["estimated_low"])
+    high = float(estimate["estimated_high"])
+    median_price = float(estimate["median_price"])
+    explanation = estimate.get("explanation") or "Rough category-prior estimate from general marketplace knowledge."
+
+    for item in cold_listings:
+        item_currency = (item.price.currency if item.price else currency) or currency
+        item.valuation = ListingValuation(
+            verdict="insufficient_data",
+            estimated_low=round(low, 2),
+            estimated_high=round(high, 2),
+            median_price=round(median_price, 2),
+            currency=item_currency,
+            confidence=0.30,
+            confidence_label="low",
+            sample_count=0,
+            estimate_source="category_prior",
+            explanation=explanation,
+        )
+        item.risk = build_listing_risk(item)
+
+
 def build_listing_risk(item: Listing) -> ListingRisk:
     signals: list[tuple[str, float]] = []
     searchable_text = " ".join(part for part in [item.title, item.snippet or ""] if part).lower()

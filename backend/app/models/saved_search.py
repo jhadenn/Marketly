@@ -1,4 +1,5 @@
 from sqlalchemy import Boolean, Column, Integer, String, DateTime, Text, func, Index, text
+from sqlalchemy.orm import validates
 from app.db import Base
 
 
@@ -13,6 +14,8 @@ class SavedSearch(Base):
     alerts_enabled = Column(Boolean, nullable=False, default=True, server_default=text("true"))
     last_alert_attempted_at = Column(DateTime(timezone=True), nullable=True)
     last_alert_checked_at = Column(DateTime(timezone=True), nullable=True)
+    last_alert_baseline_version = Column(Integer, nullable=True)
+    last_alert_result_count = Column(Integer, nullable=True)
     last_alert_notified_at = Column(DateTime(timezone=True), nullable=True)
     last_alert_error_code = Column(String, nullable=True)
     last_alert_error_message = Column(Text, nullable=True)
@@ -22,3 +25,9 @@ class SavedSearch(Base):
     __table_args__ = (
         Index("ix_saved_searches_user_query_sources", "user_id", "query", "sources", unique=True),
     )
+
+    @validates("user_id")
+    def _coerce_user_id(self, key, value):
+        if value is None:
+            return None
+        return str(value)

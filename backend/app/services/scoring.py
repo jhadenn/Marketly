@@ -1,7 +1,6 @@
 
 import re
 from dataclasses import dataclass
-from typing import Iterable
 
 STOPWORDS = {
     "the","a","an","and","or","for","to","of","in","on","with","at","by","from",

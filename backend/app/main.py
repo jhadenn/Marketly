@@ -20,7 +20,7 @@ from app.connectors.facebook_marketplace import (
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.db import get_db
-from app.models.listing import SearchResponse, SearchSort, Source
+from app.models.listing import SearchResponse, SearchSort, Source, SourceError
 from app.models.saved_search import SavedSearch
 from app.models.user_location_preference import UserLocationPreference
 from app.schemas.copilot import CopilotQueryRequest, CopilotQueryResponse
@@ -30,18 +30,32 @@ from app.schemas.notifications import SavedSearchNotificationOut
 from app.schemas.facebook_credentials import (
     FacebookConnectorStatusResponse,
     FacebookCookieUploadRequest,
+    FacebookHelperDeleteResponse,
+    FacebookHelperPairingCreateRequest,
+    FacebookHelperPairingSessionResponse,
+    FacebookHelperPairRequest,
+    FacebookHelperPairResponse,
+    FacebookIngestRequest,
+    FacebookIngestResponse,
     FacebookVerifyResponse,
 )
 from app.schemas.saved_search import SavedSearchCreate, SavedSearchOut, SavedSearchUpdate
 from app.services.facebook_credentials import (
-    decrypt_cookie_payload,
     delete_user_facebook_credential,
     get_user_facebook_credential,
-    mark_credential_failed,
     mark_credential_used,
-    mark_credential_validated,
+    upsert_user_facebook_credential_from_helper,
     upsert_user_facebook_credential,
 )
+from app.services.facebook_sync import (
+    create_pairing_session,
+    facebook_credential_state,
+    get_sync_client_from_authorization,
+    redeem_pairing_code,
+    revoke_helper_access_for_user,
+    touch_sync_client,
+)
+from app.services.facebook_verification import ensure_facebook_credential_ready, verify_facebook_credential
 from app.services.rate_limit import check_rate_limit, get_client_ip
 from app.services.response_cache import (
     build_search_response_cache_key,
@@ -57,7 +71,8 @@ from app.services.alerts import (
     refresh_saved_search_alerts_for_user,
 )
 from app.services.gemini_client import generate_copilot_response
-from app.services.listing_insights import enrich_listings_with_insights
+from app.services.ebay_seeder import seed_ebay_snapshots_if_below_threshold
+from app.services.listing_insights import apply_cold_start_price_estimate, enrich_listings_with_insights
 from app.services.listing_snapshots import persist_listing_snapshots
 from app.services.location import (
     delete_user_location_preference,
@@ -126,6 +141,8 @@ def _saved_search_next_due_at(row: SavedSearch) -> datetime | None:
 def _reset_saved_search_alert_baseline(row: SavedSearch) -> None:
     row.last_alert_attempted_at = None
     row.last_alert_checked_at = None
+    row.last_alert_baseline_version = None
+    row.last_alert_result_count = None
     row.last_alert_notified_at = None
     row.last_alert_error_code = None
     row.last_alert_error_message = None
@@ -180,21 +197,48 @@ async def _run_saved_search_baseline(
 
 def _facebook_status_response(
     row: UserFacebookCredential | None,
+    *,
+    db: Session,
+    user_id: str | None = None,
 ) -> FacebookConnectorStatusResponse:
+    state = facebook_credential_state(db, row, user_id=user_id or getattr(row, "user_id", None))
     return FacebookConnectorStatusResponse(
         configured=row is not None,
         feature_enabled=settings.MARKETLY_ENABLE_FACEBOOK,
-        status=(row.status if row else None),
-        cookie_count=(row.cookie_count if row else None),
-        last_error_code=(row.last_error_code if row else None),
-        last_error_message=(row.last_error_message if row else None),
-        last_validated_at=_dt_str(row.last_validated_at if row else None),
-        last_used_at=_dt_str(row.last_used_at if row else None),
-        updated_at=_dt_str(row.updated_at if row else None),
+        status=state.effective_status,
+        cookie_count=(getattr(row, "cookie_count", None) if row else None),
+        credential_source=(getattr(row, "credential_source", None) if row else None),
+        session_cookie_count=(getattr(row, "session_cookie_count", None) if row else None),
+        last_error_code=(getattr(row, "last_error_code", None) if row else None),
+        last_error_message=(getattr(row, "last_error_message", None) if row else None),
+        last_validated_at=_dt_str(getattr(row, "last_validated_at", None) if row else None),
+        last_used_at=_dt_str(getattr(row, "last_used_at", None) if row else None),
+        last_synced_at=_dt_str(getattr(row, "last_synced_at", None) if row else None),
+        earliest_cookie_expiry_at=_dt_str(
+            getattr(row, "earliest_cookie_expiry_at", None) if row else None
+        ),
+        helper_connected=state.helper_connected,
+        helper_label=state.helper_label,
+        stale_reason=state.stale_reason,
+        updated_at=_dt_str(getattr(row, "updated_at", None) if row else None),
     )
 
 
-def _build_facebook_runtime_context(
+def _map_facebook_preflight_error(*, error_code: str | None, error_message: str | None) -> SourceError:
+    normalized_code = str(error_code or "").strip().lower()
+    message = (error_message or "").strip() or "Facebook credential is not ready."
+    if normalized_code == "byoc_required":
+        return SourceError(code="BYOC_REQUIRED", message=message, retryable=False)
+    if normalized_code == FacebookConnectorErrorCode.disabled.value:
+        return SourceError(code="DISABLED", message=message, retryable=False)
+    if normalized_code == FacebookConnectorErrorCode.timeout.value:
+        return SourceError(code="TIMEOUT", message=message, retryable=True)
+    if normalized_code == FacebookConnectorErrorCode.scrape_failed.value:
+        return SourceError(code="UNAVAILABLE", message=message, retryable=True)
+    return SourceError(code="LOGIN_REQUIRED", message=message, retryable=False)
+
+
+async def _build_facebook_runtime_context(
     *,
     db: Session,
     user_id: str | None,
@@ -215,10 +259,19 @@ def _build_facebook_runtime_context(
     if not row:
         return context
 
-    try:
-        cookie_payload = decrypt_cookie_payload(row.encrypted_cookie_json)
-    except Exception as exc:
-        logger.warning("facebook_byoc_decrypt_failed user_id=%s error=%s", user_id, exc)
+    context.credential_fingerprint_sha256 = row.cookie_fingerprint_sha256
+    outcome = await ensure_facebook_credential_ready(db, row)
+    if not outcome.ok:
+        logger.warning(
+            "facebook_search_preflight_failed user_id=%s error_code=%s message=%s",
+            user_id,
+            outcome.error_code,
+            outcome.error_message,
+        )
+        context.preflight_error = _map_facebook_preflight_error(
+            error_code=outcome.error_code,
+            error_message=outcome.error_message,
+        )
         return context
 
     try:
@@ -227,8 +280,7 @@ def _build_facebook_runtime_context(
         db.rollback()
         logger.warning("facebook_byoc_mark_used_failed user_id=%s error=%s", user_id, exc)
 
-    context.cookie_payload = cookie_payload
-    context.credential_fingerprint_sha256 = row.cookie_fingerprint_sha256
+    context.cookie_payload = outcome.cookie_payload
     return context
 
 
@@ -490,7 +542,7 @@ async def search(
 
     facebook_runtime_context = None
     if "facebook" in source_list:
-        facebook_runtime_context = _build_facebook_runtime_context(
+        facebook_runtime_context = await _build_facebook_runtime_context(
             db=db,
             user_id=optional_user_id,
             latitude=effective_latitude,
@@ -541,6 +593,10 @@ async def search(
         )
 
     _enrich_results(db, query=q, results=results)
+    try:
+        await apply_cold_start_price_estimate(q, results)
+    except Exception as exc:
+        logger.warning("cold-start price estimate failed query=%s error=%s", q, exc)
     typed_sources: list[Source] = [source_name for source_name in source_list]
 
     payload = SearchResponse(
@@ -560,8 +616,70 @@ async def search(
         listings=results,
         user_id=optional_user_id,
     )
+    if settings.MARKETLY_EBAY_SEED_ENABLED:
+        background_tasks.add_task(seed_ebay_snapshots_if_below_threshold, q)
     response.headers["X-Cache"] = "MISS" if cache_active else "BYPASS"
     return payload
+
+
+@app.post("/connectors/facebook/ingest", response_model=FacebookIngestResponse)
+def facebook_ingest(
+    payload: FacebookIngestRequest,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    client = get_sync_client_from_authorization(db, authorization)
+    if client is None:
+        raise HTTPException(status_code=401, detail="Missing or invalid helper token")
+
+    user_id = client.user_id
+    limited = _apply_rate_limit(
+        bucket="fb_ingest_user",
+        identifier=str(user_id),
+        limit=int(settings.MARKETLY_RATE_LIMIT_FB_INGEST_PER_MIN),
+        window_seconds=60,
+    )
+    if limited is not None:
+        return limited
+
+    try:
+        touch_sync_client(db, client, commit=True)
+    except Exception as exc:
+        logger.warning("facebook ingest touch_sync_client failed user=%s error=%s", user_id, exc)
+
+    from app.connectors.facebook_marketplace.normalizer import normalize_marketplace_card
+    from app.connectors.facebook_marketplace.unified_connector import _to_listing
+
+    received = len(payload.items)
+    listings = []
+    for card in payload.items:
+        if not isinstance(card, dict):
+            continue
+        try:
+            normalized = normalize_marketplace_card(card)
+        except Exception as exc:
+            logger.warning("facebook ingest normalize failed: %s", exc)
+            continue
+        if normalized is None:
+            continue
+        try:
+            listings.append(_to_listing(normalized))
+        except Exception as exc:
+            logger.warning("facebook ingest to_listing failed: %s", exc)
+
+    ingested = 0
+    if listings:
+        try:
+            ingested = persist_listing_snapshots(
+                query=payload.query,
+                listings=listings,
+                user_id=user_id,
+            )
+        except Exception as exc:
+            logger.warning("facebook ingest persist failed user=%s error=%s", user_id, exc)
+            ingested = 0
+
+    return FacebookIngestResponse(received=received, ingested=ingested)
 
 
 @app.post("/connectors/facebook/search", response_model=FacebookSearchResponse)
@@ -641,7 +759,7 @@ def get_facebook_connector_status(
     user_id: str = Depends(get_current_user_id),
 ):
     row = get_user_facebook_credential(db, user_id)
-    return _facebook_status_response(row)
+    return _facebook_status_response(row, db=db, user_id=user_id)
 
 
 @app.put("/me/connectors/facebook/cookies", response_model=FacebookConnectorStatusResponse)
@@ -665,7 +783,73 @@ def put_facebook_connector_cookies(
         raise HTTPException(status_code=400, detail=exc.to_payload().model_dump(mode="json")) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return _facebook_status_response(row)
+    return _facebook_status_response(row, db=db, user_id=user_id)
+
+
+@app.post(
+    "/me/connectors/facebook/helper/pairing-sessions",
+    response_model=FacebookHelperPairingSessionResponse,
+)
+def create_facebook_helper_pairing_session(
+    payload: FacebookHelperPairingCreateRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    row, pairing_code = create_pairing_session(
+        db,
+        user_id=user_id,
+        helper_label=payload.helper_label,
+    )
+    return FacebookHelperPairingSessionResponse(
+        pairing_code=pairing_code,
+        helper_label=row.helper_label,
+        expires_at=str(row.expires_at),
+    )
+
+
+@app.post("/connectors/facebook/helper/pair", response_model=FacebookHelperPairResponse)
+def pair_facebook_helper(
+    payload: FacebookHelperPairRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        client, helper_token = redeem_pairing_code(db, pairing_code=payload.pairing_code)
+    except LookupError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return FacebookHelperPairResponse(
+        ok=True,
+        helper_token=helper_token,
+        helper_label=client.helper_label,
+    )
+
+
+@app.put("/connectors/facebook/helper/cookies", response_model=FacebookConnectorStatusResponse)
+def sync_facebook_helper_cookies(
+    payload: FacebookCookieUploadRequest,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    client = get_sync_client_from_authorization(db, authorization)
+    if client is None:
+        raise HTTPException(status_code=401, detail="Missing or invalid helper token")
+
+    try:
+        touch_sync_client(db, client, commit=False)
+        row = upsert_user_facebook_credential_from_helper(
+            db,
+            client.user_id,
+            payload.cookies_json,
+            helper_label=client.helper_label,
+        )
+    except FacebookConnectorError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=exc.to_payload().model_dump(mode="json")) from exc
+    except RuntimeError as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return _facebook_status_response(row, db=db, user_id=client.user_id)
 
 
 @app.post("/me/connectors/facebook/verify", response_model=FacebookVerifyResponse)
@@ -686,72 +870,22 @@ async def verify_facebook_connector_cookies(
     if row is None:
         return FacebookVerifyResponse(
             ok=False,
-            status=_facebook_status_response(None),
+            status=_facebook_status_response(None, db=db, user_id=user_id),
             error_code="BYOC_REQUIRED",
             error_message="Upload your Facebook cookies first.",
         )
 
-    try:
-        cookie_payload = decrypt_cookie_payload(row.encrypted_cookie_json)
-    except RuntimeError as exc:
-        db.rollback()
-        mark_credential_failed(
-            db,
-            row,
-            error_code="decrypt_failed",
-            error_message=str(exc),
-            commit=True,
-        )
+    outcome = await verify_facebook_credential(db, row)
+    if not outcome.ok:
         return FacebookVerifyResponse(
             ok=False,
-            status=_facebook_status_response(row),
-            error_code="decrypt_failed",
-            error_message="Stored Facebook credential could not be decrypted.",
+            status=_facebook_status_response(row, db=db, user_id=user_id),
+            error_code=outcome.error_code,
+            error_message=outcome.error_message,
         )
-
-    try:
-        await facebook_connector.search(
-            FacebookSearchRequest(
-                query="bicycle",
-                limit=3,
-                auth_mode="cookie",
-                cookie_payload=cookie_payload,
-                ingest=False,
-            )
-        )
-    except FacebookConnectorError as exc:
-        mark_credential_failed(
-            db,
-            row,
-            error_code=exc.code.value,
-            error_message=exc.message,
-            commit=True,
-        )
-        return FacebookVerifyResponse(
-            ok=False,
-            status=_facebook_status_response(row),
-            error_code=exc.code.value,
-            error_message=exc.message,
-        )
-    except Exception as exc:
-        mark_credential_failed(
-            db,
-            row,
-            error_code=FacebookConnectorErrorCode.scrape_failed.value,
-            error_message=str(exc),
-            commit=True,
-        )
-        return FacebookVerifyResponse(
-            ok=False,
-            status=_facebook_status_response(row),
-            error_code=FacebookConnectorErrorCode.scrape_failed.value,
-            error_message="Unexpected verification failure.",
-        )
-
-    mark_credential_validated(db, row, commit=True)
     return FacebookVerifyResponse(
         ok=True,
-        status=_facebook_status_response(row),
+        status=_facebook_status_response(row, db=db, user_id=user_id),
     )
 
 
@@ -770,7 +904,17 @@ def delete_facebook_connector_cookies(
         return limited
 
     deleted = delete_user_facebook_credential(db, user_id)
+    revoke_helper_access_for_user(db, user_id, commit=True)
     return {"deleted": deleted}
+
+
+@app.delete("/me/connectors/facebook/helper", response_model=FacebookHelperDeleteResponse)
+def delete_facebook_helper(
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    revoked = revoke_helper_access_for_user(db, user_id, commit=True)
+    return FacebookHelperDeleteResponse(deleted=True, revoked_clients=revoked)
 
 
 @app.post("/saved-searches", response_model=SavedSearchOut)
@@ -1003,7 +1147,7 @@ async def run_saved_search(
     )
     facebook_runtime_context = None
     if "facebook" in source_list:
-        facebook_runtime_context = _build_facebook_runtime_context(
+        facebook_runtime_context = await _build_facebook_runtime_context(
             db=db,
             user_id=user_id,
             latitude=effective_latitude,

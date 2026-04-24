@@ -64,6 +64,9 @@ python scripts/smoke_search.py --query "road bike" --sources "ebay,kijiji,facebo
 
 Cookie mode improves results when guest mode hits login walls.
 
+For hosted multi-user Marketly deployments, the preferred setup is now the local browser helper in
+`extension/facebook-session-helper/`, which keeps the stored cookie jar fresh without manually re-exporting it.
+
 Expected file: `secrets/fb_cookies.json` (override with `cookie_path`).
 Example template: `secrets/fb_cookies.example.json`.
 This file is not committed by design; you must generate it locally from your own logged-in browser.

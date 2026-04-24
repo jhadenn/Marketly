@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { DotLottieReact } from "@lottiefiles/dotlottie-react";
@@ -45,8 +45,8 @@ const COPILOT_WINDOW_WIDTH_STORAGE_KEY = "marketly:copilot-window-width";
 const COPILOT_WINDOW_RECT_STORAGE_KEY = "marketly:copilot-window-rect";
 const COPILOT_LAUNCHER_POSITION_STORAGE_KEY = "marketly:copilot-launcher-position";
 const SEARCH_LOCATION_STORAGE_KEY = "marketly:search-location";
-const SAVED_BATCH_CACHE_STORAGE_KEY_PREFIX = "marketly:saved-batch-cache:v1";
-const SAVED_BATCH_CACHE_POINTER_STORAGE_KEY_PREFIX = "marketly:saved-batch-cache-latest:v1";
+const SAVED_BATCH_CACHE_STORAGE_KEY_PREFIX = "marketly:saved-batch-cache:v2";
+const SAVED_BATCH_CACHE_POINTER_STORAGE_KEY_PREFIX = "marketly:saved-batch-cache-latest:v2";
 const SAVED_BATCH_CACHE_TTL_MS = 5 * 60 * 1000;
 const SORT_OPTIONS = [
   { value: "relevance", label: "Relevance", disabled: false },
@@ -214,10 +214,17 @@ type FacebookConnectorStatus = {
   feature_enabled: boolean;
   status?: string | null;
   cookie_count?: number | null;
+  credential_source?: string | null;
+  session_cookie_count?: number | null;
   last_error_code?: string | null;
   last_error_message?: string | null;
   last_validated_at?: string | null;
   last_used_at?: string | null;
+  last_synced_at?: string | null;
+  earliest_cookie_expiry_at?: string | null;
+  helper_connected?: boolean;
+  helper_label?: string | null;
+  stale_reason?: string | null;
   updated_at?: string | null;
 };
 
@@ -244,6 +251,7 @@ type SavedSearch = {
 
 const DEFAULT_SAVED_SEARCH_MAX_PER_USER = 3;
 const SAVED_SEARCH_MAX_PER_USER_HEADER = "x-saved-search-max-per-user";
+const ALERT_PREVIEW_ITEM_LIMIT = 3;
 
 type NotificationItem = {
   listing_key: string;
@@ -317,6 +325,7 @@ type CopilotMessage = {
   role: "user" | "assistant";
   content: string;
   answer?: string;
+  shortlist?: CopilotShortlistItem[];
   seller_questions?: string[];
   red_flags?: string[];
   available?: boolean;
@@ -340,6 +349,7 @@ type SavedSearchRunOptions = {
   selectedSort?: SortOption;
   selectedLimit?: number;
   refresh?: boolean;
+  background?: boolean;
 };
 
 type ResultMode = "single" | "saved_batch";
@@ -351,7 +361,7 @@ type InterleavedSavedSearchBucketResult = {
 };
 
 type SavedBatchCacheEntry = {
-  version: 1;
+  version: 2;
   userId: string;
   savedSearchSignature: string;
   locationSignature: string;
@@ -369,7 +379,7 @@ type SavedBatchCacheEntry = {
 };
 
 type SavedBatchCachePointer = {
-  version: 1;
+  version: 2;
   key: string;
   userId: string;
   savedSearchSignature: string;
@@ -481,12 +491,12 @@ function isSavedBatchPaginationState(value: unknown): value is SavedBatchPaginat
 
 function readSavedBatchCacheEntry(key: string): SavedBatchCacheEntry | null {
   if (typeof window === "undefined") return null;
-  const raw = window.sessionStorage.getItem(key);
+  const raw = window.localStorage.getItem(key);
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as Partial<SavedBatchCacheEntry>;
     if (
-      parsed.version !== 1 ||
+      parsed.version !== 2 ||
       typeof parsed.userId !== "string" ||
       typeof parsed.savedSearchSignature !== "string" ||
       typeof parsed.locationSignature !== "string" ||
@@ -520,22 +530,22 @@ function readSavedBatchCacheEntry(key: string): SavedBatchCacheEntry | null {
 
 function writeSavedBatchCacheEntry(key: string, entry: SavedBatchCacheEntry) {
   if (typeof window === "undefined") return;
-  window.sessionStorage.setItem(key, JSON.stringify(entry));
+  window.localStorage.setItem(key, JSON.stringify(entry));
 }
 
 function removeSavedBatchCacheEntry(key: string) {
   if (typeof window === "undefined") return;
-  window.sessionStorage.removeItem(key);
+  window.localStorage.removeItem(key);
 }
 
 function readSavedBatchCachePointer(userId: string): SavedBatchCachePointer | null {
   if (typeof window === "undefined") return null;
-  const raw = window.sessionStorage.getItem(buildSavedBatchCachePointerStorageKey(userId));
+  const raw = window.localStorage.getItem(buildSavedBatchCachePointerStorageKey(userId));
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as Partial<SavedBatchCachePointer>;
     if (
-      parsed.version !== 1 ||
+      parsed.version !== 2 ||
       typeof parsed.key !== "string" ||
       typeof parsed.userId !== "string" ||
       typeof parsed.savedSearchSignature !== "string" ||
@@ -552,7 +562,7 @@ function readSavedBatchCachePointer(userId: string): SavedBatchCachePointer | nu
 
 function writeSavedBatchCachePointer(userId: string, pointer: SavedBatchCachePointer) {
   if (typeof window === "undefined") return;
-  window.sessionStorage.setItem(
+  window.localStorage.setItem(
     buildSavedBatchCachePointerStorageKey(userId),
     JSON.stringify(pointer),
   );
@@ -560,7 +570,16 @@ function writeSavedBatchCachePointer(userId: string, pointer: SavedBatchCachePoi
 
 function removeSavedBatchCachePointer(userId: string) {
   if (typeof window === "undefined") return;
-  window.sessionStorage.removeItem(buildSavedBatchCachePointerStorageKey(userId));
+  window.localStorage.removeItem(buildSavedBatchCachePointerStorageKey(userId));
+}
+
+function clearSavedBatchCacheForUser(userId: string) {
+  if (typeof window === "undefined") return;
+  const pointer = readSavedBatchCachePointer(userId);
+  if (pointer?.key) {
+    removeSavedBatchCacheEntry(pointer.key);
+  }
+  removeSavedBatchCachePointer(userId);
 }
 
 function toLocationResolveRequest(location: ResolvedLocation): LocationResolveRequest {
@@ -928,6 +947,23 @@ function formatTimestamp(value?: string | null) {
   });
 }
 
+function describeFacebookStaleReason(status: FacebookConnectorStatus | null) {
+  const reason = (status?.stale_reason ?? "").trim();
+  if (!reason) return null;
+  switch (reason) {
+    case "helper_disconnected":
+      return "Facebook browser helper is disconnected or stale. Open Facebook in Chrome or Edge or pair the helper again.";
+    case "cookie_expired":
+      return "Facebook session expired. Open Facebook and let the helper resync, or upload a fresh cookie export.";
+    case "cookie_expiring_soon":
+      return "Facebook session is about to expire. Leave Facebook open so the helper can refresh it.";
+    case "facebook_session_invalid":
+      return "Facebook needs attention before Marketly can trust saved searches again. Resolve the challenge in Facebook, then resync.";
+    default:
+      return status?.last_error_message ?? "Facebook setup needs attention.";
+  }
+}
+
 function formatNewListingsCount(count: number) {
   return `${count} new ${count === 1 ? "listing" : "listings"}`;
 }
@@ -1095,6 +1131,8 @@ type SearchPageViewProps = {
   saved: SavedSearch[];
   savedLoading: boolean;
   savedError: string | null;
+  savedSearchRefreshing: boolean;
+  savedSearchRefreshError: string | null;
   notifications: SavedSearchNotification[];
   notificationsLoading: boolean;
   notificationsError: string | null;
@@ -1146,7 +1184,6 @@ type SearchPageViewProps = {
   copilotLoading: boolean;
   copilotError: string | null;
   copilotMessages: CopilotMessage[];
-  latestShortlist: CopilotShortlistItem[];
   copilotSelectionMode: boolean;
   toggleCopilotSelectionMode: () => void;
   copilotSelectedListingKeys: string[];
@@ -1192,6 +1229,7 @@ type SearchControlsRailProps = Pick<
   | "onSaveCurrentSearch"
   | "searchLoading"
   | "loadingMore"
+  | "savedSearchRefreshing"
   | "savingSearch"
   | "saved"
   | "savedSearchMaxPerUser"
@@ -1241,6 +1279,7 @@ type SavedSearchRailProps = Pick<
   | "saved"
   | "savedLoading"
   | "savedError"
+  | "savedSearchRefreshing"
   | "activeSavedSearchId"
   | "searchLoading"
   | "loadingMore"
@@ -1276,8 +1315,10 @@ type ResultsPanelProps = Pick<
   | "authLoading"
   | "user"
   | "searchLoading"
+  | "savedSearchRefreshing"
   | "results"
   | "hasSearched"
+  | "activeQuery"
   | "resultMode"
   | "total"
   | "totalResultsCount"
@@ -1289,6 +1330,7 @@ type ResultsPanelProps = Pick<
   | "hasSourceErrorEntries"
   | "resultsBootstrapping"
   | "error"
+  | "savedSearchRefreshError"
   | "sentinelRef"
   | "loadingMore"
   | "hasMore"
@@ -1331,7 +1373,7 @@ function SearchPageView(props: SearchPageViewProps) {
       <div className="pointer-events-none fixed inset-0 -z-10 opacity-[0.06] [background-image:linear-gradient(rgba(255,255,255,0.9)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.9)_1px,transparent_1px)] [background-size:24px_24px]" />
 
       <header className="sticky top-0 z-40 border-b border-white/10 bg-black/70 backdrop-blur-2xl">
-        <div className="mx-auto flex max-w-[1500px] items-center justify-between gap-3 px-4 py-3 sm:px-6 lg:px-8">
+        <div className="flex w-full items-center justify-between gap-3 px-4 py-3 sm:px-5 lg:px-6 2xl:px-8">
           <div className="flex min-w-0 items-center gap-3">
             <Link
               href="/"
@@ -1346,7 +1388,7 @@ function SearchPageView(props: SearchPageViewProps) {
             <AlertsRail {...props} />
 
             {props.authLoading ? (
-              <span className="rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-zinc-400">
+              <span className="hidden rounded-full border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-zinc-400 sm:inline-flex">
                 Loading auth...
               </span>
             ) : props.user ? (
@@ -1387,64 +1429,68 @@ function SearchPageView(props: SearchPageViewProps) {
         </div>
       </header>
 
-      <div className="mx-auto max-w-[1500px] px-4 pb-12 pt-6 sm:px-6 lg:px-8">
-        <GlassPanel className="relative mb-6 overflow-hidden p-5 sm:p-6">
-          <div className="pointer-events-none absolute inset-0">
-            <div className="absolute -left-24 top-0 h-48 w-48 rounded-full bg-white/5 blur-3xl" />
-            <div className="absolute right-0 top-0 h-56 w-56 rounded-full bg-blue-400/10 blur-3xl" />
-          </div>
-
-          <div className="relative grid gap-5 lg:grid-cols-[minmax(0,1fr)_340px] lg:items-start">
-            <div>
-              <p className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/40 px-3 py-1 font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-300">
-                <Sparkles className="size-3.5 text-zinc-400" />
-                Search all marketplaces in one feed
-              </p>
-              <h1 className="mt-4 max-w-4xl text-balance text-3xl font-semibold tracking-tight text-white sm:text-4xl lg:text-5xl">
-                {heroTitle}
-              </h1>
-              <p className="mt-3 max-w-3xl text-sm leading-relaxed text-zinc-400 sm:text-base">
-                {showLiveHeroCopy
-                  ? "Compare live listings across Kijiji, eBay, and Facebook Marketplace in a single feed."
-                  : "Run a search, choose sources, and browse a unified marketplace grid with saved searches and infinite scroll."}
-              </p>
-
-              <div className="mt-4 flex flex-wrap items-center gap-2">
-                {(props.summarySources.length > 0 ? props.summarySources : props.sources).map((source) => (
-                  <SourceChip key={`hero-source-${source}`} source={source} compact />
-                ))}
-                {props.hasActiveClientFilters ? (
-                  <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-3 py-1 text-xs text-amber-100">
-                    Location ranking active
-                  </span>
-                ) : null}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <StatTile label="Results" value={String(props.hasSearched ? props.totalResultsCount : 0)} sub={props.hasSearched ? "Loaded/reported total" : "Waiting for search"} />
-              <StatTile
-                label="Mode"
-                value={props.hasSearched ? "Live Query" : "Idle"}
-                sub={props.hasMore ? "Infinite scroll enabled" : "No more pages yet"}
-              />
-              <StatTile
-                label="Showing"
-                value={String(props.filteredResults.length)}
-                sub={props.hasActiveClientFilters ? "Nearby results ranked first" : "No location ranking"}
-              />
-              <StatTile label="Sources" value={String((props.summarySources.length > 0 ? props.summarySources : props.sources).length)} sub="Selected" />
-            </div>
-          </div>
-        </GlassPanel>
-
-        <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
-          <aside className="space-y-4 xl:sticky xl:top-24 xl:self-start">
+      <div className="w-full px-4 pb-12 pt-5 sm:px-5 lg:px-6 2xl:px-8">
+        <div className="grid w-full gap-5 xl:grid-cols-[minmax(280px,320px)_minmax(0,1fr)] 2xl:grid-cols-[340px_minmax(0,1fr)]">
+          <aside className="grid min-w-0 gap-4 md:grid-cols-2 xl:sticky xl:top-24 xl:block xl:self-start xl:space-y-4">
             <SearchControlsRail {...props} />
-            <SavedSearchRail {...props} />
+            <div className="md:col-span-2 xl:col-span-1">
+              <SavedSearchRail {...props} />
+            </div>
           </aside>
 
-          <ResultsPanel {...props} />
+          <div className="min-w-0 space-y-5">
+            <GlassPanel className="relative overflow-hidden p-5 sm:p-6">
+              <div className="pointer-events-none absolute inset-0">
+                <div className="absolute -left-24 top-0 h-48 w-48 rounded-full bg-white/5 blur-3xl" />
+                <div className="absolute right-0 top-0 h-56 w-56 rounded-full bg-blue-400/10 blur-3xl" />
+              </div>
+
+              <div className="relative grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(300px,420px)] lg:items-start 2xl:grid-cols-[minmax(0,1fr)_minmax(420px,560px)]">
+                <div>
+                  <p className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/40 px-3 py-1 font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-300">
+                    <Sparkles className="size-3.5 text-zinc-400" />
+                    Search all marketplaces in one feed
+                  </p>
+                  <h1 className="mt-4 max-w-4xl text-balance text-3xl font-semibold tracking-tight text-white sm:text-4xl lg:text-5xl">
+                    {heroTitle}
+                  </h1>
+                  <p className="mt-3 max-w-3xl text-sm leading-relaxed text-zinc-400 sm:text-base">
+                    {showLiveHeroCopy
+                      ? "Compare live listings across Kijiji, eBay, and Facebook Marketplace in a single feed."
+                      : "Run a search, choose sources, and browse a unified marketplace grid with saved searches and infinite scroll."}
+                  </p>
+
+                  <div className="mt-4 flex flex-wrap items-center gap-2">
+                    {(props.summarySources.length > 0 ? props.summarySources : props.sources).map((source) => (
+                      <SourceChip key={`hero-source-${source}`} source={source} compact />
+                    ))}
+                    {props.hasActiveClientFilters ? (
+                      <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-3 py-1 text-xs text-amber-100">
+                        Location ranking active
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-2">
+                  <StatTile label="Results" value={String(props.hasSearched ? props.totalResultsCount : 0)} sub={props.hasSearched ? "Loaded/reported total" : "Waiting for search"} />
+                  <StatTile
+                    label="Mode"
+                    value={props.hasSearched ? "Live Query" : "Idle"}
+                    sub={props.hasMore ? "Infinite scroll enabled" : "No more pages yet"}
+                  />
+                  <StatTile
+                    label="Showing"
+                    value={String(props.filteredResults.length)}
+                    sub={props.hasActiveClientFilters ? "Nearby results ranked first" : "No location ranking"}
+                  />
+                  <StatTile label="Sources" value={String((props.summarySources.length > 0 ? props.summarySources : props.sources).length)} sub="Selected" />
+                </div>
+              </div>
+            </GlassPanel>
+
+            <ResultsPanel {...props} />
+          </div>
         </div>
       </div>
 
@@ -1524,7 +1570,13 @@ function SearchControlsRail(props: SearchControlsRailProps) {
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             <button
               type="submit"
-              disabled={props.searchLoading || props.loadingMore || !props.q.trim() || props.sources.length === 0}
+              disabled={
+                props.searchLoading
+                || props.loadingMore
+                || props.savedSearchRefreshing
+                || !props.q.trim()
+                || props.sources.length === 0
+              }
               className="inline-flex items-center justify-center gap-2 rounded-xl bg-white px-4 py-2.5 text-sm font-medium text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {props.searchLoading ? (
@@ -1555,10 +1607,10 @@ function SearchControlsRail(props: SearchControlsRailProps) {
             </button>
           </div>
 
-          {(props.searchLoading || props.loadingMore) && (
+          {(props.searchLoading || props.loadingMore || props.savedSearchRefreshing) && (
             <div className="flex items-center justify-end gap-1 text-xs text-zinc-400">
               <Loader2 className="size-3.5 animate-spin" />
-              Live query
+              {props.savedSearchRefreshing ? "Saved searches refreshing" : "Live query"}
             </div>
           )}
         </form>
@@ -1609,6 +1661,7 @@ function SearchControlsRail(props: SearchControlsRailProps) {
               className="w-full rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2.5 text-sm text-zinc-100 focus:border-white/20 focus:outline-none"
               value={props.sortBy}
               onChange={(e) => void props.onChangeSort(e.target.value as SortOption)}
+              disabled={props.sortApplying || props.searchLoading || props.loadingMore || props.savedSearchRefreshing}
             >
               {SORT_OPTIONS.map((option) => (
                 <option
@@ -1734,7 +1787,12 @@ function SavedSearchRail(props: SavedSearchRailProps) {
             <button
               type="button"
               onClick={() => void props.runAllSavedSearches(props.saved, { refresh: true })}
-              disabled={props.searchLoading || props.loadingMore || props.runnableSavedSearchCount === 0}
+              disabled={
+                props.searchLoading
+                || props.loadingMore
+                || props.savedSearchRefreshing
+                || props.runnableSavedSearchCount === 0
+              }
               className="rounded-full border border-white/10 bg-white/[0.02] px-2.5 py-1 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
             >
               {props.hasSavedSearchOverflow
@@ -1746,11 +1804,13 @@ function SavedSearchRail(props: SavedSearchRailProps) {
           <button
             className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.02] px-2.5 py-1 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
             onClick={() => void props.onRefreshSavedSearches()}
-            disabled={props.savedLoading}
+            disabled={props.savedLoading || props.savedSearchRefreshing}
             type="button"
           >
-            <RefreshCw className={cn("size-3.5", props.savedLoading && "animate-spin")} />
-            {props.savedLoading ? "Refreshing" : "Refresh"}
+            <RefreshCw
+              className={cn("size-3.5", (props.savedLoading || props.savedSearchRefreshing) && "animate-spin")}
+            />
+            {props.savedLoading ? "Refreshing" : props.savedSearchRefreshing ? "Updating feed" : "Refresh"}
           </button>
         </div>
       </div>
@@ -1793,7 +1853,7 @@ function SavedSearchRail(props: SavedSearchRailProps) {
           ) : null}
           {props.blockedSavedSearchCount > 0 ? (
             <div className="rounded-xl border border-amber-300/20 bg-amber-300/10 p-3 text-xs leading-relaxed text-amber-100">
-              {props.blockedSavedSearchCount} saved search{props.blockedSavedSearchCount === 1 ? "" : "es"} {props.blockedSavedSearchCount === 1 ? "is" : "are"} paused until Facebook is configured. Batch runs skip {props.blockedSavedSearchCount === 1 ? "it" : "them"}.
+              {props.blockedSavedSearchCount} saved search{props.blockedSavedSearchCount === 1 ? "" : "es"} {props.blockedSavedSearchCount === 1 ? "is" : "are"} paused until Facebook is ready again. Batch runs skip {props.blockedSavedSearchCount === 1 ? "it" : "them"}.
             </div>
           ) : null}
 
@@ -1853,34 +1913,37 @@ function SavedSearchRail(props: SavedSearchRailProps) {
                       className="rounded-lg bg-white px-3 py-1.5 text-xs font-medium text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
                       type="button"
                       onClick={() => void props.onRunSavedSearch(entry.id)}
-                      disabled={blocked}
+                      disabled={blocked || props.savedSearchRefreshing}
                       title={blockedReason ?? "Run saved search"}
                     >
                       Run
                     </button>
                     <button
-                      className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05]"
+                      className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
                       type="button"
                       onClick={() => props.openEdit(entry)}
+                      disabled={props.savedSearchRefreshing}
                     >
                       Edit
                     </button>
                     <button
                       className={cn(
-                        "rounded-lg border px-3 py-1.5 text-xs transition",
+                        "rounded-lg border px-3 py-1.5 text-xs transition disabled:cursor-not-allowed disabled:opacity-50",
                         entry.alerts_enabled
                           ? "border-emerald-300/25 bg-emerald-400/10 text-emerald-100 hover:border-emerald-300/40"
                           : "border-white/10 bg-white/[0.02] text-zinc-200 hover:border-white/20 hover:bg-white/[0.05]",
                       )}
                       type="button"
                       onClick={() => void props.onToggleSavedSearchAlerts(entry)}
+                      disabled={props.savedSearchRefreshing}
                     >
                       {entry.alerts_enabled ? "Disable alerts" : "Enable alerts"}
                     </button>
                     <button
-                      className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-200 transition hover:border-red-300/30 hover:bg-red-400/10 hover:text-red-100"
+                      className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-200 transition hover:border-red-300/30 hover:bg-red-400/10 hover:text-red-100 disabled:cursor-not-allowed disabled:opacity-50"
                       type="button"
                       onClick={() => void props.onDeleteSavedSearch(entry.id)}
+                      disabled={props.savedSearchRefreshing}
                     >
                       Delete
                     </button>
@@ -1959,41 +2022,102 @@ function AlertsRail(props: AlertsRailProps) {
           </div>
         ) : (
           <ul className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
-            {props.notifications.map((notification) => (
-              <li
-                key={notification.id}
-                className={cn(
-                  "rounded-xl border p-3 transition",
-                  notification.read_at
-                    ? "border-white/10 bg-white/[0.02]"
-                    : "border-emerald-300/20 bg-emerald-400/[0.06]",
-                )}
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="line-clamp-2 text-sm font-medium text-zinc-100">
-                      {notification.saved_search_query}
-                    </p>
-                    <p className="mt-1 text-[11px] text-zinc-500">
-                      {formatNewListingsCount(notification.new_count)} | {formatTimestamp(notification.created_at)}
-                    </p>
-                  </div>
-                  {!notification.read_at ? (
-                    <button
-                      type="button"
-                      className="rounded-full border border-emerald-300/25 bg-emerald-400/10 px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-emerald-100 transition hover:border-emerald-300/40"
-                      onClick={() => void props.onMarkNotificationRead(notification.id)}
-                    >
-                      Read
-                    </button>
-                  ) : (
-                    <span className="rounded-full border border-white/10 bg-white/[0.02] px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-zinc-400">
-                      Read
-                    </span>
+            {props.notifications.map((notification) => {
+              const previewItems = notification.items.slice(0, ALERT_PREVIEW_ITEM_LIMIT);
+              const overflowCount = Math.max(notification.items.length - previewItems.length, 0);
+
+              return (
+                <li
+                  key={notification.id}
+                  className={cn(
+                    "rounded-xl border p-3 transition",
+                    notification.read_at
+                      ? "border-white/10 bg-white/[0.02]"
+                      : "border-emerald-300/20 bg-emerald-400/[0.06]",
                   )}
-                </div>
-              </li>
-            ))}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="line-clamp-2 text-sm font-medium text-zinc-100">
+                        {notification.saved_search_query}
+                      </p>
+                      <p className="mt-1 text-[11px] text-zinc-500">
+                        {formatNewListingsCount(notification.new_count)} | {formatTimestamp(notification.created_at)}
+                      </p>
+                    </div>
+                    {!notification.read_at ? (
+                      <button
+                        type="button"
+                        className="rounded-full border border-emerald-300/25 bg-emerald-400/10 px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-emerald-100 transition hover:border-emerald-300/40"
+                        onClick={() => void props.onMarkNotificationRead(notification.id)}
+                      >
+                        Read
+                      </button>
+                    ) : (
+                      <span className="rounded-full border border-white/10 bg-white/[0.02] px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-zinc-400">
+                        Read
+                      </span>
+                    )}
+                  </div>
+
+                  {previewItems.length > 0 ? (
+                    <div className="mt-3 space-y-2">
+                      {previewItems.map((item) => {
+                        const primaryReason = item.why_matched.find((reason) => reason.trim().length > 0);
+
+                        return (
+                          <a
+                            key={item.listing_key}
+                            href={item.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className={cn(
+                              "group block rounded-xl border p-2.5 transition",
+                              notification.read_at
+                                ? "border-white/10 bg-black/20 hover:border-white/20 hover:bg-white/[0.04]"
+                                : "border-emerald-300/15 bg-black/20 hover:border-emerald-300/30 hover:bg-emerald-400/[0.08]",
+                            )}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <MarketplaceSourceBadge source={item.source} />
+                              <span className="inline-flex shrink-0 items-center gap-1 text-[10px] uppercase tracking-[0.12em] text-zinc-500 transition group-hover:text-zinc-300">
+                                View
+                                <ArrowUpRight className="size-3" />
+                              </span>
+                            </div>
+
+                            <div className="mt-2 min-w-0">
+                              <p className="line-clamp-2 text-xs font-medium leading-snug text-zinc-100 transition group-hover:text-white">
+                                {item.title}
+                              </p>
+                              <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-zinc-400">
+                                {item.price ? (
+                                  <span className="font-medium text-zinc-200">{formatPrice(item.price)}</span>
+                                ) : null}
+                                <span className="line-clamp-1">
+                                  {item.location || `${formatSourceLabel(item.source)} listing`}
+                                </span>
+                              </div>
+                              {primaryReason ? (
+                                <p className="mt-1.5 line-clamp-2 text-[11px] leading-relaxed text-zinc-500">
+                                  {primaryReason}
+                                </p>
+                              ) : null}
+                            </div>
+                          </a>
+                        );
+                      })}
+
+                      {overflowCount > 0 ? (
+                        <p className="px-1 text-[11px] text-zinc-500">
+                          +{overflowCount} more new {overflowCount === 1 ? "listing" : "listings"}
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>
@@ -2003,14 +2127,17 @@ function AlertsRail(props: AlertsRailProps) {
 
 function ResultsPanel({
   searchLoading,
+  savedSearchRefreshing,
   results,
   resultsBootstrapping,
   hasSearched,
+  activeQuery,
   filteredResults,
   hasActiveClientFilters,
   sourceErrors,
   hasSourceErrorEntries,
   error,
+  savedSearchRefreshError,
   sentinelRef,
   loadingMore,
   hasMore,
@@ -2025,7 +2152,7 @@ function ResultsPanel({
   const showBootstrapLoading = resultsBootstrapping && !hasSearched && results.length === 0;
 
   return (
-    <section className="space-y-4">
+    <section className="min-w-0 space-y-4">
       {error ? (
         <GlassPanel className="border-red-400/20 bg-red-500/10 p-4 text-red-100">
           <p className="text-sm font-medium">Search error</p>
@@ -2057,6 +2184,20 @@ function ResultsPanel({
         </GlassPanel>
       ) : null}
 
+      {savedSearchRefreshing && activeQuery === "Saved searches" && hasSearched ? (
+        <GlassPanel className="flex items-center gap-2 p-3 text-sm text-zinc-300">
+          <Loader2 className="size-4 animate-spin" />
+          Refreshing saved searches. Showing recent results.
+        </GlassPanel>
+      ) : null}
+
+      {savedSearchRefreshError && activeQuery === "Saved searches" && hasSearched ? (
+        <GlassPanel className="border-amber-300/20 bg-amber-300/10 p-4 text-amber-100">
+          <p className="text-sm font-medium">Saved search refresh</p>
+          <p className="mt-1 text-sm text-amber-50/90">{savedSearchRefreshError}</p>
+        </GlassPanel>
+      ) : null}
+
       {((searchLoading && results.length === 0) || showBootstrapLoading) ? <ListingsLoadingState /> : null}
 
       {!searchLoading && !showBootstrapLoading && !hasSearched ? (
@@ -2072,7 +2213,7 @@ function ResultsPanel({
               </p>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(min(100%,170px),1fr))]">
               {PREVIEW_SAMPLE_LISTINGS.map((listing, index) => (
                 <PreviewListingCard key={`preview-card-${index}`} listing={listing} />
               ))}
@@ -2090,7 +2231,7 @@ function ResultsPanel({
                 : "No results found for this search."}
             </GlassPanel>
           ) : (
-            <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+            <ul className="grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(min(100%,260px),1fr))]">
               {filteredResults.map((item) => {
                 const cardKey = `${item.source}:${item.source_listing_id || item.url}`;
                 return (
@@ -2575,6 +2716,128 @@ function valuationTooltipLines(valuation?: Valuation | null) {
   return lines.length > 0 ? lines : null;
 }
 
+function getMoneyAmount(price?: Money | null) {
+  if (typeof price?.amount !== "number" || !Number.isFinite(price.amount)) return null;
+  return price.amount;
+}
+
+function buildListingValuationChartModel(item: Listing) {
+  const valuation = item.valuation;
+  if (!valuation || !hasValuationBand(valuation)) return null;
+
+  const estimatedLow = valuation.estimated_low;
+  const estimatedHigh = valuation.estimated_high;
+  if (
+    typeof estimatedLow !== "number"
+    || !Number.isFinite(estimatedLow)
+    || typeof estimatedHigh !== "number"
+    || !Number.isFinite(estimatedHigh)
+  ) {
+    return null;
+  }
+
+  const rangeLow = Math.min(estimatedLow, estimatedHigh);
+  const rangeHigh = Math.max(estimatedLow, estimatedHigh);
+  const medianPrice =
+    typeof valuation.median_price === "number" && Number.isFinite(valuation.median_price)
+      ? valuation.median_price
+      : null;
+  const currentPrice = getMoneyAmount(item.price);
+  const currency = valuation.currency || item.price?.currency || "CAD";
+  const values = [rangeLow, rangeHigh, medianPrice, currentPrice].filter(
+    (value): value is number => typeof value === "number" && Number.isFinite(value),
+  );
+
+  if (values.length < 2) return null;
+
+  const minValue = Math.min(...values);
+  const maxValue = Math.max(...values);
+  const spread = Math.max(maxValue - minValue, rangeHigh - rangeLow, 1);
+  const padding = spread * 0.18;
+  const scaleMin = Math.max(0, minValue - padding);
+  const scaleMax = maxValue + padding;
+  if (!(scaleMax > scaleMin)) return null;
+
+  const offset = (value: number) =>
+    clampNumber(((value - scaleMin) / (scaleMax - scaleMin)) * 100, 0, 100);
+
+  return {
+    lowLabel: formatMoneyCompact(rangeLow, currency),
+    highLabel: formatMoneyCompact(rangeHigh, currency),
+    currentLabel: currentPrice !== null ? formatMoneyCompact(currentPrice, currency) : null,
+    medianLabel: medianPrice !== null ? formatMoneyCompact(medianPrice, currency) : null,
+    rangeStartOffset: offset(rangeLow),
+    rangeEndOffset: offset(rangeHigh),
+    currentOffset: currentPrice !== null ? offset(currentPrice) : null,
+    medianOffset: medianPrice !== null ? offset(medianPrice) : null,
+  };
+}
+
+function ListingValuationTooltipChart({ item }: { item: Listing }) {
+  const chart = buildListingValuationChartModel(item);
+  if (!chart || !chart.lowLabel || !chart.highLabel) {
+    return null;
+  }
+
+  const rangeWidth = Math.max(chart.rangeEndOffset - chart.rangeStartOffset, 2);
+
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/[0.02] p-2.5">
+      <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-zinc-400">
+        <span className="inline-flex items-center gap-1.5">
+          <span className="h-1.5 w-4 rounded-full bg-gradient-to-r from-amber-300/60 to-emerald-300/60" />
+          Market range
+        </span>
+        {chart.currentOffset !== null ? (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="size-2 rounded-full bg-sky-300" />
+            This listing
+          </span>
+        ) : null}
+        {chart.medianOffset !== null ? (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-2.5 w-px bg-zinc-200/70" />
+            Median
+          </span>
+        ) : null}
+      </div>
+
+      <div className="relative mt-3 h-9">
+        <div className="absolute inset-x-0 top-4 h-1.5 rounded-full bg-white/10" />
+        <div
+          className="absolute top-4 h-1.5 rounded-full bg-gradient-to-r from-amber-300/55 to-emerald-300/45 shadow-[0_0_16px_rgba(251,191,36,0.12)]"
+          style={{
+            left: `${chart.rangeStartOffset}%`,
+            width: `${rangeWidth}%`,
+          }}
+        />
+        {chart.medianOffset !== null ? (
+          <div
+            className="absolute bottom-1 top-2 w-px bg-zinc-200/70"
+            style={{ left: `calc(${chart.medianOffset}% - 0.5px)` }}
+          />
+        ) : null}
+        {chart.currentOffset !== null ? (
+          <div
+            className="absolute top-0 flex -translate-x-1/2 flex-col items-center gap-1"
+            style={{ left: `${chart.currentOffset}%` }}
+          >
+            <span className="rounded-full border border-sky-300/25 bg-sky-400/10 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-[0.08em] text-sky-100">
+              This
+            </span>
+            <span className="size-2.5 rounded-full border border-zinc-950 bg-sky-300 shadow-[0_0_0_2px_rgba(14,17,24,0.92)]" />
+          </div>
+        ) : null}
+      </div>
+
+      <div className="mt-1 flex items-center justify-between text-[10px] text-zinc-500">
+        <span>{chart.lowLabel}</span>
+        <span>{chart.highLabel}</span>
+      </div>
+    </div>
+  );
+}
+
 function formatDistanceKm(distanceKm?: number | null, approximate = false) {
   if (typeof distanceKm !== "number" || !Number.isFinite(distanceKm)) return null;
   if (distanceKm < 10) {
@@ -2583,6 +2846,59 @@ function formatDistanceKm(distanceKm?: number | null, approximate = false) {
     return `${approximate ? "~" : ""}${preciseDistanceKm.toFixed(1)} km away`;
   }
   return `${approximate ? "~" : ""}${Math.round(distanceKm)} km away`;
+}
+
+function ListingValuationBadge({
+  item,
+  allowTooltipFocus = true,
+}: {
+  item: Listing;
+  allowTooltipFocus?: boolean;
+}) {
+  if (!item.valuation) {
+    return null;
+  }
+
+  const valuationLabelText = valuationLabel(item.valuation) ?? "Value: pending";
+  const valuationTooltipText = valuationTooltipLines(item.valuation);
+  const valuationToneValue = valuationTone(item.valuation);
+
+  if (!valuationTooltipText) {
+    return <InsightPill label={valuationLabelText} tone={valuationToneValue} />;
+  }
+
+  return (
+    <TooltipProvider delayDuration={120}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            className={cn(
+              "inline-flex cursor-help rounded-full border px-2 py-0.5 text-[10px] font-medium outline-none",
+              allowTooltipFocus && "focus-visible:ring-2 focus-visible:ring-white/30 focus-visible:ring-offset-0",
+              insightPillToneClasses(valuationToneValue),
+            )}
+            tabIndex={allowTooltipFocus ? 0 : -1}
+          >
+            {valuationLabelText}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent
+          side="top"
+          align="start"
+          className="max-w-64 border border-white/10 bg-zinc-950/95 px-3 py-2 text-[11px] leading-relaxed text-zinc-100 shadow-2xl"
+        >
+          <div className="space-y-2">
+            {valuationTooltipText.map((line) => (
+              <p key={line} className="text-zinc-200">
+                {line}
+              </p>
+            ))}
+            <ListingValuationTooltipChart item={item} />
+          </div>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
 }
 
 function ListingCardBody({
@@ -2598,9 +2914,6 @@ function ListingCardBody({
   const distanceLabel = formatDistanceKm(item.distance_km, item.distance_is_approximate);
   const vehicleMileageLabel = formatVehicleMileageKm(inferVehicleMileageKm(item));
   const footerLabel = vehicleMileageLabel ?? item.condition?.toUpperCase() ?? null;
-  const valuationLabelText = valuationLabel(item.valuation) ?? "Value: pending";
-  const valuationTooltipText = valuationTooltipLines(item.valuation);
-  const valuationToneValue = valuationTone(item.valuation);
 
   return (
     <>
@@ -2647,41 +2960,7 @@ function ListingCardBody({
         </p>
 
         <div className="flex flex-wrap gap-1.5">
-          {item.valuation ? (
-            valuationTooltipText ? (
-              <TooltipProvider delayDuration={120}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span
-                      className={cn(
-                        "inline-flex cursor-help rounded-full border px-2 py-0.5 text-[10px] font-medium outline-none",
-                        allowTooltipFocus && "focus-visible:ring-2 focus-visible:ring-white/30 focus-visible:ring-offset-0",
-                        insightPillToneClasses(valuationToneValue),
-                      )}
-                      tabIndex={allowTooltipFocus ? 0 : -1}
-                    >
-                      {valuationLabelText}
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent
-                    side="top"
-                    align="start"
-                    className="max-w-64 border border-white/10 bg-zinc-950/95 px-3 py-2 text-[11px] leading-relaxed text-zinc-100 shadow-2xl"
-                  >
-                    <div className="space-y-1">
-                      {valuationTooltipText.map((line) => (
-                        <p key={line} className="text-zinc-200">
-                          {line}
-                        </p>
-                      ))}
-                    </div>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            ) : (
-              <InsightPill label={valuationLabelText} tone={valuationToneValue} />
-            )
-          ) : null}
+          <ListingValuationBadge item={item} allowTooltipFocus={allowTooltipFocus} />
         </div>
 
         <div className="mt-auto min-h-[16px]">
@@ -2758,17 +3037,73 @@ function CopilotShortlistCard({
   copilotSelected: boolean;
   onToggleSelection: (item: Listing) => void;
 }) {
+  const imageUrl = item.image_urls?.[0];
+  const distanceLabel = formatDistanceKm(item.distance_km, item.distance_is_approximate);
+  const vehicleMileageLabel = formatVehicleMileageKm(inferVehicleMileageKm(item));
+  const footerLabel = vehicleMileageLabel ?? item.condition?.toUpperCase() ?? null;
   const body = (
-    <div className="flex flex-1 flex-col">
-      <ListingCardBody item={item} titleClassName="text-[15px]" allowTooltipFocus={!selectionMode} />
+    <div className="flex flex-1 gap-3 p-3">
+      <div className="relative h-20 w-28 shrink-0 overflow-hidden rounded-xl bg-zinc-900 sm:h-24 sm:w-32">
+        {imageUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={imageUrl}
+            alt={item.title}
+            className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.03]"
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-[11px] text-zinc-500">
+            No image
+          </div>
+        )}
+        <div className="absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-2">
+          <MarketplaceSourceBadge source={item.source} />
+        </div>
+      </div>
+
+      <div className="min-w-0 flex-1">
+        <div className="flex items-start justify-between gap-2">
+          <p className="text-sm font-semibold tracking-tight text-white">{formatPrice(item.price)}</p>
+          {distanceLabel ? (
+            <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[10px] text-zinc-300">
+              {distanceLabel}
+            </span>
+          ) : null}
+        </div>
+
+        <p className="mt-1 line-clamp-2 text-sm font-medium leading-snug text-zinc-100 transition group-hover:text-white">
+          {item.title}
+        </p>
+
+        <p className="mt-1 line-clamp-1 text-xs text-zinc-400">
+          {item.location || `${formatSourceLabel(item.source)} listing`}
+        </p>
+
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          <ListingValuationBadge item={item} allowTooltipFocus={!selectionMode} />
+        </div>
+
+        {footerLabel ? (
+          <p
+            className={cn(
+              "mt-2 line-clamp-1 text-zinc-500",
+              vehicleMileageLabel
+                ? "text-xs font-medium tracking-[0.02em] text-zinc-400"
+                : "text-[11px] uppercase tracking-[0.12em]",
+            )}
+          >
+            {footerLabel}
+          </p>
+        ) : null}
+      </div>
     </div>
   );
 
   return (
-    <li className="h-full">
+    <li>
       <article
         className={cn(
-          "group flex h-full flex-col overflow-hidden rounded-2xl border bg-zinc-950/85 transition hover:border-white/20 hover:bg-zinc-950",
+          "group overflow-hidden rounded-2xl border bg-zinc-950/85 transition hover:border-white/20 hover:bg-zinc-950",
           copilotSelected
             ? "border-emerald-300/50 shadow-[0_0_0_1px_rgba(110,231,183,0.35)_inset]"
             : "border-white/10",
@@ -2787,16 +3122,16 @@ function CopilotShortlistCard({
           body
         )}
 
-        <div className="space-y-3 border-t border-white/10 p-3">
+        <div className="border-t border-white/10 px-3 py-2.5">
           <p className="text-xs leading-relaxed text-zinc-300">{reason}</p>
-          <div className="grid grid-cols-1 gap-2">
+          <div className="mt-2 flex justify-end">
             <a
               href={item.url}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2 text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05]"
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2 text-xs font-medium text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05]"
             >
-              <ArrowUpRight className="size-4" />
+              <ArrowUpRight className="size-3.5" />
               Open listing
             </a>
           </div>
@@ -2806,7 +3141,76 @@ function CopilotShortlistCard({
   );
 }
 
-function CopilotTranscriptMessage({ message }: { message: CopilotMessage }) {
+function CopilotShortlistFallbackCard({ entry }: { entry: CopilotShortlistItem }) {
+  return (
+    <li className="rounded-2xl border border-white/10 bg-white/[0.02] p-3">
+      <p className="text-sm font-medium text-zinc-100">{entry.title}</p>
+      <p className="mt-2 text-xs leading-relaxed text-zinc-300">{entry.reason}</p>
+    </li>
+  );
+}
+
+function CopilotShortlistSection({
+  shortlist,
+  listingMap,
+  selectionMode,
+  selectedListingKeySet,
+  onToggleSelection,
+}: {
+  shortlist: CopilotShortlistItem[];
+  listingMap: Map<string, Listing>;
+  selectionMode: boolean;
+  selectedListingKeySet: Set<string>;
+  onToggleSelection: (item: Listing) => void;
+}) {
+  if (shortlist.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="mt-4 rounded-2xl border border-white/10 bg-black/25 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-500">Shortlist</p>
+        <span className="text-xs text-zinc-500">
+          {`${shortlist.length} listing${shortlist.length === 1 ? "" : "s"}`}
+        </span>
+      </div>
+      <ul className="mt-3 space-y-2.5">
+        {shortlist.map((entry) => {
+          const linkedListing = listingMap.get(entry.listing_key);
+          if (!linkedListing) {
+            return <CopilotShortlistFallbackCard key={entry.listing_key} entry={entry} />;
+          }
+
+          return (
+            <CopilotShortlistCard
+              key={entry.listing_key}
+              item={linkedListing}
+              reason={entry.reason}
+              selectionMode={selectionMode}
+              copilotSelected={selectedListingKeySet.has(entry.listing_key)}
+              onToggleSelection={onToggleSelection}
+            />
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+function CopilotTranscriptMessage({
+  message,
+  listingMap,
+  selectionMode,
+  selectedListingKeySet,
+  onToggleSelection,
+}: {
+  message: CopilotMessage;
+  listingMap: Map<string, Listing>;
+  selectionMode: boolean;
+  selectedListingKeySet: Set<string>;
+  onToggleSelection: (item: Listing) => void;
+}) {
   if (message.role === "user") {
     return (
       <div className="flex justify-end">
@@ -2854,6 +3258,15 @@ function CopilotTranscriptMessage({ message }: { message: CopilotMessage }) {
       {!message.available && message.error_message ? (
         <p className="mt-3 text-xs text-zinc-500">{message.error_message}</p>
       ) : null}
+      {message.shortlist && message.shortlist.length > 0 ? (
+        <CopilotShortlistSection
+          shortlist={message.shortlist}
+          listingMap={listingMap}
+          selectionMode={selectionMode}
+          selectedListingKeySet={selectedListingKeySet}
+          onToggleSelection={onToggleSelection}
+        />
+      ) : null}
     </div>
   );
 }
@@ -2897,7 +3310,6 @@ function CopilotWindow({
   copilotLoading,
   copilotError,
   copilotMessages,
-  latestShortlist,
   copilotSelectionMode,
   toggleCopilotSelectionMode,
   copilotSelectedListingKeys,
@@ -2920,7 +3332,6 @@ function CopilotWindow({
   | "copilotLoading"
   | "copilotError"
   | "copilotMessages"
-  | "latestShortlist"
   | "copilotSelectionMode"
   | "toggleCopilotSelectionMode"
   | "copilotSelectedListingKeys"
@@ -2989,7 +3400,7 @@ function CopilotWindow({
   useEffect(() => {
     if (!scrollContentRef.current) return;
     scrollContentRef.current.scrollTop = scrollContentRef.current.scrollHeight;
-  }, [copilotLoading, copilotMessages, copilotSelectedListingKeys.length, latestShortlist]);
+  }, [copilotLoading, copilotMessages, copilotSelectedListingKeys.length]);
 
   const handleAskCopilot = useCallback(
     (questionOverride?: string) => {
@@ -3096,7 +3507,14 @@ function CopilotWindow({
                 </div>
               ) : (
                 copilotMessages.map((message) => (
-                  <CopilotTranscriptMessage key={message.id} message={message} />
+                  <CopilotTranscriptMessage
+                    key={message.id}
+                    message={message}
+                    listingMap={listingMap}
+                    selectionMode={copilotSelectionMode}
+                    selectedListingKeySet={selectedListingKeySet}
+                    onToggleSelection={onToggleListingSelection}
+                  />
                 ))
               )}
 
@@ -3144,43 +3562,6 @@ function CopilotWindow({
               </div>
             )}
 
-            {latestShortlist.length > 0 ? (
-              <div className="rounded-2xl border border-white/10 bg-black/30 p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">Shortlist</p>
-                  <span className="text-xs text-zinc-500">
-                    {`${latestShortlist.length} listing${latestShortlist.length === 1 ? "" : "s"}`}
-                  </span>
-                </div>
-                <ul className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
-                  {latestShortlist.map((entry) => {
-                    const linkedListing = listingMap.get(entry.listing_key);
-                    if (!linkedListing) {
-                      return (
-                        <li
-                          key={entry.listing_key}
-                          className="rounded-2xl border border-white/10 bg-white/[0.02] p-3 text-sm text-zinc-300"
-                        >
-                          <p className="font-medium text-zinc-100">{entry.title}</p>
-                          <p className="mt-1 text-xs text-zinc-400">{entry.reason}</p>
-                        </li>
-                      );
-                    }
-
-                    return (
-                      <CopilotShortlistCard
-                        key={entry.listing_key}
-                        item={linkedListing}
-                        reason={entry.reason}
-                        selectionMode={copilotSelectionMode}
-                        copilotSelected={selectedListingKeySet.has(entry.listing_key)}
-                        onToggleSelection={onToggleListingSelection}
-                      />
-                    );
-                  })}
-                </ul>
-              </div>
-            ) : null}
           </div>
 
           <div className="space-y-3 border-t border-white/10 bg-black/20 px-4 py-4">
@@ -3323,6 +3704,8 @@ export default function HomePage() {
   const [savedLoading, setSavedLoading] = useState(false);
   const [savingSearch, setSavingSearch] = useState(false);
   const [savedError, setSavedError] = useState<string | null>(null);
+  const [savedSearchRefreshing, setSavedSearchRefreshing] = useState(false);
+  const [savedSearchRefreshError, setSavedSearchRefreshError] = useState<string | null>(null);
   const [notifications, setNotifications] = useState<SavedSearchNotification[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(false);
   const [notificationsError, setNotificationsError] = useState<string | null>(null);
@@ -3348,7 +3731,6 @@ export default function HomePage() {
   const [copilotLoading, setCopilotLoading] = useState(false);
   const [copilotError, setCopilotError] = useState<string | null>(null);
   const [copilotMessages, setCopilotMessages] = useState<CopilotMessage[]>([]);
-  const [latestShortlist, setLatestShortlist] = useState<CopilotShortlistItem[]>([]);
   const [copilotSelectionMode, setCopilotSelectionMode] = useState(false);
   const [copilotSelectedListingKeys, setCopilotSelectedListingKeys] = useState<string[]>([]);
   const [copilotWindowRect, setCopilotWindowRect] = useState<CopilotWindowRect>({
@@ -3373,7 +3755,8 @@ export default function HomePage() {
   const currentLocationRef = useRef<ResolvedLocation | null>(null);
   const seenKeysRef = useRef<Set<string>>(new Set());
   const fetchInFlightRef = useRef(false);
-  const autoLoadedSavedForUserRef = useRef<string | null>(null);
+  const savedSearchBootstrapInFlightForUserRef = useRef<string | null>(null);
+  const savedSearchBootstrapCompletedForUserRef = useRef<string | null>(null);
   const savedSearchMaxPerUserRef = useRef(DEFAULT_SAVED_SEARCH_MAX_PER_USER);
   const initializedLocationUserRef = useRef<string | null>(null);
   const savedBatchLaneStartRef = useRef(0);
@@ -3415,6 +3798,15 @@ export default function HomePage() {
     }
     if (!facebookConfigStatus?.configured) {
       return "Finish Facebook setup before selecting Facebook as a source.";
+    }
+    if (facebookConfigStatus?.stale_reason) {
+      return describeFacebookStaleReason(facebookConfigStatus);
+    }
+    if (
+      facebookConfigStatus?.status === "verification_failed"
+      && facebookConfigStatus?.last_error_message
+    ) {
+      return facebookConfigStatus.last_error_message;
     }
     return null;
   }, [authLoading, facebookConfigLoading, facebookConfigStatus, user]);
@@ -3558,7 +3950,6 @@ export default function HomePage() {
     setCopilotLoading(false);
     setCopilotError(null);
     setCopilotMessages([]);
-    setLatestShortlist([]);
     setCopilotSelectionMode(false);
     setCopilotSelectedListingKeys([]);
   }, []);
@@ -3646,6 +4037,8 @@ export default function HomePage() {
       if (append) {
         setLoadingMore(true);
       } else {
+        setSavedSearchRefreshing(false);
+        setSavedSearchRefreshError(null);
         setSearchLoading(true);
         setError(null);
         setCopilotError(null);
@@ -3814,6 +4207,8 @@ export default function HomePage() {
     cacheContext: SavedBatchCacheContext,
   ) => {
     resetCopilotConversation();
+    setSavedSearchRefreshing(false);
+    setSavedSearchRefreshError(null);
     setSearchLoading(false);
     setLoadingMore(false);
     setError(null);
@@ -3838,32 +4233,6 @@ export default function HomePage() {
     savedBatchCacheContextRef.current = cacheContext;
   }, [resetCopilotConversation]);
 
-  useLayoutEffect(() => {
-    if (authLoading || !userId) return;
-    const latestPointer = readSavedBatchCachePointer(userId);
-    if (!latestPointer) return;
-    if (latestPointer.expiresAt <= Date.now()) {
-      removeSavedBatchCacheEntry(latestPointer.key);
-      removeSavedBatchCachePointer(userId);
-      return;
-    }
-    const cachedEntry = readSavedBatchCacheEntry(latestPointer.key);
-    if (
-      !cachedEntry ||
-      cachedEntry.userId !== userId ||
-      cachedEntry.expiresAt <= Date.now()
-    ) {
-      removeSavedBatchCacheEntry(latestPointer.key);
-      removeSavedBatchCachePointer(userId);
-      return;
-    }
-    applySavedBatchCacheEntry(cachedEntry, {
-      userId,
-      savedSearchSignature: cachedEntry.savedSearchSignature,
-      locationSignature: cachedEntry.locationSignature,
-    });
-  }, [applySavedBatchCacheEntry, authLoading, userId]);
-
   const restoreSavedBatchFromCache = useCallback((
     entries: SavedSearch[],
     {
@@ -3878,7 +4247,7 @@ export default function HomePage() {
 
     const runnableEntries = getRunnableSavedSearchBatch(entries);
     if (runnableEntries.length === 0) {
-      removeSavedBatchCachePointer(userId);
+      clearSavedBatchCacheForUser(userId);
       return false;
     }
 
@@ -3918,7 +4287,7 @@ export default function HomePage() {
       };
       applySavedBatchCacheEntry(cachedEntry, cacheContext);
       writeSavedBatchCachePointer(userId, {
-        version: 1,
+        version: 2,
         key,
         userId,
         savedSearchSignature,
@@ -3928,7 +4297,7 @@ export default function HomePage() {
       return true;
     }
 
-    removeSavedBatchCachePointer(userId);
+    clearSavedBatchCacheForUser(userId);
     return false;
   }, [
     applySavedBatchCacheEntry,
@@ -4138,6 +4507,10 @@ export default function HomePage() {
   useEffect(() => {
     if (userId) return;
     savedBatchCacheContextRef.current = null;
+    savedSearchBootstrapInFlightForUserRef.current = null;
+    savedSearchBootstrapCompletedForUserRef.current = null;
+    setSavedSearchRefreshing(false);
+    setSavedSearchRefreshError(null);
   }, [userId]);
 
   const uploadFacebookCookiePayload = useCallback(async (cookiePayload: unknown) => {
@@ -4586,6 +4959,7 @@ export default function HomePage() {
       selectedSort = sortBy,
       selectedLimit = limit,
       refresh = false,
+      background = false,
     }: SavedSearchRunOptions = {},
   ) => {
     const activeEntries = getRunnableSavedSearchBatch(savedSearches);
@@ -4610,19 +4984,25 @@ export default function HomePage() {
     };
     const previousCacheContext = savedBatchCacheContextRef.current;
     fetchInFlightRef.current = true;
-    setSearchLoading(true);
     setLoadingMore(false);
-    setError(null);
-    resetCopilotConversation();
-    setRawResults([]);
-    setResults([]);
-    setNextOffset(null);
-    setTotal(null);
-    setSourceErrors({});
-    setSavedBatchPagination(null);
-    setHasSearched(false);
-    setActiveSavedSearchId(null);
-    seenKeysRef.current = new Set();
+    setSavedSearchRefreshError(null);
+    if (background) {
+      setSavedSearchRefreshing(true);
+    } else {
+      setSavedSearchRefreshing(false);
+      setSearchLoading(true);
+      setError(null);
+      resetCopilotConversation();
+      setRawResults([]);
+      setResults([]);
+      setNextOffset(null);
+      setTotal(null);
+      setSourceErrors({});
+      setSavedBatchPagination(null);
+      setHasSearched(false);
+      setActiveSavedSearchId(null);
+      seenKeysRef.current = new Set();
+    }
     const seededLaneStart = computeSavedBatchSeed(activeEntries);
     savedBatchLaneStartRef.current = seededLaneStart;
     const savedSearchSignature = buildSavedBatchSignature(activeEntries);
@@ -4684,11 +5064,23 @@ export default function HomePage() {
       }
 
       if (activeEntries.length > 0 && failures.length === activeEntries.length) {
-        throw new Error(`Failed to auto-load saved searches: ${failures[0]}`);
+        throw new Error(
+          background
+            ? `Saved searches refresh failed: ${failures[0]}`
+            : `Failed to auto-load saved searches: ${failures[0]}`,
+        );
       }
 
       if (failures.length > 0) {
-        setError(`Some saved searches failed to load (${failures.length}/${activeEntries.length}).`);
+        if (background) {
+          setSavedSearchRefreshError(
+            `Some saved searches failed to refresh (${failures.length}/${activeEntries.length}).`,
+          );
+        } else {
+          setError(`Some saved searches failed to load (${failures.length}/${activeEntries.length}).`);
+        }
+      } else if (background) {
+        setSavedSearchRefreshError(null);
       }
 
       setRawResults(dedupedResults);
@@ -4702,6 +5094,7 @@ export default function HomePage() {
       setSavedBatchPagination(nextSavedBatchPagination);
       setTotal(batchHasMore ? null : dedupedResults.length);
       setNextOffset(null);
+      setActiveSavedSearchId(null);
       setActiveQuery("Saved searches");
       setActiveSources(
         Array.from(
@@ -4718,7 +5111,13 @@ export default function HomePage() {
         locationSignature,
       };
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to auto-load saved searches");
+      if (background) {
+        setSavedSearchRefreshError(
+          err instanceof Error ? err.message : "Saved searches refresh failed.",
+        );
+      } else {
+        setError(err instanceof Error ? err.message : "Failed to auto-load saved searches");
+      }
       savedBatchCacheContextRef.current = previousCacheContext;
       if (previousState.hasSearched) {
         setRawResults(previousState.rawResults);
@@ -4738,7 +5137,11 @@ export default function HomePage() {
         savedBatchLaneStartRef.current = previousState.laneStart;
       }
     } finally {
-      setSearchLoading(false);
+      if (background) {
+        setSavedSearchRefreshing(false);
+      } else {
+        setSearchLoading(false);
+      }
       fetchInFlightRef.current = false;
     }
   }, [
@@ -4757,6 +5160,7 @@ export default function HomePage() {
     resetCopilotConversation,
     resultMode,
     results,
+    setSavedSearchRefreshError,
     sortBy,
     sourceErrors,
     total,
@@ -4778,7 +5182,7 @@ export default function HomePage() {
       limit: activeLimit,
     });
     writeSavedBatchCacheEntry(key, {
-      version: 1,
+      version: 2,
       userId,
       savedSearchSignature: cacheContext.savedSearchSignature,
       locationSignature: cacheContext.locationSignature,
@@ -4795,7 +5199,7 @@ export default function HomePage() {
       laneStart: savedBatchLaneStartRef.current,
     });
     writeSavedBatchCachePointer(userId, {
-      version: 1,
+      version: 2,
       key,
       userId,
       savedSearchSignature: cacheContext.savedSearchSignature,
@@ -4979,40 +5383,77 @@ export default function HomePage() {
   }
 
   useEffect(() => {
-    if (!accountLocationReady) return;
-    if (user) {
-      void (async () => {
-        try {
-          const fetched = await fetchSavedSearches();
-          void fetchNotifications({ refreshSavedSearches: true });
-          if (!fetched) return;
+    if (authLoading) return;
 
-          if (autoLoadedSavedForUserRef.current === user.id) return;
-          autoLoadedSavedForUserRef.current = user.id;
-
-          if (restoreSavedBatchFromCache(fetched)) {
-            return;
-          }
-
-          if (getRunnableSavedSearchBatch(fetched).length > 0) {
-            await runAllSavedSearches(fetched, { refresh: false });
-          }
-        } finally {
-          setSavedSearchBootstrapReady(true);
-        }
-      })();
-    } else {
-      autoLoadedSavedForUserRef.current = null;
+    if (!user?.id) {
+      savedSearchBootstrapInFlightForUserRef.current = null;
+      savedSearchBootstrapCompletedForUserRef.current = null;
       savedBatchCacheContextRef.current = null;
       setSaved([]);
       setNotifications([]);
+      setSavedSearchRefreshing(false);
+      setSavedSearchRefreshError(null);
       setSavedSearchBootstrapReady(true);
+      return;
     }
+
+    if (!accessToken || !accountLocationReady) return;
+    if (savedSearchBootstrapCompletedForUserRef.current === user.id) {
+      return;
+    }
+    if (savedSearchBootstrapInFlightForUserRef.current === user.id) {
+      return;
+    }
+
+    savedSearchBootstrapInFlightForUserRef.current = user.id;
+    let cancelled = false;
+
+    void (async () => {
+      let completed = false;
+      try {
+        const fetched = await fetchSavedSearches();
+        void fetchNotifications();
+        if (cancelled) return;
+        if (!fetched) return;
+
+        const runnableEntries = getRunnableSavedSearchBatch(fetched);
+        if (fetched.length === 0 || runnableEntries.length === 0) {
+          clearSavedBatchCacheForUser(user.id);
+          completed = true;
+          return;
+        }
+
+        if (restoreSavedBatchFromCache(fetched)) {
+          completed = true;
+          void runAllSavedSearches(fetched, { refresh: false, background: true });
+          return;
+        }
+
+        await runAllSavedSearches(fetched, { refresh: false });
+        if (cancelled) return;
+        completed = true;
+      } finally {
+        if (cancelled) return;
+        savedSearchBootstrapInFlightForUserRef.current = null;
+        if (completed) {
+          savedSearchBootstrapCompletedForUserRef.current = user.id;
+        }
+        setSavedSearchBootstrapReady(true);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (savedSearchBootstrapInFlightForUserRef.current === user.id) {
+        savedSearchBootstrapInFlightForUserRef.current = null;
+      }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accessToken, accountLocationReady, user]);
+  }, [accessToken, accountLocationReady, authLoading, user?.id]);
 
   async function onSearch(e: React.FormEvent) {
     e.preventDefault();
+    if (savedSearchRefreshing) return;
     const query = q.trim();
     if (!query || sources.length === 0) return;
 
@@ -5140,6 +5581,7 @@ export default function HomePage() {
 
   async function onRunSavedSearch(id: number) {
     try {
+      if (savedSearchRefreshing) return;
       const savedSearch = saved.find((entry) => entry.id === id);
       if (!savedSearch) throw new Error("Saved search not found.");
       const blockedReason = getSavedSearchBlockedReason(savedSearch);
@@ -5167,6 +5609,7 @@ export default function HomePage() {
   }
 
   async function onChangeSort(nextSort: SortOption) {
+    if (savedSearchRefreshing) return;
     const currentSort = sortBy;
     setSortBy(nextSort);
     setActiveSort(nextSort);
@@ -5603,7 +6046,6 @@ export default function HomePage() {
       }
       const json = (await res.json()) as CopilotResponse;
       if (copilotSessionVersionRef.current !== sessionVersion) return;
-      setLatestShortlist(json.shortlist);
       setCopilotMessages((prev) => [
         ...prev,
         {
@@ -5611,6 +6053,7 @@ export default function HomePage() {
           role: "assistant",
           content: buildAssistantConversationContent(json),
           answer: json.answer,
+          shortlist: json.shortlist,
           seller_questions: json.seller_questions,
           red_flags: json.red_flags,
           available: json.available,
@@ -5698,6 +6141,8 @@ export default function HomePage() {
       saved={saved}
       savedLoading={savedLoading}
       savedError={savedError}
+      savedSearchRefreshing={savedSearchRefreshing}
+      savedSearchRefreshError={savedSearchRefreshError}
       notifications={notifications}
       notificationsLoading={notificationsLoading}
       notificationsError={notificationsError}
@@ -5747,7 +6192,6 @@ export default function HomePage() {
       copilotLoading={copilotLoading}
       copilotError={copilotError}
       copilotMessages={copilotMessages}
-      latestShortlist={latestShortlist}
       copilotSelectionMode={copilotSelectionMode}
       toggleCopilotSelectionMode={toggleCopilotSelectionMode}
       copilotSelectedListingKeys={copilotSelectedListingKeys}

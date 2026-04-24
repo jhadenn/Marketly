@@ -76,6 +76,28 @@ def test_cache_key_varies_by_search_location_context():
     assert key_a != key_b
 
 
+def test_cache_key_ignores_deprecated_source_balance_setting(monkeypatch):
+    monkeypatch.setattr(response_cache.settings, "MARKETLY_BALANCE_MULTI_SOURCE_RESULTS", True)
+    key_balanced = response_cache.build_search_response_cache_key(
+        query="bike",
+        sources=["kijiji", "ebay", "facebook"],
+        limit=24,
+        offset=0,
+        sort="relevance",
+    )
+
+    monkeypatch.setattr(response_cache.settings, "MARKETLY_BALANCE_MULTI_SOURCE_RESULTS", False)
+    key_relevance_first = response_cache.build_search_response_cache_key(
+        query="bike",
+        sources=["kijiji", "ebay", "facebook"],
+        limit=24,
+        offset=0,
+        sort="relevance",
+    )
+
+    assert key_balanced == key_relevance_first
+
+
 def test_response_cache_roundtrip(monkeypatch):
     fake_redis = FakeRedis()
     monkeypatch.setattr(response_cache.settings, "MARKETLY_RESPONSE_CACHE_ENABLED", True)

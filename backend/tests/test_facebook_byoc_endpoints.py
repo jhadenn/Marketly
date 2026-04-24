@@ -1,11 +1,17 @@
+import base64
+import os
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
 from app.auth import get_current_user_id
-from app.connectors.facebook_marketplace import FacebookConnectorError, FacebookConnectorErrorCode
+from app.core.config import settings
+from app.connectors.facebook_marketplace import FacebookConnectorErrorCode
 from app.db import get_db
 from app.main import app
+from app.services.facebook_verification import FacebookCredentialVerificationOutcome
+
+from .utils import db_override_factory, build_test_session_factory
 
 client = TestClient(app)
 
@@ -16,6 +22,10 @@ def _override_auth():
 
 def _override_db():
     yield SimpleNamespace()
+
+
+def _fernet_key() -> str:
+    return base64.urlsafe_b64encode(os.urandom(32)).decode("utf-8")
 
 
 def test_me_facebook_status_requires_auth():
@@ -71,29 +81,20 @@ def test_me_facebook_verify_returns_typed_error(monkeypatch):
     )
 
     monkeypatch.setattr("app.main.get_user_facebook_credential", lambda db, user_id: row)
-    monkeypatch.setattr(
-        "app.main.decrypt_cookie_payload",
-        lambda value: [{"name": "c_user"}, {"name": "xs"}, {"name": "fr"}, {"name": "datr"}],
-    )
-
-    class FakeConnector:
-        async def search(self, payload):
-            raise FacebookConnectorError(
-                FacebookConnectorErrorCode.login_wall,
-                "Login wall detected",
-                retryable=False,
-            )
-
     calls = {"failed": 0}
 
-    def fake_mark_failed(db, row_obj, **kwargs):
+    async def fake_verify_facebook_credential(db, row_obj):
         calls["failed"] += 1
         row_obj.status = "verification_failed"
-        row_obj.last_error_code = kwargs.get("error_code")
-        row_obj.last_error_message = kwargs.get("error_message")
+        row_obj.last_error_code = FacebookConnectorErrorCode.login_wall.value
+        row_obj.last_error_message = "Login wall detected"
+        return FacebookCredentialVerificationOutcome(
+            ok=False,
+            error_code=FacebookConnectorErrorCode.login_wall.value,
+            error_message="Login wall detected",
+        )
 
-    monkeypatch.setattr("app.main.facebook_connector", FakeConnector())
-    monkeypatch.setattr("app.main.mark_credential_failed", fake_mark_failed)
+    monkeypatch.setattr("app.main.verify_facebook_credential", fake_verify_facebook_credential)
 
     response = client.post("/me/connectors/facebook/verify")
 
@@ -125,3 +126,121 @@ def test_me_facebook_put_rate_limited(monkeypatch):
     payload = response.json()
     assert payload["code"] == "RATE_LIMITED"
     assert payload["retry_after_seconds"] == 30
+
+
+def test_facebook_helper_pair_and_sync_flow(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+    monkeypatch.setattr(settings, "MARKETLY_CREDENTIALS_ENCRYPTION_KEY", _fernet_key())
+
+    pair_res = client.post(
+        "/me/connectors/facebook/helper/pairing-sessions",
+        json={"helper_label": "Chrome helper"},
+    )
+    assert pair_res.status_code == 200
+    pairing_payload = pair_res.json()
+    assert pairing_payload["helper_label"] == "Chrome helper"
+    assert pairing_payload["pairing_code"]
+
+    redeem_res = client.post(
+        "/connectors/facebook/helper/pair",
+        json={"pairing_code": pairing_payload["pairing_code"]},
+    )
+    assert redeem_res.status_code == 200
+    redeem_payload = redeem_res.json()
+    helper_token = redeem_payload["helper_token"]
+    assert helper_token
+
+    sync_res = client.put(
+        "/connectors/facebook/helper/cookies",
+        headers={"Authorization": f"Bearer {helper_token}"},
+        json={
+            "cookies_json": [
+                {
+                    "name": "c_user",
+                    "value": "1",
+                    "domain": ".facebook.com",
+                    "path": "/",
+                    "expires": 1893456000,
+                },
+                {"name": "xs", "value": "abc", "domain": ".facebook.com", "path": "/"},
+                {"name": "fr", "value": "frv", "domain": ".facebook.com", "path": "/"},
+                {"name": "datr", "value": "datr", "domain": ".facebook.com", "path": "/"},
+            ]
+        },
+    )
+    assert sync_res.status_code == 200
+    sync_payload = sync_res.json()
+    assert sync_payload["configured"] is True
+    assert sync_payload["credential_source"] == "browser_helper"
+    assert sync_payload["helper_connected"] is True
+    assert sync_payload["helper_label"] == "Chrome helper"
+    assert sync_payload["last_synced_at"] is not None
+
+    status_res = client.get("/me/connectors/facebook")
+    assert status_res.status_code == 200
+    status_payload = status_res.json()
+    assert status_payload["credential_source"] == "browser_helper"
+    assert status_payload["helper_connected"] is True
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_delete_facebook_helper_revokes_existing_helper_token(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+    monkeypatch.setattr(settings, "MARKETLY_CREDENTIALS_ENCRYPTION_KEY", _fernet_key())
+
+    pair_res = client.post(
+        "/me/connectors/facebook/helper/pairing-sessions",
+        json={"helper_label": "Chrome helper"},
+    )
+    redeem_res = client.post(
+        "/connectors/facebook/helper/pair",
+        json={"pairing_code": pair_res.json()["pairing_code"]},
+    )
+    helper_token = redeem_res.json()["helper_token"]
+    sync_res = client.put(
+        "/connectors/facebook/helper/cookies",
+        headers={"Authorization": f"Bearer {helper_token}"},
+        json={
+            "cookies_json": [
+                {"name": "c_user", "value": "1", "domain": ".facebook.com", "path": "/"},
+                {"name": "xs", "value": "abc", "domain": ".facebook.com", "path": "/"},
+                {"name": "fr", "value": "frv", "domain": ".facebook.com", "path": "/"},
+                {"name": "datr", "value": "datr", "domain": ".facebook.com", "path": "/"},
+            ]
+        },
+    )
+    assert sync_res.status_code == 200
+
+    delete_res = client.delete("/me/connectors/facebook/helper")
+    assert delete_res.status_code == 200
+    assert delete_res.json()["revoked_clients"] == 1
+
+    denied_sync_res = client.put(
+        "/connectors/facebook/helper/cookies",
+        headers={"Authorization": f"Bearer {helper_token}"},
+        json={
+            "cookies_json": [
+                {"name": "c_user", "value": "1", "domain": ".facebook.com", "path": "/"},
+                {"name": "xs", "value": "abc", "domain": ".facebook.com", "path": "/"},
+                {"name": "fr", "value": "frv", "domain": ".facebook.com", "path": "/"},
+                {"name": "datr", "value": "datr", "domain": ".facebook.com", "path": "/"},
+            ]
+        },
+    )
+    assert denied_sync_res.status_code == 401
+
+    status_res = client.get("/me/connectors/facebook")
+    assert status_res.status_code == 200
+    status_payload = status_res.json()
+    assert status_payload["configured"] is True
+    assert status_payload["helper_connected"] is False
+    assert status_payload["stale_reason"] == "helper_disconnected"
+
+    app.dependency_overrides.clear()
+    engine.dispose()

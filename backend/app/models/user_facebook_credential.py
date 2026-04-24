@@ -11,11 +11,16 @@ class UserFacebookCredential(Base):
     encrypted_cookie_json = Column(Text, nullable=False)
     cookie_fingerprint_sha256 = Column(String(64), nullable=False)
     cookie_count = Column(Integer, nullable=False, default=0)
+    credential_source = Column(String, nullable=False, default="manual_upload")
+    session_cookie_count = Column(Integer, nullable=False, default=0)
     status = Column(String, nullable=False, default="active")
     last_error_code = Column(String, nullable=True)
     last_error_message = Column(Text, nullable=True)
     last_validated_at = Column(DateTime(timezone=True), nullable=True)
     last_used_at = Column(DateTime(timezone=True), nullable=True)
+    last_synced_at = Column(DateTime(timezone=True), nullable=True)
+    earliest_cookie_expiry_at = Column(DateTime(timezone=True), nullable=True)
+    helper_label = Column(String(120), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True),

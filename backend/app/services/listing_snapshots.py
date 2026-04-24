@@ -20,6 +20,7 @@ def persist_listing_snapshots(
     listings: list[Listing],
     user_id: object | None = None,
     saved_search_id: int | None = None,
+    observed_at: datetime | None = None,
     db: Session | None = None,
 ) -> int:
     if not listings:
@@ -46,6 +47,7 @@ def persist_listing_snapshots(
                 image_count=len(item.image_urls or []),
                 url=item.url,
                 valuation_key=valuation_key_for_listing(query, item),
+                observed_at=observed_at,
             )
             for item in listings
         ]
@@ -84,3 +86,21 @@ def previously_seen_fingerprints(
     rows = query.distinct().all()
 
     return {str(row[0]) for row in rows if row and row[0]}
+
+
+def has_historical_snapshot_baseline(
+    db: Session,
+    *,
+    saved_search_id: int,
+    seen_before: datetime | None,
+) -> bool:
+    if seen_before is None:
+        return False
+
+    row = (
+        db.query(ListingSnapshot.id)
+        .filter(ListingSnapshot.saved_search_id == saved_search_id)
+        .filter(ListingSnapshot.observed_at <= seen_before)
+        .first()
+    )
+    return row is not None

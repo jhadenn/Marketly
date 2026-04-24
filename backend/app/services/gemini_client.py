@@ -157,36 +157,35 @@ async def request_gemini_structured_json(
     raise RuntimeError("Gemini response did not include structured text output.")
 
 
-async def generate_alert_summary(query: str, items: list[dict]) -> str:
-    if not items:
-        return f"No strong new matches were found for '{query}'."
-
-    fallback = _fallback_alert_summary(query, items)
+async def generate_price_estimate(
+    *,
+    query: str,
+    title: str | None,
+    snippet: str | None,
+    condition: str | None,
+    currency: str,
+) -> dict | None:
     if not gemini_is_configured():
-        return fallback
+        return None
 
     schema = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "summary": {"type": "string"},
+            "estimated_low": {"type": "number"},
+            "estimated_high": {"type": "number"},
+            "median_price": {"type": "number"},
+            "explanation": {"type": "string"},
         },
-        "required": ["summary"],
+        "required": ["estimated_low", "estimated_high", "median_price", "explanation"],
     }
     prompt = json.dumps(
         {
             "query": query,
-            "items": [
-                {
-                    "title": item.get("title"),
-                    "source": item.get("source"),
-                    "location": item.get("location"),
-                    "match_confidence": item.get("match_confidence"),
-                    "valuation_explanation": (item.get("valuation") or {}).get("explanation"),
-                    "risk_level": (item.get("risk") or {}).get("level"),
-                }
-                for item in items[:5]
-            ],
+            "title": title,
+            "snippet": snippet,
+            "condition": condition,
+            "currency": currency,
         },
         ensure_ascii=True,
     )
@@ -194,31 +193,38 @@ async def generate_alert_summary(query: str, items: list[dict]) -> str:
         result = await request_gemini_structured_json(
             schema=schema,
             instructions=(
-                "Write one concise sentence summarizing the best new Marketplace matches. "
-                "Use only the provided data, stay factual, and avoid hype."
+                "Estimate a rough used-market price band for the described marketplace item. "
+                "Return values in the supplied currency as plain numbers. "
+                "Base the band on broad category knowledge; this is a cold-start prior, "
+                "not a precise valuation. Keep the explanation short and factual."
             ),
             prompt=prompt,
         )
     except Exception as exc:
-        logger.warning("alert summary generation failed: %s", exc)
-        return fallback
+        logger.warning("price estimate generation failed: %s", exc)
+        return None
 
-    summary = str(result.get("summary") or "").strip()
-    return summary or fallback
+    try:
+        low = float(result.get("estimated_low"))
+        high = float(result.get("estimated_high"))
+        median_price = float(result.get("median_price"))
+    except (TypeError, ValueError):
+        return None
+
+    if low <= 0 or high <= 0 or median_price <= 0:
+        return None
+    if high < low:
+        low, high = high, low
+
+    explanation = str(result.get("explanation") or "").strip()
+    return {
+        "estimated_low": low,
+        "estimated_high": high,
+        "median_price": median_price,
+        "explanation": explanation or "Rough category-prior estimate from general marketplace knowledge.",
+    }
 
 
-def _fallback_alert_summary(query: str, items: list[dict]) -> str:
-    count = len(items)
-    standout = next(
-        (
-            item
-            for item in items
-            if (item.get("valuation") or {}).get("verdict") == "underpriced"
-        ),
-        items[0],
-    )
-    standout_title = str(standout.get("title") or "listing").strip()
-    return f"{count} new high-confidence matches for '{query}', led by {standout_title}."
 
 
 async def generate_copilot_response(

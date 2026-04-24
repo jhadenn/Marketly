@@ -13,9 +13,9 @@ def _fernet_key() -> str:
 
 def _cookie_payload(extra: dict | None = None):
     payload = [
-        {"name": "c_user", "value": "1", "domain": ".facebook.com", "path": "/"},
+        {"name": "c_user", "value": "1", "domain": ".facebook.com", "path": "/", "expires": 1893456000},
         {"name": "xs", "value": "abc", "domain": ".facebook.com", "path": "/"},
-        {"name": "fr", "value": "frv", "domain": ".facebook.com", "path": "/"},
+        {"name": "fr", "value": "frv", "domain": ".facebook.com", "path": "/", "expires": 1893542400},
         {"name": "datr", "value": "datr", "domain": ".facebook.com", "path": "/"},
     ]
     if extra:
@@ -30,6 +30,8 @@ def test_parse_and_validate_cookie_payload_accepts_array():
     assert "c_user" in meta["cookie_names"]
     assert "xs" in meta["cookie_names"]
     assert len(meta["cookie_fingerprint_sha256"]) == 64
+    assert meta["session_cookie_count"] == 2
+    assert str(meta["earliest_cookie_expiry_at"]).startswith("2030-01-01")
 
 
 def test_parse_and_validate_cookie_payload_accepts_wrapped_object():
@@ -90,3 +92,8 @@ def test_fingerprint_changes_when_cookie_changes():
         _cookie_payload({"name": "presence", "value": "v", "domain": ".facebook.com", "path": "/"})
     )
     assert meta_a["cookie_fingerprint_sha256"] != meta_b["cookie_fingerprint_sha256"]
+
+
+def test_normalize_helper_label_uses_default_for_blank():
+    assert facebook_credentials.normalize_helper_label("   ") == "Browser Helper"
+    assert facebook_credentials.normalize_helper_label("Edge helper") == "Edge helper"

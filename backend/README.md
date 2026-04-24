@@ -4,11 +4,17 @@
 
 - Facebook unified search uses per-user BYOC (bring your own cookies), not a shared server cookie.
 - Configure `MARKETLY_CREDENTIALS_ENCRYPTION_KEY` (Fernet key) before using BYOC endpoints.
+- Hosted deployments can now pair a local browser helper instead of relying on a static cookie export.
 - Logged-in users manage cookies via:
   - `GET /me/connectors/facebook`
   - `PUT /me/connectors/facebook/cookies`
   - `POST /me/connectors/facebook/verify`
   - `DELETE /me/connectors/facebook`
+- Browser-helper endpoints:
+  - `POST /me/connectors/facebook/helper/pairing-sessions`
+  - `POST /connectors/facebook/helper/pair`
+  - `PUT /connectors/facebook/helper/cookies`
+  - `DELETE /me/connectors/facebook/helper`
 - `GET /search` accepts optional `latitude`, `longitude`, and `radius_km`.
 
 ## AI insights, alerts, and copilot

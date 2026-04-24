@@ -8,13 +8,16 @@ from app.models.listing import Listing, ListingRisk, ListingValuation, Money, So
 from app.models.listing_snapshot import ListingSnapshot
 from app.models.saved_search import SavedSearch
 from app.models.saved_search_notification import SavedSearchNotification
+from app.models.user_facebook_credential import UserFacebookCredential
 from app.models.user_location_preference import UserLocationPreference
 from app.services.alerts import (
+    ALERT_BASELINE_VERSION,
     execute_saved_search_alert_check,
     refresh_saved_search_alerts_for_user,
     run_saved_search_alert_check,
     run_saved_search_alert_job,
 )
+from app.services.facebook_verification import FacebookCredentialVerificationOutcome
 from app.services.location import get_user_location_preference
 from app.services.listing_insights import listing_fingerprint
 
@@ -61,6 +64,11 @@ def _build_listing(
     )
 
 
+def _mark_verified_baseline(saved_search: SavedSearch, *, result_count: int) -> None:
+    saved_search.last_alert_baseline_version = ALERT_BASELINE_VERSION
+    saved_search.last_alert_result_count = result_count
+
+
 def test_run_saved_search_alert_job_creates_digest_for_new_high_confidence_listing(monkeypatch):
     engine, session_factory = build_test_session_factory()
     db = session_factory()
@@ -75,6 +83,8 @@ def test_run_saved_search_alert_job_creates_digest_for_new_high_confidence_listi
     db.add(saved_search)
     db.commit()
     db.refresh(saved_search)
+    _mark_verified_baseline(saved_search, result_count=1)
+    db.commit()
 
     seen_listing = _build_listing(
         source_listing_id="old-1",
@@ -151,6 +161,8 @@ def test_run_saved_search_alert_job_creates_digest_for_new_high_confidence_listi
     assert notifications[0].summary_text == "1 new listing for road bike"
     assert notifications[0].items_json[0]["source_listing_id"] == "new-1"
     assert captured["sort"] == "newest"
+    assert saved_search.last_alert_baseline_version == ALERT_BASELINE_VERSION
+    assert saved_search.last_alert_result_count == 2
     assert saved_search.last_alert_notified_at is not None
     assert saved_search.last_alert_checked_at is not None
 
@@ -203,9 +215,337 @@ def test_run_saved_search_alert_job_baselines_first_check_without_creating_diges
     assert notifications == []
     assert saved_search.last_alert_attempted_at is not None
     assert saved_search.last_alert_checked_at is not None
+    assert saved_search.last_alert_baseline_version == ALERT_BASELINE_VERSION
+    assert saved_search.last_alert_result_count == 1
     assert saved_search.last_alert_error_code is None
     assert saved_search.last_alert_error_message is None
     assert saved_search.last_alert_notified_at is None
+
+    db.close()
+    engine.dispose()
+
+
+def test_run_saved_search_alert_job_uses_persisted_baseline_timestamp_for_new_only_alerts(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    db = session_factory()
+
+    saved_search = SavedSearch(
+        user_id="user-persisted-baseline",
+        query="road bike",
+        sources="ebay",
+        alerts_enabled=True,
+        last_alert_checked_at=None,
+    )
+    db.add(saved_search)
+    db.commit()
+    db.refresh(saved_search)
+
+    seen_listing = _build_listing(
+        source_listing_id="persisted-old-1",
+        title="Road bike persisted baseline",
+        price_amount=500,
+        snippet="Older listing still present.",
+    )
+    new_listing = _build_listing(
+        source_listing_id="persisted-new-1",
+        title="Road bike persisted new listing",
+        price_amount=410,
+        snippet="Fresh listing.",
+    )
+    search_results = iter(
+        [
+            [seen_listing],
+            [seen_listing, new_listing],
+        ]
+    )
+
+    async def fake_unified_search(**kwargs):
+        return next(search_results), None, None, {}
+
+    monkeypatch.setattr("app.services.alerts.unified_search", fake_unified_search)
+    monkeypatch.setattr("app.services.alerts.enrich_listings_with_insights", lambda db, query, results: results)
+
+    first_result = asyncio.run(
+        run_saved_search_alert_job(
+            db,
+            limit_per_search=20,
+            user_id="user-persisted-baseline",
+        )
+    )
+
+    db.refresh(saved_search)
+    baseline_snapshot = (
+        db.query(ListingSnapshot)
+        .filter(ListingSnapshot.saved_search_id == saved_search.id)
+        .filter(ListingSnapshot.source_listing_id == "persisted-old-1")
+        .one()
+    )
+
+    assert first_result["checked"] == 1
+    assert first_result["notifications_created"] == 0
+    assert _as_utc(saved_search.last_alert_checked_at) == _as_utc(baseline_snapshot.observed_at)
+    assert saved_search.last_alert_baseline_version == ALERT_BASELINE_VERSION
+    assert saved_search.last_alert_result_count == 1
+
+    second_result = asyncio.run(
+        run_saved_search_alert_job(
+            db,
+            limit_per_search=20,
+            user_id="user-persisted-baseline",
+        )
+    )
+
+    notifications = (
+        db.query(SavedSearchNotification)
+        .filter(SavedSearchNotification.user_id == "user-persisted-baseline")
+        .all()
+    )
+
+    assert second_result["checked"] == 1
+    assert second_result["notifications_created"] == 1
+    assert len(notifications) == 1
+    assert notifications[0].items_json[0]["source_listing_id"] == "persisted-new-1"
+
+    db.close()
+    engine.dispose()
+
+
+def test_run_saved_search_alert_job_baselines_zero_result_check_without_creating_digest(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    db = session_factory()
+
+    saved_search = SavedSearch(
+        user_id="user-zero-baseline",
+        query="acura rsx",
+        sources="ebay",
+        alerts_enabled=True,
+        last_alert_checked_at=None,
+    )
+    db.add(saved_search)
+    db.commit()
+    db.refresh(saved_search)
+
+    async def fake_unified_search(**kwargs):
+        return [], None, None, {}
+
+    monkeypatch.setattr("app.services.alerts.unified_search", fake_unified_search)
+    monkeypatch.setattr("app.services.alerts.enrich_listings_with_insights", lambda db, query, results: results)
+    monkeypatch.setattr("app.services.alerts.persist_listing_snapshots", lambda **kwargs: 0)
+
+    result = asyncio.run(
+        run_saved_search_alert_job(
+            db,
+            limit_per_search=20,
+            user_id="user-zero-baseline",
+        )
+    )
+
+    notifications = db.query(SavedSearchNotification).all()
+    db.refresh(saved_search)
+
+    assert result["checked"] == 1
+    assert result["notifications_created"] == 0
+    assert notifications == []
+    assert saved_search.last_alert_checked_at is not None
+    assert saved_search.last_alert_baseline_version == ALERT_BASELINE_VERSION
+    assert saved_search.last_alert_result_count == 0
+    assert saved_search.last_alert_notified_at is None
+
+    db.close()
+    engine.dispose()
+
+
+def test_run_saved_search_alert_job_rebuilds_legacy_baseline_and_clears_notifications(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    db = session_factory()
+    previous_check = datetime.now(timezone.utc) - timedelta(days=1)
+
+    saved_search = SavedSearch(
+        user_id="user-legacy-baseline",
+        query="road bike",
+        sources="ebay",
+        alerts_enabled=True,
+        last_alert_attempted_at=previous_check - timedelta(minutes=5),
+        last_alert_checked_at=previous_check,
+        last_alert_notified_at=previous_check - timedelta(minutes=1),
+    )
+    db.add(saved_search)
+    db.commit()
+    db.refresh(saved_search)
+    db.add(
+        SavedSearchNotification(
+            user_id="user-legacy-baseline",
+            saved_search_id=saved_search.id,
+            saved_search_query=saved_search.query,
+            summary_text="legacy",
+            items_json=[{"source_listing_id": "legacy-1"}],
+        )
+    )
+    db.commit()
+
+    current_listing = _build_listing(
+        source_listing_id="legacy-1",
+        title="Road bike legacy baseline",
+        price_amount=450,
+        snippet="Current result.",
+    )
+
+    async def fake_unified_search(**kwargs):
+        return [current_listing], None, None, {}
+
+    monkeypatch.setattr("app.services.alerts.unified_search", fake_unified_search)
+    monkeypatch.setattr("app.services.alerts.enrich_listings_with_insights", lambda db, query, results: results)
+    monkeypatch.setattr("app.services.alerts.persist_listing_snapshots", lambda **kwargs: len(kwargs["listings"]))
+
+    result = asyncio.run(
+        run_saved_search_alert_job(
+            db,
+            limit_per_search=20,
+            user_id="user-legacy-baseline",
+        )
+    )
+
+    notifications = (
+        db.query(SavedSearchNotification)
+        .filter(SavedSearchNotification.user_id == "user-legacy-baseline")
+        .all()
+    )
+    db.refresh(saved_search)
+
+    assert result["checked"] == 1
+    assert result["notifications_created"] == 0
+    assert notifications == []
+    assert _as_utc(saved_search.last_alert_checked_at) > previous_check
+    assert saved_search.last_alert_baseline_version == ALERT_BASELINE_VERSION
+    assert saved_search.last_alert_result_count == 1
+    assert saved_search.last_alert_notified_at is None
+
+    db.close()
+    engine.dispose()
+
+
+def test_run_saved_search_alert_job_rebuilds_missing_snapshot_baseline_without_notification(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    db = session_factory()
+    previous_check = datetime.now(timezone.utc) - timedelta(days=1)
+
+    saved_search = SavedSearch(
+        user_id="user-missing-snapshots",
+        query="road bike",
+        sources="ebay",
+        alerts_enabled=True,
+        last_alert_attempted_at=previous_check - timedelta(minutes=5),
+        last_alert_checked_at=previous_check,
+        last_alert_notified_at=previous_check - timedelta(minutes=1),
+    )
+    _mark_verified_baseline(saved_search, result_count=3)
+    db.add(saved_search)
+    db.commit()
+    db.refresh(saved_search)
+    db.add(
+        SavedSearchNotification(
+            user_id="user-missing-snapshots",
+            saved_search_id=saved_search.id,
+            saved_search_query=saved_search.query,
+            summary_text="stale",
+            items_json=[{"source_listing_id": "stale-1"}],
+        )
+    )
+    db.commit()
+
+    current_listing = _build_listing(
+        source_listing_id="same-1",
+        title="Road bike missing snapshots",
+        price_amount=470,
+        snippet="Current result.",
+    )
+
+    async def fake_unified_search(**kwargs):
+        return [current_listing], None, None, {}
+
+    monkeypatch.setattr("app.services.alerts.unified_search", fake_unified_search)
+    monkeypatch.setattr("app.services.alerts.enrich_listings_with_insights", lambda db, query, results: results)
+    monkeypatch.setattr("app.services.alerts.persist_listing_snapshots", lambda **kwargs: len(kwargs["listings"]))
+
+    result = asyncio.run(
+        run_saved_search_alert_job(
+            db,
+            limit_per_search=20,
+            user_id="user-missing-snapshots",
+        )
+    )
+
+    notifications = (
+        db.query(SavedSearchNotification)
+        .filter(SavedSearchNotification.user_id == "user-missing-snapshots")
+        .all()
+    )
+    db.refresh(saved_search)
+
+    assert result["checked"] == 1
+    assert result["notifications_created"] == 0
+    assert notifications == []
+    assert _as_utc(saved_search.last_alert_checked_at) > previous_check
+    assert saved_search.last_alert_baseline_version == ALERT_BASELINE_VERSION
+    assert saved_search.last_alert_result_count == 1
+    assert saved_search.last_alert_notified_at is None
+
+    db.close()
+    engine.dispose()
+
+
+def test_run_saved_search_alert_job_allows_alert_after_zero_result_baseline(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    db = session_factory()
+
+    saved_search = SavedSearch(
+        user_id="user-zero-followup",
+        query="road bike",
+        sources="ebay",
+        alerts_enabled=True,
+        last_alert_checked_at=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    _mark_verified_baseline(saved_search, result_count=0)
+    db.add(saved_search)
+    db.commit()
+    db.refresh(saved_search)
+
+    new_listing = _build_listing(
+        source_listing_id="new-zero-followup",
+        title="Road bike after zero baseline",
+        price_amount=420,
+        snippet="Fresh result.",
+    )
+
+    async def fake_unified_search(**kwargs):
+        return [new_listing], None, None, {}
+
+    monkeypatch.setattr("app.services.alerts.unified_search", fake_unified_search)
+    monkeypatch.setattr("app.services.alerts.enrich_listings_with_insights", lambda db, query, results: results)
+    monkeypatch.setattr("app.services.alerts.persist_listing_snapshots", lambda **kwargs: len(kwargs["listings"]))
+
+    result = asyncio.run(
+        run_saved_search_alert_job(
+            db,
+            limit_per_search=20,
+            user_id="user-zero-followup",
+        )
+    )
+
+    notifications = (
+        db.query(SavedSearchNotification)
+        .filter(SavedSearchNotification.user_id == "user-zero-followup")
+        .all()
+    )
+    db.refresh(saved_search)
+
+    assert result["checked"] == 1
+    assert result["notifications_created"] == 1
+    assert len(notifications) == 1
+    assert notifications[0].items_json[0]["source_listing_id"] == "new-zero-followup"
+    assert saved_search.last_alert_baseline_version == ALERT_BASELINE_VERSION
+    assert saved_search.last_alert_result_count == 1
+    assert saved_search.last_alert_notified_at is not None
 
     db.close()
     engine.dispose()
@@ -272,6 +612,75 @@ def test_run_saved_search_alert_job_skips_incomplete_source_results(monkeypatch)
     assert saved_search.last_alert_error_code == "LOGIN_REQUIRED"
     assert saved_search.last_alert_error_message == "Facebook: Facebook session expired."
     assert saved_search.last_alert_notified_at is None
+
+    db.close()
+    engine.dispose()
+
+
+def test_run_saved_search_alert_job_preflights_stale_facebook_helper(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    db = session_factory()
+
+    saved_search = SavedSearch(
+        user_id="user-helper",
+        query="road bike",
+        sources="facebook",
+        alerts_enabled=True,
+        last_alert_checked_at=None,
+    )
+    credential = UserFacebookCredential(
+        user_id="user-helper",
+        encrypted_cookie_json="encrypted",
+        cookie_fingerprint_sha256="a" * 64,
+        cookie_count=4,
+        credential_source="browser_helper",
+        session_cookie_count=2,
+        status="active",
+    )
+    db.add_all([saved_search, credential])
+    db.commit()
+    db.refresh(saved_search)
+
+    verification_calls = {"count": 0}
+    unified_search_calls = {"count": 0}
+
+    async def fake_ensure_facebook_credential_ready(db, row):
+        verification_calls["count"] += 1
+        return FacebookCredentialVerificationOutcome(
+            ok=False,
+            error_code="login_wall",
+            error_message=(
+                "Facebook browser helper is disconnected or stale. "
+                "Open Facebook in Chrome or Edge so the Marketly browser helper can resync, then try again."
+            ),
+        )
+
+    async def fake_unified_search(**kwargs):
+        unified_search_calls["count"] += 1
+        return [], None, None, {}
+
+    monkeypatch.setattr(
+        "app.services.alerts.ensure_facebook_credential_ready",
+        fake_ensure_facebook_credential_ready,
+    )
+    monkeypatch.setattr("app.services.alerts.unified_search", fake_unified_search)
+
+    result = asyncio.run(
+        run_saved_search_alert_job(
+            db,
+            limit_per_search=20,
+            user_id="user-helper",
+        )
+    )
+
+    db.refresh(saved_search)
+
+    assert result["checked"] == 1
+    assert result["notifications_created"] == 0
+    assert verification_calls["count"] == 1
+    assert unified_search_calls["count"] == 0
+    assert saved_search.last_alert_error_code == "LOGIN_REQUIRED"
+    assert "browser helper is disconnected or stale" in saved_search.last_alert_error_message.lower()
 
     db.close()
     engine.dispose()
@@ -446,6 +855,9 @@ def test_run_saved_search_alert_job_rolls_back_failed_search_and_continues(monke
     db.commit()
     db.refresh(failing_search)
     db.refresh(succeeding_search)
+    _mark_verified_baseline(failing_search, result_count=0)
+    _mark_verified_baseline(succeeding_search, result_count=0)
+    db.commit()
 
     async def fake_unified_search(**kwargs):
         query = kwargs["query"]
@@ -634,6 +1046,8 @@ def test_run_saved_search_alert_job_uses_stored_user_location(monkeypatch):
         )
     )
     db.commit()
+    _mark_verified_baseline(saved_search, result_count=0)
+    db.commit()
 
     captured: dict[str, object] = {}
 
@@ -721,6 +1135,8 @@ def test_run_saved_search_alert_check_normalizes_uuid_saved_search_user_ids(monk
     db.commit()
     db.refresh(saved_search)
     saved_search.user_id = user_id
+    _mark_verified_baseline(saved_search, result_count=0)
+    db.commit()
 
     captured: dict[str, object] = {}
 
@@ -773,6 +1189,8 @@ def test_execute_saved_search_alert_check_clears_prior_error_state_on_success(mo
     db.add(saved_search)
     db.commit()
     db.refresh(saved_search)
+    _mark_verified_baseline(saved_search, result_count=0)
+    db.commit()
 
     async def fake_unified_search(**kwargs):
         return [], 0, None, {}
@@ -818,6 +1236,8 @@ def test_execute_saved_search_alert_check_preserves_last_successful_check_on_fai
     db.add(saved_search)
     db.commit()
     db.refresh(saved_search)
+    _mark_verified_baseline(saved_search, result_count=0)
+    db.commit()
 
     async def fake_unified_search(**kwargs):
         return [], 0, None, {

@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     MARKETLY_FACEBOOK_OVERFETCH_BUFFER_MULTI_SOURCE: int = 2
     MARKETLY_FACEBOOK_MAX_SCRAPE_LIMIT: int = 32
     MARKETLY_FACEBOOK_MAX_SCRAPE_LIMIT_SINGLE_SOURCE: int = 120
+    MARKETLY_FACEBOOK_HELPER_PAIRING_TTL_SECONDS: int = 600
+    MARKETLY_FACEBOOK_HELPER_STALE_AFTER_SECONDS: int = 5400
+    MARKETLY_FACEBOOK_COOKIE_EXPIRY_STALE_WINDOW_SECONDS: int = 1800
+    MARKETLY_FACEBOOK_VERIFY_MAX_AGE_SECONDS: int = 21600
     MARKETLY_RESPONSE_CACHE_ENABLED: bool = True
     MARKETLY_RESPONSE_CACHE_TTL_SECONDS: int = 45
     MARKETLY_SAVED_SEARCH_RUN_CACHE_TTL_SECONDS: int = 300
@@ -58,6 +62,11 @@ class Settings(BaseSettings):
     MARKETLY_VALUATION_LOOKBACK_DAYS: int = 120
     MARKETLY_GEMINI_MODEL: str = "gemini-2.5-flash-lite"
     MARKETLY_GEMINI_TIMEOUT_SECONDS: float = 25.0
+    MARKETLY_EBAY_SEED_ENABLED: bool = False  # opportunistic snapshot seeding from eBay on cold-start queries
+    MARKETLY_EBAY_SEED_MIN_SNAPSHOT_COUNT: int = 8  # seed only when fewer than N valuation-key snapshots exist
+    MARKETLY_EBAY_SEED_FETCH_LIMIT: int = 20  # how many eBay results to pull per seeding pass
+    MARKETLY_GEMINI_PRICE_ESTIMATE_ENABLED: bool = False  # last-resort category-prior band via Gemini when no snapshots exist
+    MARKETLY_RATE_LIMIT_FB_INGEST_PER_MIN: int = 30  # per-user cap for browser-extension ingest requests
     MARKETLY_CREDENTIALS_ENCRYPTION_KEY: str | None = None
     GEMINI_API_KEY: str | None = None
     GEMINI_API_BASE: str = "https://generativelanguage.googleapis.com/v1beta"

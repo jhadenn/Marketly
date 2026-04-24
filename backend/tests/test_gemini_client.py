@@ -3,7 +3,6 @@ import json
 
 from app.core.config import settings
 from app.services.gemini_client import (
-    generate_alert_summary,
     generate_copilot_response,
     request_gemini_structured_json,
 )
@@ -79,24 +78,6 @@ def test_request_gemini_structured_json_uses_generate_content_payload(monkeypatc
     assert payload["generationConfig"]["responseJsonSchema"] == schema
     assert payload["systemInstruction"]["parts"][0]["text"] == "Return JSON only."
     assert payload["contents"][0]["parts"][0]["text"] == '{"query":"bike"}'
-
-
-def test_generate_alert_summary_returns_fallback_without_gemini_key(monkeypatch):
-    monkeypatch.setattr(settings, "GEMINI_API_KEY", None)
-
-    result = asyncio.run(
-        generate_alert_summary(
-            "road bike",
-            [
-                {
-                    "title": "Road bike listing",
-                    "valuation": {"verdict": "underpriced"},
-                }
-            ],
-        )
-    )
-
-    assert result == "1 new high-confidence matches for 'road bike', led by Road bike listing."
 
 
 def test_generate_copilot_response_returns_unavailable_without_gemini_key(monkeypatch):
