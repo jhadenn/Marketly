@@ -14,7 +14,9 @@
   - `POST /me/connectors/facebook/helper/pairing-sessions`
   - `POST /connectors/facebook/helper/pair`
   - `PUT /connectors/facebook/helper/cookies`
+  - `POST /connectors/facebook/helper/heartbeat`
   - `DELETE /me/connectors/facebook/helper`
+- `GET /me/connectors/facebook` returns helper health fields including `last_synced_at`, `helper_last_seen_at`, `last_error_message`, and typed `stale_reason`.
 - `GET /search` accepts optional `latitude`, `longitude`, and `radius_km`.
 
 ## AI insights, alerts, and copilot
@@ -25,6 +27,7 @@
   - `POST /me/notifications/{id}/read`
 - Saved searches are capped per user with `MARKETLY_SAVED_SEARCH_MAX_PER_USER`, and automatic batch runs only use the newest saved searches up to that cap.
 - `GET /me/notifications` now auto-refreshes stale alert-enabled saved searches before returning the latest digests.
+- By default, saved-search alerts remain strict: any source error fails that alert check. Set `MARKETLY_ALERTS_PARTIAL_SOURCE_SUCCESS_ENABLED=true` to let mixed-source alerts continue for healthy sources while persisting failed-source details on the saved search and notification payload.
 - The shopping copilot is available at `POST /copilot/query` and can answer broader marketplace-item questions even without loaded listings.
 - Gemini is the only configured AI provider. For low-cost local development, use a Gemini Developer API key from Google AI Studio and set `MARKETLY_GEMINI_MODEL=gemini-2.5-flash-lite`.
 - Run the alert digest job from cron or your scheduler as a fallback or batch backstop with:
@@ -80,6 +83,7 @@ MARKETLY_SEARCH_PAGINATION_CACHE_MAX_ITEMS=8
 MARKETLY_ALERTS_SEARCH_LIMIT=20
 MARKETLY_ALERTS_STALE_AFTER_SECONDS=28800
 MARKETLY_ALERTS_AUTO_REFRESH_WINDOW_SECONDS=300
+MARKETLY_ALERTS_PARTIAL_SOURCE_SUCCESS_ENABLED=false
 MARKETLY_VALUATION_LOOKBACK_DAYS=120
 MARKETLY_GEMINI_MODEL=gemini-2.5-flash-lite
 MARKETLY_GEMINI_TIMEOUT_SECONDS=25
@@ -133,3 +137,31 @@ MARKETLY_RATE_LIMIT_LOCAL_MAX_KEYS=5000
 
 Local fallback cache/rate limits are per-instance memory state and reset on restart.
 If you scale to multiple instances, configure Redis for shared and consistent behavior.
+
+## Production saved-search alert runbook
+
+Schedule `scripts/run_saved_search_alerts.py` as a cron or platform scheduler backstop in addition to opportunistic `GET /me/notifications` refreshes. Recommended frequency is every 15 minutes; each saved search still respects `MARKETLY_ALERTS_STALE_AFTER_SECONDS` before doing a real check, so frequent scheduler wakeups are cheap.
+
+Example cron:
+
+```cron
+*/15 * * * * cd /app && python scripts/run_saved_search_alerts.py --limit 20 >> /var/log/marketly-alerts.log 2>&1
+```
+
+Retry policy:
+- Let the scheduler retry on the next interval for transient connector or network failures.
+- Keep `MARKETLY_ALERTS_PARTIAL_SOURCE_SUCCESS_ENABLED=false` if you prefer all-or-nothing alerts.
+- Enable `MARKETLY_ALERTS_PARTIAL_SOURCE_SUCCESS_ENABLED=true` when production reliability favors eBay/Kijiji alerts continuing while Facebook is unavailable.
+
+Monitor these signals:
+- Non-zero `last_alert_error_code` or recurring `last_alert_source_errors_json.facebook`.
+- `helper_last_seen_at` older than `MARKETLY_FACEBOOK_HELPER_STALE_AFTER_SECONDS`.
+- `stale_reason` values: `helper_disconnected`, `cookie_expired`, `cookie_expiring_soon`, `facebook_session_invalid`.
+- Cron exit failures or logs containing `saved search alert run incomplete`.
+- Notification payloads with `source_errors.facebook`, which indicate partial-success delivery.
+
+Troubleshooting:
+- Invalid token: ask the user to disconnect and re-pair the helper. The extension status will show `Token invalid`.
+- Wrong developer API base: production users do not enter an API base. For local development, enable extension developer mode and use `http://127.0.0.1:8000`, not the frontend dev server at `http://localhost:3000`.
+- Helper disconnected: open Facebook in Chrome or Edge, then click `Sync now` in the extension options page. Re-pair if `helper_last_seen_at` stays stale.
+- Facebook checkpoint/login wall: open Facebook Marketplace in the browser account used for Marketly, resolve the prompt, then sync and re-verify.

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from app.models.listing import Source
+from app.models.listing import Source, SourceError
 
 
 class SavedSearchCreate(BaseModel):
@@ -24,6 +24,7 @@ class SavedSearchOut(BaseModel):
     last_alert_notified_at: str | None = None
     last_alert_error_code: str | None = None
     last_alert_error_message: str | None = None
+    last_alert_source_errors: dict[str, SourceError] = Field(default_factory=dict)
     next_alert_check_due_at: str | None = None
     created_at: str
 

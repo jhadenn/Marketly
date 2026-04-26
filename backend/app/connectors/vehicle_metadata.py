@@ -3,7 +3,8 @@ from __future__ import annotations
 import re
 
 ODOMETER_RE = re.compile(
-    r"(?<![\d.])(?P<value>\d{1,3}(?:[,\s]\d{3})+|\d{4,7})\s*"
+    r"(?<![\d.])(?:(?P<scaled_value>\d{1,3}(?:[.,]\d{1,2})?)\s*(?P<scale>[kKmM])"
+    r"|(?P<value>\d{1,3}(?:[,\s]\d{3})+|\d{4,7}))\s*"
     r"(?P<unit>km|kms|kilomet(?:er|re)s?)\b(?!\s*away\b)",
     re.IGNORECASE,
 )
@@ -49,12 +50,20 @@ def extract_vehicle_mileage_km(*parts: object) -> float | None:
     if not match:
         return None
 
-    raw_value = str(match.group("value") or "")
-    digits_only = re.sub(r"[,\s]", "", raw_value)
-    if not digits_only:
+    scale = str(match.group("scale") or "").lower()
+    raw_value = str(match.group("scaled_value") if scale else match.group("value") or "")
+    normalized_value = raw_value.replace(",", ".") if scale else re.sub(r"[,\s]", "", raw_value)
+    normalized_value = normalized_value.replace(" ", "")
+    if not normalized_value:
         return None
 
     try:
-        return float(digits_only)
+        parsed = float(normalized_value)
     except ValueError:
         return None
+
+    if scale == "k":
+        return parsed * 1_000
+    if scale == "m":
+        return parsed * 1_000_000
+    return parsed

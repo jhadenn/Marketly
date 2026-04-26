@@ -49,6 +49,7 @@ class FacebookCredentialState:
     effective_status: str | None
     helper_connected: bool
     helper_label: str | None
+    helper_last_seen_at: datetime | None
     stale_reason: str | None
     needs_verification: bool
 
@@ -205,9 +206,11 @@ def facebook_credential_state(
 
     helper_connected = False
     helper_label = None
+    helper_last_seen_at = None
     if active_client is not None:
         helper_label = active_client.helper_label
         last_seen_at = _as_utc(active_client.last_seen_at)
+        helper_last_seen_at = last_seen_at
         if (
             last_seen_at is not None
             and last_seen_at
@@ -220,6 +223,7 @@ def facebook_credential_state(
             effective_status=None,
             helper_connected=helper_connected,
             helper_label=helper_label,
+            helper_last_seen_at=helper_last_seen_at,
             stale_reason=None,
             needs_verification=False,
         )
@@ -256,6 +260,7 @@ def facebook_credential_state(
         effective_status="stale" if stale_reason else (status or "active"),
         helper_connected=helper_connected,
         helper_label=helper_label or getattr(row, "helper_label", None),
+        helper_last_seen_at=helper_last_seen_at,
         stale_reason=stale_reason,
         needs_verification=needs_verification,
     )

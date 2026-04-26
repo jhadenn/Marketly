@@ -45,6 +45,38 @@ GENERIC_TITLE_RE = re.compile(
     r"^(?:facebook\s+)?marketp\w*(?:\s+listing|\s+item)?$",
     re.IGNORECASE,
 )
+CANADIAN_PROVINCE_PATTERN = (
+    r"AB|BC|MB|NB|NL|NS|NT|NU|ON|PE|QC|SK|YT|"
+    r"Alberta|British Columbia|Manitoba|New Brunswick|Newfoundland and Labrador|"
+    r"Nova Scotia|Northwest Territories|Nunavut|Ontario|Prince Edward Island|"
+    r"Quebec|Saskatchewan|Yukon"
+)
+COMPACT_LEADING_PRICE_RE = re.compile(
+    r"^\s*(?P<price>"
+    r"free"
+    r"|(?:(?:ca|us|au|nz)?\s*[$\u00a3\u20ac]|(?:cad|usd|eur|gbp)\s*)"
+    r"\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?"
+    r"|(?:(?:ca|us|au|nz)?\s*[$\u00a3\u20ac]|(?:cad|usd|eur|gbp)\s*)"
+    r"\d+(?:\.\d{1,2})?"
+    r"|\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?\s*(?:cad|usd|eur|gbp)"
+    r"|\d+(?:\.\d{1,2})?\s*(?:cad|usd|eur|gbp)"
+    r")",
+    re.IGNORECASE,
+)
+CANADIAN_LOCATION_PROVINCE_RE = re.compile(
+    rf",\s*(?P<province>{CANADIAN_PROVINCE_PATTERN})(?=$|\s|\d|[A-Z])",
+    re.IGNORECASE,
+)
+CITY_TAIL_RE = re.compile(
+    r"(?P<city>[A-Z][a-z.'-]+(?:\s+[A-Z][a-z.'-]+){0,4})$"
+)
+MILEAGE_DETAIL_PREFIX_RE = re.compile(
+    r"^(?P<mileage>"
+    r"(?:\d{1,3}(?:[,\s]\d{3})+|\d{4,7}|\d{1,3}(?:[.,]\d{1,2})?\s*[kKmM])"
+    r"\s*(?:km|kms|kilomet(?:er|re)s?)\b"
+    r")",
+    re.IGNORECASE,
+)
 
 SYMBOL_TO_CURRENCY = {
     "$": "CAD",
@@ -55,6 +87,103 @@ SYMBOL_TO_CURRENCY = {
 
 def _clean_line(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "")).strip()
+
+
+def _append_clean_piece(pieces: list[str], value: str | None) -> None:
+    cleaned = _clean_line(value or "")
+    if not cleaned:
+        return
+    if pieces and pieces[-1].lower() == cleaned.lower():
+        return
+    pieces.append(cleaned)
+
+
+def _split_compact_location(value: str) -> tuple[str, str | None, str]:
+    text = _clean_line(value)
+    if not text:
+        return "", None, ""
+
+    location_match: re.Match[str] | None = None
+    for candidate in CANADIAN_LOCATION_PROVINCE_RE.finditer(text):
+        location_match = candidate
+
+    if not location_match:
+        return text, None, ""
+
+    prefix = text[: location_match.start()].rstrip()
+    suffix = text[location_match.end() :].strip()
+    if not prefix:
+        return "", _clean_line(text[: location_match.end()]), suffix
+
+    city_match = CITY_TAIL_RE.search(prefix)
+    if city_match:
+        city_start = city_match.start("city")
+    else:
+        prefix_words = prefix.split()
+        city_guess = " ".join(prefix_words[-3:])
+        city_start = max(0, len(prefix) - len(city_guess))
+
+    title_part = prefix[:city_start].strip(" -|")
+    city = prefix[city_start:].strip(" -|")
+    if not city:
+        return text, None, ""
+
+    province_part = text[location_match.start() : location_match.end()]
+    return title_part, _clean_line(f"{city}{province_part}"), suffix
+
+
+def _split_mileage_prefix(value: str) -> tuple[str | None, str]:
+    text = _clean_line(value)
+    if not text:
+        return None, ""
+
+    match = MILEAGE_DETAIL_PREFIX_RE.match(text)
+    if not match:
+        return None, text
+
+    return _clean_line(match.group("mileage")), text[match.end() :].strip()
+
+
+def _expand_compact_card_line(line: str) -> list[str]:
+    original = _clean_line(line)
+    if not original:
+        return []
+
+    pieces: list[str] = []
+    remaining = original
+
+    while remaining:
+        price_match = COMPACT_LEADING_PRICE_RE.match(remaining)
+        if not price_match:
+            break
+
+        price_text = _clean_line(price_match.group("price"))
+        if not price_text:
+            break
+
+        _append_clean_piece(pieces, price_text)
+        remaining = remaining[price_match.end() :].strip()
+
+    title_part, location_part, suffix = _split_compact_location(remaining)
+    if location_part:
+        _append_clean_piece(pieces, title_part)
+        _append_clean_piece(pieces, location_part)
+
+        mileage_part, suffix_remainder = _split_mileage_prefix(suffix)
+        _append_clean_piece(pieces, mileage_part)
+        _append_clean_piece(pieces, suffix_remainder)
+    else:
+        _append_clean_piece(pieces, remaining)
+
+    return pieces or [original]
+
+
+def _expand_card_lines(lines: list[str]) -> list[str]:
+    expanded: list[str] = []
+    for line in lines:
+        for piece in _expand_compact_card_line(line):
+            _append_clean_piece(expanded, piece)
+    return expanded
 
 
 def _looks_like_mileage_detail(line: str) -> bool:
@@ -193,8 +322,11 @@ def _fallback_title_from_url(listing_url: str) -> str:
 
 
 def _card_text_scope(card: dict[str, Any]) -> tuple[list[str], str]:
-    base_lines = [_clean_line(str(line)) for line in (card.get("lines") or []) if _clean_line(str(line))]
-    base_text = _clean_line(str(card.get("text") or " ".join(base_lines)))
+    base_raw_lines = [
+        _clean_line(str(line)) for line in (card.get("lines") or []) if _clean_line(str(line))
+    ]
+    base_text = _clean_line(str(card.get("text") or " ".join(base_raw_lines)))
+    base_lines = _expand_card_lines(base_raw_lines or ([base_text] if base_text else []))
     title_hint = _clean_line(str(card.get("title") or "")).lower()
     raw_scopes = card.get("scopes")
 
@@ -202,8 +334,10 @@ def _card_text_scope(card: dict[str, Any]) -> tuple[list[str], str]:
     seen_texts: set[str] = set()
 
     def add_scope(lines: list[str], text: str, depth: int) -> None:
-        normalized_lines = [_clean_line(line) for line in lines if _clean_line(line)]
-        normalized_text = _clean_line(text or " ".join(normalized_lines))
+        cleaned_text = _clean_line(text)
+        source_lines = lines or ([cleaned_text] if cleaned_text else [])
+        normalized_lines = _expand_card_lines(source_lines)
+        normalized_text = _clean_line(" ".join(normalized_lines) or cleaned_text)
         if not normalized_lines and not normalized_text:
             return
         if normalized_text in seen_texts:

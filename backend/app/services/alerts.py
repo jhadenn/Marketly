@@ -171,6 +171,22 @@ def compute_match_confidence(item: Listing) -> tuple[float, list[str]]:
     return confidence, deduped_reasons
 
 
+def _first_listing_image_url(item: Listing) -> str | None:
+    for url in item.image_urls or []:
+        cleaned = str(url or "").strip()
+        if cleaned and not _is_marketplace_logo_image_url(cleaned):
+            return cleaned
+    return None
+
+
+def _is_marketplace_logo_image_url(url: str) -> bool:
+    lowered = url.lower()
+    return any(
+        marker in lowered
+        for marker in ("/marketplaces/", "facebook_logo", "kijiji_logo", "ebay_logo")
+    )
+
+
 def _notification_item_from_listing(item: Listing, confidence: float, why_matched: list[str]) -> dict:
     return {
         "listing_key": listing_key(item),
@@ -178,6 +194,7 @@ def _notification_item_from_listing(item: Listing, confidence: float, why_matche
         "source_listing_id": item.source_listing_id,
         "title": item.title,
         "url": item.url,
+        "image_url": _first_listing_image_url(item),
         "price": item.price.model_dump(mode="json") if item.price is not None else None,
         "location": item.location,
         "match_confidence": confidence,
@@ -193,23 +210,40 @@ def _notification_new_count(items_json: object) -> int:
     return len(items_json)
 
 
-def build_notification_summary(query: str, new_count: int) -> str:
+def build_notification_summary(
+    query: str,
+    new_count: int,
+    source_errors: dict[str, object] | None = None,
+) -> str:
     listing_label = "listing" if new_count == 1 else "listings"
-    return f"{new_count} new {listing_label} for {query}"
+    summary = f"{new_count} new {listing_label} for {query}"
+    if source_errors:
+        unavailable = ", ".join(
+            _source_label(source)
+            for source in sorted(source_errors)
+            if str(source or "").strip()
+        )
+        if unavailable:
+            summary = f"{summary}. {unavailable} unavailable this run."
+    return summary
 
 
 def serialize_notification(row: SavedSearchNotification) -> SavedSearchNotificationOut:
     items = row.items_json if isinstance(row.items_json, list) else []
+    source_errors = _coerce_persisted_source_errors(
+        getattr(row, "source_errors_json", None)
+    )
     new_count = _notification_new_count(items)
     return SavedSearchNotificationOut(
         id=row.id,
         saved_search_id=row.saved_search_id,
         saved_search_query=row.saved_search_query,
-        summary=build_notification_summary(row.saved_search_query, new_count),
+        summary=build_notification_summary(row.saved_search_query, new_count, source_errors),
         new_count=new_count,
         created_at=str(row.created_at),
         read_at=str(row.read_at) if row.read_at is not None else None,
         items=items,
+        source_errors=source_errors,
     )
 
 
@@ -251,9 +285,73 @@ def _source_label(source: str) -> str:
     return mapping.get(source.strip().lower(), source.strip().title())
 
 
-def clear_saved_search_alert_error(saved_search: SavedSearch) -> None:
+def _source_error_to_json(error: object) -> dict[str, object]:
+    if isinstance(error, SourceError):
+        return error.model_dump(mode="json")
+    if isinstance(error, dict):
+        code = str(error.get("code") or _ALERT_ERROR_CODE_SOURCE_ERRORS).strip()
+        message = _clean_error_message(error.get("message")) or "Source unavailable."
+        retryable = bool(error.get("retryable", False))
+        return {"code": code, "message": message, "retryable": retryable}
+    code = str(getattr(error, "code", "") or _ALERT_ERROR_CODE_SOURCE_ERRORS).strip()
+    message = _clean_error_message(getattr(error, "message", None)) or "Source unavailable."
+    retryable = bool(getattr(error, "retryable", False))
+    return {"code": code, "message": message, "retryable": retryable}
+
+
+def _serialize_source_errors(
+    source_errors: dict[str, object] | None,
+    *,
+    source_order: list[str] | None = None,
+) -> dict[str, dict[str, object]]:
+    if not source_errors:
+        return {}
+    order = {source: idx for idx, source in enumerate(source_order or [])}
+    serialized: dict[str, dict[str, object]] = {}
+    for source, error in sorted(
+        source_errors.items(),
+        key=lambda item: (order.get(item[0], len(order)), item[0]),
+    ):
+        normalized_source = str(source or "").strip().lower()
+        if not normalized_source:
+            continue
+        serialized[normalized_source] = _source_error_to_json(error)
+    return serialized
+
+
+def _coerce_persisted_source_errors(value: object) -> dict[str, dict[str, object]]:
+    return _serialize_source_errors(value if isinstance(value, dict) else None)
+
+
+def _set_saved_search_source_errors(
+    saved_search: SavedSearch,
+    source_errors: dict[str, object] | None,
+    *,
+    source_order: list[str] | None = None,
+) -> dict[str, dict[str, object]]:
+    serialized = _serialize_source_errors(source_errors, source_order=source_order)
+    saved_search.last_alert_source_errors_json = serialized or None
+    return serialized
+
+
+def _has_successful_source(source_list: list[str], source_errors: dict[str, object]) -> bool:
+    failed_sources = {str(source or "").strip().lower() for source in source_errors}
+    return any(source not in failed_sources for source in source_list)
+
+
+def clear_saved_search_alert_error(
+    saved_search: SavedSearch,
+    *,
+    source_errors: dict[str, object] | None = None,
+    source_order: list[str] | None = None,
+) -> dict[str, dict[str, object]]:
     saved_search.last_alert_error_code = None
     saved_search.last_alert_error_message = None
+    return _set_saved_search_source_errors(
+        saved_search,
+        source_errors,
+        source_order=source_order,
+    )
 
 
 def record_saved_search_alert_failure(
@@ -262,10 +360,17 @@ def record_saved_search_alert_failure(
     attempted_at: datetime,
     error_code: str | None,
     error_message: str | None,
+    source_errors: dict[str, object] | None = None,
+    source_order: list[str] | None = None,
 ) -> None:
     saved_search.last_alert_attempted_at = attempted_at
     saved_search.last_alert_error_code = (str(error_code).strip()[:100] if error_code else None) or None
     saved_search.last_alert_error_message = _clean_error_message(error_message)
+    _set_saved_search_source_errors(
+        saved_search,
+        source_errors,
+        source_order=source_order,
+    )
 
 
 def _mark_saved_search_alert_success(
@@ -274,12 +379,18 @@ def _mark_saved_search_alert_success(
     attempted_at: datetime,
     checked_at: datetime,
     result_count: int,
-) -> None:
+    source_errors: dict[str, object] | None = None,
+    source_order: list[str] | None = None,
+) -> dict[str, dict[str, object]]:
     saved_search.last_alert_attempted_at = attempted_at
     saved_search.last_alert_checked_at = checked_at
     saved_search.last_alert_baseline_version = ALERT_BASELINE_VERSION
     saved_search.last_alert_result_count = max(0, int(result_count))
-    clear_saved_search_alert_error(saved_search)
+    return clear_saved_search_alert_error(
+        saved_search,
+        source_errors=source_errors,
+        source_order=source_order,
+    )
 
 
 def _source_error_summary(
@@ -372,6 +483,8 @@ def _rebuild_saved_search_alert_baseline(
     attempted_at: datetime,
     saved_search_user_id: str | None,
     results: list[Listing],
+    source_errors: dict[str, object] | None = None,
+    source_order: list[str] | None = None,
 ) -> SavedSearchAlertCheckOutcome:
     delete_notifications_for_saved_search(
         db,
@@ -392,6 +505,8 @@ def _rebuild_saved_search_alert_baseline(
         attempted_at=attempted_at,
         checked_at=checked_at,
         result_count=len(results),
+        source_errors=source_errors,
+        source_order=source_order,
     )
     saved_search.last_alert_notified_at = None
     return SavedSearchAlertCheckOutcome(successful_check=True)
@@ -483,6 +598,7 @@ async def run_saved_search_alert_check(
 
     facebook_runtime_context = None
     search_location_context = _search_location_context(db, saved_search_user_id)
+    partial_source_success_enabled = bool(settings.MARKETLY_ALERTS_PARTIAL_SOURCE_SUCCESS_ENABLED)
     preflight_source_errors: dict[str, SourceError] = {}
     if "facebook" in source_list:
         facebook_runtime_context, facebook_preflight_error = await _facebook_runtime_context(
@@ -491,7 +607,14 @@ async def run_saved_search_alert_check(
         if facebook_preflight_error is not None:
             preflight_source_errors["facebook"] = facebook_preflight_error
 
+    effective_source_list = list(source_list)
     if preflight_source_errors:
+        effective_source_list = [
+            source for source in source_list if source not in preflight_source_errors
+        ]
+    if preflight_source_errors and (
+        not partial_source_success_enabled or not effective_source_list
+    ):
         error_code, error_message = _source_error_summary(
             preflight_source_errors,
             source_order=source_list,
@@ -501,6 +624,8 @@ async def run_saved_search_alert_check(
             attempted_at=attempted_at,
             error_code=error_code,
             error_message=error_message,
+            source_errors=preflight_source_errors,
+            source_order=source_list,
         )
         return SavedSearchAlertCheckOutcome(
             successful_check=False,
@@ -510,20 +635,34 @@ async def run_saved_search_alert_check(
 
     results, _, _, source_errors = await unified_search(
         query=saved_search.query,
-        sources=source_list,
+        sources=effective_source_list,
         limit=limit_per_search,
         offset=0,
         sort="newest",
-        facebook_runtime_context=facebook_runtime_context,
+        facebook_runtime_context=(
+            facebook_runtime_context if "facebook" in effective_source_list else None
+        ),
         search_location_context=search_location_context,
     )
-    if source_errors:
-        error_code, error_message = _source_error_summary(source_errors, source_order=source_list)
+    combined_source_errors: dict[str, object] = {
+        **preflight_source_errors,
+        **(source_errors or {}),
+    }
+    if combined_source_errors and (
+        not partial_source_success_enabled
+        or not _has_successful_source(source_list, combined_source_errors)
+    ):
+        error_code, error_message = _source_error_summary(
+            combined_source_errors,
+            source_order=source_list,
+        )
         record_saved_search_alert_failure(
             saved_search,
             attempted_at=attempted_at,
             error_code=error_code,
             error_message=error_message,
+            source_errors=combined_source_errors,
+            source_order=source_list,
         )
         return SavedSearchAlertCheckOutcome(
             successful_check=False,
@@ -540,6 +679,8 @@ async def run_saved_search_alert_check(
             attempted_at=attempted_at,
             saved_search_user_id=saved_search_user_id,
             results=results,
+            source_errors=combined_source_errors,
+            source_order=source_list,
         )
 
     if not _saved_search_has_verified_baseline(
@@ -553,6 +694,8 @@ async def run_saved_search_alert_check(
             attempted_at=attempted_at,
             saved_search_user_id=saved_search_user_id,
             results=results,
+            source_errors=combined_source_errors,
+            source_order=source_list,
         )
 
     fingerprints = [listing_fingerprint(item) for item in results]
@@ -583,11 +726,13 @@ async def run_saved_search_alert_check(
             continue
         matched_items.append(_notification_item_from_listing(item, confidence, why_matched))
 
-    _mark_saved_search_alert_success(
+    persisted_source_errors = _mark_saved_search_alert_success(
         saved_search,
         attempted_at=attempted_at,
         checked_at=checked_at,
         result_count=len(results),
+        source_errors=combined_source_errors,
+        source_order=source_list,
     )
     if not matched_items:
         return SavedSearchAlertCheckOutcome(successful_check=True)
@@ -598,8 +743,13 @@ async def run_saved_search_alert_check(
             user_id=saved_search_user_id or "",
             saved_search_id=saved_search.id,
             saved_search_query=saved_search.query,
-            summary_text=build_notification_summary(saved_search.query, new_count),
+            summary_text=build_notification_summary(
+                saved_search.query,
+                new_count,
+                persisted_source_errors,
+            ),
             items_json=matched_items,
+            source_errors_json=persisted_source_errors or None,
         )
     )
     saved_search.last_alert_notified_at = attempted_at

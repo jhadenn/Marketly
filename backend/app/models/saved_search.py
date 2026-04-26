@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, Integer, String, DateTime, Text, func, Index, text
+from sqlalchemy import Boolean, Column, Integer, String, DateTime, Text, func, Index, JSON, text
 from sqlalchemy.orm import validates
 from app.db import Base
 
@@ -19,6 +19,7 @@ class SavedSearch(Base):
     last_alert_notified_at = Column(DateTime(timezone=True), nullable=True)
     last_alert_error_code = Column(String, nullable=True)
     last_alert_error_message = Column(Text, nullable=True)
+    last_alert_source_errors_json = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     # OPTIONAL but recommended: prevent exact duplicates per user

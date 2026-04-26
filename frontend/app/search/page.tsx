@@ -9,28 +9,36 @@ import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import {
   ArrowUpRight,
+  BellOff,
   BellRing,
   Bot,
   Bookmark,
   ChevronDown,
+  FastForward,
+  ImageIcon,
   Loader2,
   LocateFixed,
   LogOut,
+  Menu,
   MapPin,
+  PencilLine,
   RefreshCw,
   Search,
   SlidersHorizontal,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 import Dither from "@/components/Dither";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { buildSplitSavedSearchConfigs, hasMixedFacebookSources } from "@/lib/facebook-reliability";
 import { cn } from "@/lib/utils";
 import { useAuth } from "../providers";
 
 const SOURCE_OPTIONS = ["kijiji", "ebay", "facebook"] as const;
 const DEFAULT_SOURCES: SourceOption[] = ["kijiji", "ebay", "facebook"];
 const DEFAULT_PAGE_SIZE = 24;
+const SEARCH_SIDEBAR_BREAKPOINT = 1280;
 const COPILOT_DESKTOP_BREAKPOINT = 1024;
 const COPILOT_FLOATING_MARGIN = 24;
 const COPILOT_LAUNCHER_WIDTH = 196;
@@ -245,6 +253,7 @@ type SavedSearch = {
   last_alert_notified_at?: string | null;
   last_alert_error_code?: string | null;
   last_alert_error_message?: string | null;
+  last_alert_source_errors?: Record<string, SourceErrorEntry> | null;
   next_alert_check_due_at?: string | null;
   created_at: string;
 };
@@ -259,6 +268,8 @@ type NotificationItem = {
   source_listing_id: string;
   title: string;
   url: string;
+  image_url?: string | null;
+  image_urls?: string[];
   price?: Money | null;
   location?: string | null;
   match_confidence: number;
@@ -276,6 +287,7 @@ type SavedSearchNotification = {
   created_at: string;
   read_at?: string | null;
   items: NotificationItem[];
+  source_errors?: Record<string, SourceErrorEntry> | null;
 };
 
 type CopilotShortlistItem = {
@@ -704,6 +716,29 @@ function buildAssistantConversationContent(response: CopilotResponse) {
   return sections.filter(Boolean).join("\n\n");
 }
 
+function getNotificationItemImageUrl(item: NotificationItem) {
+  const directImageUrl = typeof item.image_url === "string" ? item.image_url.trim() : "";
+  if (directImageUrl && !isMarketplaceLogoImageUrl(directImageUrl)) return directImageUrl;
+
+  const fallbackImageUrl = item.image_urls?.find(
+    (url): url is string =>
+      typeof url === "string" &&
+      url.trim().length > 0 &&
+      !isMarketplaceLogoImageUrl(url.trim()),
+  );
+  return fallbackImageUrl?.trim() ?? null;
+}
+
+function isMarketplaceLogoImageUrl(url: string) {
+  const normalizedUrl = url.toLowerCase();
+  return (
+    normalizedUrl.includes("/marketplaces/") ||
+    normalizedUrl.includes("facebook_logo") ||
+    normalizedUrl.includes("kijiji_logo") ||
+    normalizedUrl.includes("ebay_logo")
+  );
+}
+
 function clampNumber(value: number, min: number, max: number) {
   if (min > max) return min;
   return Math.min(max, Math.max(min, value));
@@ -1005,6 +1040,15 @@ function getSavedSearchAlertStatus(entry: SavedSearch) {
   return `Last checked ${lastChecked}. Last alert ${lastAlert}. Next check due around ${nextDue ?? "later today"}.`;
 }
 
+function getSavedSearchSourceErrorSummary(entry: SavedSearch) {
+  const sourceErrors = entry.last_alert_source_errors ?? {};
+  const entries = Object.entries(sourceErrors);
+  if (entries.length === 0) return null;
+  return entries
+    .map(([source, sourceError]) => `${formatSourceLabel(source)} unavailable: ${sourceError.message}`)
+    .join(" ");
+}
+
 function hasIncompleteSavedSearchBaseline(entry: SavedSearch) {
   return Boolean(entry.alerts_enabled) && !entry.last_alert_checked_at;
 }
@@ -1094,6 +1138,7 @@ type SearchPageViewProps = {
   savingSearch: boolean;
   onSearch: (e: React.FormEvent) => Promise<void>;
   onSaveCurrentSearch: () => Promise<void>;
+  onCreateSplitSavedSearches: () => Promise<void>;
   limit: number;
   savedSearchMaxPerUser: number;
   activeSavedSearchCount: number;
@@ -1227,6 +1272,7 @@ type SearchControlsRailProps = Pick<
   | "setQ"
   | "onSearch"
   | "onSaveCurrentSearch"
+  | "onCreateSplitSavedSearches"
   | "searchLoading"
   | "loadingMore"
   | "savedSearchRefreshing"
@@ -1344,7 +1390,35 @@ function SearchPageView(props: SearchPageViewProps) {
   const heroTitle =
     heroQuery || (props.hasSearched ? "Unified results" : "All marketplaces. One search.");
   const showLiveHeroCopy = heroQuery.length > 0 || props.hasSearched;
+  const { onSearch, onRunSavedSearch, q, runAllSavedSearches, sources } = props;
   const [isDesktop, setIsDesktop] = useState(false);
+  const [isControlsSidebarOpen, setIsControlsSidebarOpen] = useState(false);
+  const closeControlsSidebar = useCallback(() => setIsControlsSidebarOpen(false), []);
+
+  const handleSidebarSearch = useCallback(
+    async (e: React.FormEvent) => {
+      const canSearch = q.trim().length > 0 && sources.length > 0;
+      await onSearch(e);
+      if (canSearch) closeControlsSidebar();
+    },
+    [closeControlsSidebar, onSearch, q, sources],
+  );
+
+  const handleSidebarRunAllSavedSearches = useCallback(
+    async (savedSearches: SavedSearch[], options?: SavedSearchRunOptions) => {
+      await runAllSavedSearches(savedSearches, options);
+      closeControlsSidebar();
+    },
+    [closeControlsSidebar, runAllSavedSearches],
+  );
+
+  const handleSidebarRunSavedSearch = useCallback(
+    async (id: number) => {
+      await onRunSavedSearch(id);
+      closeControlsSidebar();
+    },
+    [closeControlsSidebar, onRunSavedSearch],
+  );
 
   useEffect(() => {
     const media = window.matchMedia(`(min-width: ${COPILOT_DESKTOP_BREAKPOINT}px)`);
@@ -1353,6 +1427,35 @@ function SearchPageView(props: SearchPageViewProps) {
     media.addEventListener("change", sync);
     return () => media.removeEventListener("change", sync);
   }, []);
+
+  useEffect(() => {
+    const media = window.matchMedia(`(min-width: ${SEARCH_SIDEBAR_BREAKPOINT}px)`);
+    const sync = () => {
+      if (media.matches) {
+        setIsControlsSidebarOpen(false);
+      }
+    };
+    sync();
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
+
+  useEffect(() => {
+    if (!isControlsSidebarOpen) return;
+
+    const previousOverflow = document.body.style.overflow;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeControlsSidebar();
+    };
+
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [closeControlsSidebar, isControlsSidebarOpen]);
 
   return (
     <main className="dark relative min-h-screen overflow-x-hidden bg-black text-white antialiased">
@@ -1430,10 +1533,88 @@ function SearchPageView(props: SearchPageViewProps) {
       </header>
 
       <div className="w-full px-4 pb-12 pt-5 sm:px-5 lg:px-6 2xl:px-8">
+        <div className="sticky top-[65px] z-30 mb-4 xl:hidden">
+          <button
+            type="button"
+            onClick={() => setIsControlsSidebarOpen(true)}
+            aria-expanded={isControlsSidebarOpen}
+            aria-controls="search-controls-sidebar"
+            className="flex w-full items-center justify-between gap-3 rounded-2xl border border-white/10 bg-zinc-950/90 px-4 py-3 text-left shadow-2xl backdrop-blur-xl transition hover:border-white/20 hover:bg-zinc-950"
+          >
+            <span className="flex min-w-0 items-center gap-3">
+              <span className="flex size-10 shrink-0 items-center justify-center rounded-full border border-white/10 bg-white/[0.03] text-zinc-200">
+                <Menu className="size-5" />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold tracking-tight text-white">
+                  Search tools
+                </span>
+                <span className="block truncate text-xs text-zinc-400">
+                  {props.q.trim() || `${props.sources.length} sources selected`}
+                </span>
+              </span>
+            </span>
+            <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.02] px-2.5 py-1 text-[11px] text-zinc-300">
+              {props.activeSavedSearchCount}/{props.savedSearchMaxPerUser} saved
+            </span>
+          </button>
+        </div>
+
+        {isControlsSidebarOpen ? (
+          <div
+            className="fixed inset-0 z-[60] xl:hidden"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="search-controls-sidebar-title"
+          >
+            <button
+              type="button"
+              aria-label="Close search tools"
+              className="absolute inset-0 h-full w-full bg-black/70 backdrop-blur-sm"
+              onClick={closeControlsSidebar}
+            />
+            <aside
+              id="search-controls-sidebar"
+              className="absolute inset-y-0 left-0 flex h-full w-full max-w-[430px] flex-col border-r border-white/10 bg-black/95 shadow-2xl"
+            >
+              <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+                <div className="min-w-0">
+                  <p
+                    id="search-controls-sidebar-title"
+                    className="font-mono text-xs uppercase tracking-[0.18em] text-zinc-400"
+                  >
+                    Search tools
+                  </p>
+                  <p className="mt-1 truncate text-sm text-zinc-100">
+                    Search, filters, and saved searches
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeControlsSidebar}
+                  className="flex size-10 shrink-0 items-center justify-center rounded-full border border-white/10 bg-white/[0.02] text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05]"
+                  aria-label="Close search tools"
+                >
+                  <X className="size-5" />
+                </button>
+              </div>
+
+              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4 pb-8 sm:px-5">
+                <SearchControlsRail {...props} onSearch={handleSidebarSearch} />
+                <SavedSearchRail
+                  {...props}
+                  runAllSavedSearches={handleSidebarRunAllSavedSearches}
+                  onRunSavedSearch={handleSidebarRunSavedSearch}
+                />
+              </div>
+            </aside>
+          </div>
+        ) : null}
+
         <div className="grid w-full gap-5 xl:grid-cols-[minmax(280px,320px)_minmax(0,1fr)] 2xl:grid-cols-[340px_minmax(0,1fr)]">
-          <aside className="grid min-w-0 gap-4 md:grid-cols-2 xl:sticky xl:top-24 xl:block xl:self-start xl:space-y-4">
+          <aside className="hidden min-w-0 xl:sticky xl:top-24 xl:block xl:self-start xl:space-y-4">
             <SearchControlsRail {...props} />
-            <div className="md:col-span-2 xl:col-span-1">
+            <div>
               <SavedSearchRail {...props} />
             </div>
           </aside>
@@ -1543,6 +1724,8 @@ function StatTile({ label, value, sub }: { label: string; value: string; sub: st
 }
 
 function SearchControlsRail(props: SearchControlsRailProps) {
+  const showSplitSourceRecommendation = hasMixedFacebookSources(props.sources);
+
   return (
     <>
       <GlassPanel className="p-4 sm:p-5">
@@ -1568,8 +1751,13 @@ function SearchControlsRail(props: SearchControlsRailProps) {
           </div>
 
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            <button
+            <ActionIconButton
               type="submit"
+              size="lg"
+              tone="primary"
+              className="h-12 w-full"
+              label={props.searchLoading ? "Searching" : "Search"}
+              tooltip={props.searchLoading ? "Searching" : "Search"}
               disabled={
                 props.searchLoading
                 || props.loadingMore
@@ -1577,18 +1765,19 @@ function SearchControlsRail(props: SearchControlsRailProps) {
                 || !props.q.trim()
                 || props.sources.length === 0
               }
-              className="inline-flex items-center justify-center gap-2 rounded-xl bg-white px-4 py-2.5 text-sm font-medium text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {props.searchLoading ? (
-                <Loader2 className="size-4 animate-spin" />
+                <Loader2 className="size-5 animate-spin" />
               ) : (
-                <Search className="size-4" />
+                <Search className="size-5" />
               )}
-              {props.searchLoading ? "Searching..." : "Search"}
-            </button>
+            </ActionIconButton>
 
-            <button
-              type="button"
+            <ActionIconButton
+              size="lg"
+              className="h-12 w-full"
+              label={props.savingSearch ? "Creating saved search baseline" : "Save search"}
+              tooltip={props.savingSearch ? "Creating baseline" : "Save search"}
               onClick={() => void props.onSaveCurrentSearch()}
               disabled={
                 props.savingSearch
@@ -1596,15 +1785,13 @@ function SearchControlsRail(props: SearchControlsRailProps) {
                 || props.sources.length === 0
                 || props.savedSearchLimitReached
               }
-              className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.02] px-4 py-2.5 text-sm font-medium text-zinc-100 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
             >
               {props.savingSearch ? (
-                <Loader2 className="size-4 animate-spin" />
+                <Loader2 className="size-5 animate-spin" />
               ) : (
-                <Bookmark className="size-4" />
+                <Bookmark className="size-5" />
               )}
-              {props.savingSearch ? "Creating baseline..." : "Save search"}
-            </button>
+            </ActionIconButton>
           </div>
 
           {(props.searchLoading || props.loadingMore || props.savedSearchRefreshing) && (
@@ -1613,6 +1800,27 @@ function SearchControlsRail(props: SearchControlsRailProps) {
               {props.savedSearchRefreshing ? "Saved searches refreshing" : "Live query"}
             </div>
           )}
+
+          {showSplitSourceRecommendation ? (
+            <div className="rounded-xl border border-amber-300/20 bg-amber-300/10 p-3 text-xs leading-relaxed text-amber-100">
+              <p>
+                For best reliability, split into two saved searches: Facebook and non-Facebook.
+              </p>
+              <button
+                type="button"
+                onClick={() => void props.onCreateSplitSavedSearches()}
+                disabled={
+                  props.savingSearch
+                  || !props.q.trim()
+                  || props.savedSearchLimitReached
+                }
+                className="mt-2 inline-flex items-center justify-center gap-2 rounded-lg border border-amber-100/20 bg-amber-50/10 px-3 py-1.5 text-xs font-medium text-amber-50 transition hover:border-amber-100/30 hover:bg-amber-50/15 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {props.savingSearch ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                Create split searches from this config
+              </button>
+            </div>
+          ) : null}
         </form>
       </GlassPanel>
 
@@ -1720,37 +1928,42 @@ function SearchControlsRail(props: SearchControlsRailProps) {
           </div>
 
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-            <button
-              type="button"
+            <ActionIconButton
+              size="lg"
+              tone="primary"
+              className="h-12 w-full"
+              label={props.locationBusy ? "Saving location" : "Set location"}
+              tooltip={props.locationBusy ? "Saving location" : "Set location"}
               onClick={() => void props.onApplyManualLocation()}
               disabled={props.locationBusy || !props.locationProvince || !props.locationCityInput.trim()}
-              className="inline-flex items-center justify-center gap-2 rounded-xl bg-white px-3 py-2.5 text-sm font-medium text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {props.locationBusy ? <Loader2 className="size-4 animate-spin" /> : <MapPin className="size-4" />}
-              {props.locationBusy ? "Saving..." : "Set location"}
-            </button>
-            <button
-              type="button"
+              {props.locationBusy ? <Loader2 className="size-5 animate-spin" /> : <MapPin className="size-5" />}
+            </ActionIconButton>
+            <ActionIconButton
+              size="lg"
+              className="h-12 w-full"
+              label={props.locationBusy ? "Locating" : "Use GPS"}
+              tooltip={props.locationBusy ? "Locating" : "Use GPS"}
               onClick={props.onUseMyLocation}
               disabled={props.locationBusy}
-              className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2.5 text-sm text-zinc-100 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
             >
               {props.locationBusy ? (
-                <Loader2 className="size-4 animate-spin" />
+                <Loader2 className="size-5 animate-spin" />
               ) : (
-                <LocateFixed className="size-4" />
+                <LocateFixed className="size-5" />
               )}
-              {props.locationBusy ? "Locating..." : "Use GPS"}
-            </button>
+            </ActionIconButton>
 
-            <button
-              type="button"
+            <ActionIconButton
+              size="lg"
+              className="h-12 w-full"
+              label="Clear location"
+              tooltip="Clear location"
               onClick={() => void props.onClearLocation()}
               disabled={props.locationBusy && !props.currentLocation}
-              className="rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2.5 text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-40"
             >
-              Clear
-            </button>
+              <X className="size-5" />
+            </ActionIconButton>
           </div>
 
           {props.sources.length === 0 ? (
@@ -1771,6 +1984,75 @@ function SearchControlsRail(props: SearchControlsRailProps) {
   );
 }
 
+type ActionIconButtonTone = "primary" | "neutral" | "danger";
+type ActionIconButtonSize = "md" | "lg";
+
+function ActionIconButton({
+  label,
+  tooltip = label,
+  tone = "neutral",
+  size = "md",
+  type = "button",
+  disabled = false,
+  className,
+  children,
+  onClick,
+}: {
+  label: string;
+  tooltip?: string;
+  tone?: ActionIconButtonTone;
+  size?: ActionIconButtonSize;
+  type?: "button" | "submit" | "reset";
+  disabled?: boolean;
+  className?: string;
+  children: React.ReactNode;
+  onClick?: React.MouseEventHandler<HTMLButtonElement>;
+}) {
+  const button = (
+    <button
+      type={type}
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      title={tooltip}
+      className={cn(
+        "inline-flex size-9 items-center justify-center rounded-xl border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 focus-visible:ring-offset-0 disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50",
+        size === "lg" && "size-12",
+        tone === "primary"
+          ? "border-white bg-white text-black shadow-[0_10px_24px_rgba(255,255,255,0.08)] hover:border-zinc-200 hover:bg-zinc-200"
+          : tone === "danger"
+            ? "border-white/10 bg-white/[0.02] text-zinc-200 hover:border-red-300/35 hover:bg-red-400/10 hover:text-red-100"
+            : "border-white/10 bg-white/[0.02] text-zinc-200 hover:border-white/25 hover:bg-white/[0.06]",
+        className,
+      )}
+    >
+      {children}
+    </button>
+  );
+
+  return (
+    <TooltipProvider delayDuration={120}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          {disabled ? (
+            <span className="inline-flex rounded-xl" tabIndex={0} aria-label={tooltip}>
+              {button}
+            </span>
+          ) : (
+            button
+          )}
+        </TooltipTrigger>
+        <TooltipContent
+          side="top"
+          className="border border-white/10 bg-zinc-950/95 px-2.5 py-1.5 text-[11px] text-zinc-100 shadow-2xl"
+        >
+          {tooltip}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
 function SavedSearchRail(props: SavedSearchRailProps) {
   return (
     <GlassPanel className="p-4 sm:p-5">
@@ -1784,8 +2066,17 @@ function SavedSearchRail(props: SavedSearchRailProps) {
 
         <div className="flex items-center gap-2">
           {props.user && props.activeSavedSearchCount > 1 ? (
-            <button
-              type="button"
+            <ActionIconButton
+              label={
+                props.hasSavedSearchOverflow
+                  ? `Run newest ${props.savedSearchMaxPerUser} saved searches`
+                  : "Run all saved searches"
+              }
+              tooltip={
+                props.hasSavedSearchOverflow
+                  ? `Run newest ${props.savedSearchMaxPerUser}`
+                  : "Run all"
+              }
               onClick={() => void props.runAllSavedSearches(props.saved, { refresh: true })}
               disabled={
                 props.searchLoading
@@ -1793,25 +2084,22 @@ function SavedSearchRail(props: SavedSearchRailProps) {
                 || props.savedSearchRefreshing
                 || props.runnableSavedSearchCount === 0
               }
-              className="rounded-full border border-white/10 bg-white/[0.02] px-2.5 py-1 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {props.hasSavedSearchOverflow
-                ? `Run newest ${props.savedSearchMaxPerUser}`
-                : "Run all"}
-            </button>
+              <FastForward className="size-4 fill-current" strokeWidth={2.3} aria-hidden="true" />
+            </ActionIconButton>
           ) : null}
 
-          <button
-            className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.02] px-2.5 py-1 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
+          <ActionIconButton
+            label={props.savedLoading ? "Refreshing saved searches" : props.savedSearchRefreshing ? "Updating saved search feed" : "Refresh saved searches"}
+            tooltip={props.savedLoading ? "Refreshing" : props.savedSearchRefreshing ? "Updating feed" : "Refresh"}
             onClick={() => void props.onRefreshSavedSearches()}
             disabled={props.savedLoading || props.savedSearchRefreshing}
-            type="button"
           >
             <RefreshCw
-              className={cn("size-3.5", (props.savedLoading || props.savedSearchRefreshing) && "animate-spin")}
+              className={cn("size-4", (props.savedLoading || props.savedSearchRefreshing) && "animate-spin")}
+              aria-hidden="true"
             />
-            {props.savedLoading ? "Refreshing" : props.savedSearchRefreshing ? "Updating feed" : "Refresh"}
-          </button>
+          </ActionIconButton>
         </div>
       </div>
 
@@ -1861,6 +2149,7 @@ function SavedSearchRail(props: SavedSearchRailProps) {
             {props.saved.map((entry) => {
               const blockedReason = props.getSavedSearchBlockedReason(entry);
               const blocked = blockedReason !== null;
+              const sourceErrorSummary = getSavedSearchSourceErrorSummary(entry);
               return (
                 <li
                   key={entry.id}
@@ -1877,21 +2166,35 @@ function SavedSearchRail(props: SavedSearchRailProps) {
                         <span>Saved</span>
                         <span
                           className={cn(
-                            "rounded-full border px-1.5 py-0.5",
+                            "inline-flex items-center gap-1.5 rounded-full border px-1.5 py-0.5 font-mono text-[9px] font-medium uppercase tracking-[0.12em]",
                             entry.alerts_enabled
-                              ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-100"
+                              ? "border-white/15 bg-white/[0.05] text-zinc-200"
                               : "border-white/10 bg-white/[0.02] text-zinc-400",
                           )}
                         >
+                          <span
+                            aria-hidden
+                            className={cn(
+                              "inline-block size-1 rounded-full",
+                              entry.alerts_enabled ? "bg-emerald-300/80" : "bg-zinc-600",
+                            )}
+                          />
                           {entry.alerts_enabled ? "Alerts on" : "Alerts off"}
                         </span>
                       </div>
                       <p className="mt-2 text-xs leading-relaxed text-zinc-500">
                         {getSavedSearchAlertStatus(entry)}
                       </p>
+                      {sourceErrorSummary ? (
+                        <p className="mt-2 flex items-start gap-1.5 text-xs leading-relaxed text-zinc-300">
+                          <span aria-hidden className="mt-1.5 inline-block size-1 shrink-0 rounded-full bg-amber-300/70" />
+                          <span>{sourceErrorSummary}</span>
+                        </p>
+                      ) : null}
                       {blockedReason ? (
-                        <p className="mt-2 text-xs leading-relaxed text-amber-100">
-                          {blockedReason}
+                        <p className="mt-2 flex items-start gap-1.5 text-xs leading-relaxed text-zinc-300">
+                          <span aria-hidden className="mt-1.5 inline-block size-1 shrink-0 rounded-full bg-amber-300/70" />
+                          <span>{blockedReason}</span>
                         </p>
                       ) : null}
                     </div>
@@ -1908,46 +2211,48 @@ function SavedSearchRail(props: SavedSearchRailProps) {
                     ))}
                   </div>
 
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <button
-                      className="rounded-lg bg-white px-3 py-1.5 text-xs font-medium text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
-                      type="button"
-                      onClick={() => void props.onRunSavedSearch(entry.id)}
-                      disabled={blocked || props.savedSearchRefreshing}
-                      title={blockedReason ?? "Run saved search"}
-                    >
-                      Run
-                    </button>
-                    <button
-                      className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
-                      type="button"
-                      onClick={() => props.openEdit(entry)}
-                      disabled={props.savedSearchRefreshing}
-                    >
-                      Edit
-                    </button>
-                    <button
-                      className={cn(
-                        "rounded-lg border px-3 py-1.5 text-xs transition disabled:cursor-not-allowed disabled:opacity-50",
-                        entry.alerts_enabled
-                          ? "border-emerald-300/25 bg-emerald-400/10 text-emerald-100 hover:border-emerald-300/40"
-                          : "border-white/10 bg-white/[0.02] text-zinc-200 hover:border-white/20 hover:bg-white/[0.05]",
-                      )}
-                      type="button"
-                      onClick={() => void props.onToggleSavedSearchAlerts(entry)}
-                      disabled={props.savedSearchRefreshing}
-                    >
-                      {entry.alerts_enabled ? "Disable alerts" : "Enable alerts"}
-                    </button>
-                    <button
-                      className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-1.5 text-xs text-zinc-200 transition hover:border-red-300/30 hover:bg-red-400/10 hover:text-red-100 disabled:cursor-not-allowed disabled:opacity-50"
-                      type="button"
-                      onClick={() => void props.onDeleteSavedSearch(entry.id)}
-                      disabled={props.savedSearchRefreshing}
-                    >
-                      Delete
-                    </button>
-                  </div>
+                  <TooltipProvider delayDuration={120}>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <ActionIconButton
+                        label={`Run saved search for ${entry.query}`}
+                        tooltip={blockedReason ?? "Run saved search"}
+                        tone="primary"
+                        onClick={() => void props.onRunSavedSearch(entry.id)}
+                        disabled={blocked || props.savedSearchRefreshing}
+                      >
+                        <FastForward className="size-4 fill-current" strokeWidth={2.3} aria-hidden="true" />
+                      </ActionIconButton>
+                      <ActionIconButton
+                        label={`Edit saved search for ${entry.query}`}
+                        tooltip="Edit saved search"
+                        onClick={() => props.openEdit(entry)}
+                        disabled={props.savedSearchRefreshing}
+                      >
+                        <PencilLine className="size-4" strokeWidth={2.2} aria-hidden="true" />
+                      </ActionIconButton>
+                      <ActionIconButton
+                        label={`${entry.alerts_enabled ? "Disable" : "Enable"} alerts for ${entry.query}`}
+                        tooltip={entry.alerts_enabled ? "Disable alerts" : "Enable alerts"}
+                        onClick={() => void props.onToggleSavedSearchAlerts(entry)}
+                        disabled={props.savedSearchRefreshing}
+                      >
+                        {entry.alerts_enabled ? (
+                          <BellRing className="size-4" strokeWidth={2.2} aria-hidden="true" />
+                        ) : (
+                          <BellOff className="size-4" strokeWidth={2.2} aria-hidden="true" />
+                        )}
+                      </ActionIconButton>
+                      <ActionIconButton
+                        label={`Delete saved search for ${entry.query}`}
+                        tooltip="Delete saved search"
+                        tone="danger"
+                        onClick={() => void props.onDeleteSavedSearch(entry.id)}
+                        disabled={props.savedSearchRefreshing}
+                      >
+                        <Trash2 className="size-4" strokeWidth={2.2} aria-hidden="true" />
+                      </ActionIconButton>
+                    </div>
+                  </TooltipProvider>
                 </li>
               );
             })}
@@ -1983,15 +2288,17 @@ function AlertsRail(props: AlertsRailProps) {
             </span>
           </div>
 
-          <button
-            className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.02] px-2.5 py-1 text-xs text-zinc-300 transition hover:border-white/20 hover:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
+          <ActionIconButton
+            label={props.notificationsLoading ? "Refreshing alerts" : "Refresh alerts"}
+            tooltip={props.notificationsLoading ? "Refreshing" : "Refresh"}
             onClick={() => void props.fetchNotifications()}
             disabled={props.notificationsLoading}
-            type="button"
           >
-            <RefreshCw className={cn("size-3.5", props.notificationsLoading && "animate-spin")} />
-            {props.notificationsLoading ? "Refreshing" : "Refresh"}
-          </button>
+            <RefreshCw
+              className={cn("size-4", props.notificationsLoading && "animate-spin")}
+              aria-hidden="true"
+            />
+          </ActionIconButton>
         </div>
 
         {props.notificationsError ? (
@@ -2025,6 +2332,7 @@ function AlertsRail(props: AlertsRailProps) {
             {props.notifications.map((notification) => {
               const previewItems = notification.items.slice(0, ALERT_PREVIEW_ITEM_LIMIT);
               const overflowCount = Math.max(notification.items.length - previewItems.length, 0);
+              const notificationSourceErrors = Object.entries(notification.source_errors ?? {});
 
               return (
                 <li
@@ -2033,12 +2341,18 @@ function AlertsRail(props: AlertsRailProps) {
                     "rounded-xl border p-3 transition",
                     notification.read_at
                       ? "border-white/10 bg-white/[0.02]"
-                      : "border-emerald-300/20 bg-emerald-400/[0.06]",
+                      : "border-white/15 bg-white/[0.04]",
                   )}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <p className="line-clamp-2 text-sm font-medium text-zinc-100">
+                        {!notification.read_at ? (
+                          <span
+                            aria-hidden
+                            className="mr-2 inline-block size-1.5 -translate-y-[2px] rounded-full bg-zinc-200"
+                          />
+                        ) : null}
                         {notification.saved_search_query}
                       </p>
                       <p className="mt-1 text-[11px] text-zinc-500">
@@ -2048,22 +2362,40 @@ function AlertsRail(props: AlertsRailProps) {
                     {!notification.read_at ? (
                       <button
                         type="button"
-                        className="rounded-full border border-emerald-300/25 bg-emerald-400/10 px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-emerald-100 transition hover:border-emerald-300/40"
+                        className="rounded-full border border-white/15 bg-white/[0.06] px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-zinc-200 transition hover:border-white/30 hover:bg-white/[0.1]"
                         onClick={() => void props.onMarkNotificationRead(notification.id)}
                       >
-                        Read
+                        Mark read
                       </button>
                     ) : (
-                      <span className="rounded-full border border-white/10 bg-white/[0.02] px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-zinc-400">
+                      <span className="rounded-full border border-white/10 bg-white/[0.02] px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-zinc-500">
                         Read
                       </span>
                     )}
                   </div>
 
+                  {notificationSourceErrors.length > 0 ? (
+                    <div className="mt-3 rounded-xl border border-white/10 bg-white/[0.03] p-2.5 text-[11px] leading-relaxed text-zinc-300">
+                      {notificationSourceErrors.map(([source, sourceError]) => (
+                        <p key={`${notification.id}-${source}`} className="flex items-start gap-2">
+                          <span
+                            aria-hidden
+                            className="mt-1.5 inline-block size-1 shrink-0 rounded-full bg-amber-300/70"
+                          />
+                          <span>
+                            <span className="text-zinc-200">{formatSourceLabel(source)}</span>{" "}
+                            <span className="text-zinc-500">unavailable this run:</span> {sourceError.message}
+                          </span>
+                        </p>
+                      ))}
+                    </div>
+                  ) : null}
+
                   {previewItems.length > 0 ? (
                     <div className="mt-3 space-y-2">
                       {previewItems.map((item) => {
                         const primaryReason = item.why_matched.find((reason) => reason.trim().length > 0);
+                        const imageUrl = getNotificationItemImageUrl(item);
 
                         return (
                           <a
@@ -2075,34 +2407,40 @@ function AlertsRail(props: AlertsRailProps) {
                               "group block rounded-xl border p-2.5 transition",
                               notification.read_at
                                 ? "border-white/10 bg-black/20 hover:border-white/20 hover:bg-white/[0.04]"
-                                : "border-emerald-300/15 bg-black/20 hover:border-emerald-300/30 hover:bg-emerald-400/[0.08]",
+                                : "border-white/12 bg-black/25 hover:border-white/25 hover:bg-white/[0.05]",
                             )}
                           >
-                            <div className="flex items-start justify-between gap-2">
-                              <MarketplaceSourceBadge source={item.source} />
-                              <span className="inline-flex shrink-0 items-center gap-1 text-[10px] uppercase tracking-[0.12em] text-zinc-500 transition group-hover:text-zinc-300">
-                                View
-                                <ArrowUpRight className="size-3" />
-                              </span>
-                            </div>
+                            <div className="flex items-start gap-2.5">
+                              <NotificationItemThumb imageUrl={imageUrl} />
 
-                            <div className="mt-2 min-w-0">
-                              <p className="line-clamp-2 text-xs font-medium leading-snug text-zinc-100 transition group-hover:text-white">
-                                {item.title}
-                              </p>
-                              <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-zinc-400">
-                                {item.price ? (
-                                  <span className="font-medium text-zinc-200">{formatPrice(item.price)}</span>
-                                ) : null}
-                                <span className="line-clamp-1">
-                                  {item.location || `${formatSourceLabel(item.source)} listing`}
-                                </span>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-start justify-between gap-2">
+                                  <MarketplaceSourceBadge source={item.source} />
+                                  <span className="inline-flex shrink-0 items-center gap-1 text-[10px] uppercase tracking-[0.12em] text-zinc-500 transition group-hover:text-zinc-300">
+                                    View
+                                    <ArrowUpRight className="size-3" />
+                                  </span>
+                                </div>
+
+                                <div className="mt-1.5 min-w-0">
+                                  <p className="line-clamp-2 text-xs font-medium leading-snug text-zinc-100 transition group-hover:text-white">
+                                    {item.title}
+                                  </p>
+                                  <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-zinc-400">
+                                    {item.price ? (
+                                      <span className="font-medium text-zinc-200">{formatPrice(item.price)}</span>
+                                    ) : null}
+                                    <span className="line-clamp-1">
+                                      {item.location || `${formatSourceLabel(item.source)} listing`}
+                                    </span>
+                                  </div>
+                                  {primaryReason ? (
+                                    <p className="mt-1.5 line-clamp-2 text-[11px] leading-relaxed text-zinc-500">
+                                      {primaryReason}
+                                    </p>
+                                  ) : null}
+                                </div>
                               </div>
-                              {primaryReason ? (
-                                <p className="mt-1.5 line-clamp-2 text-[11px] leading-relaxed text-zinc-500">
-                                  {primaryReason}
-                                </p>
-                              ) : null}
                             </div>
                           </a>
                         );
@@ -2231,7 +2569,7 @@ function ResultsPanel({
                 : "No results found for this search."}
             </GlassPanel>
           ) : (
-            <ul className="grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(min(100%,260px),1fr))]">
+            <ul className="grid grid-cols-2 gap-2 sm:gap-3 md:[grid-template-columns:repeat(auto-fill,minmax(min(100%,260px),1fr))] lg:gap-4">
               {filteredResults.map((item) => {
                 const cardKey = `${item.source}:${item.source_listing_id || item.url}`;
                 return (
@@ -2338,6 +2676,7 @@ function EditSavedSearchModal(
   >,
 ) {
   if (!props.editing) return null;
+  const showSplitSourceRecommendation = hasMixedFacebookSources(props.editSources);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
@@ -2414,6 +2753,11 @@ function EditSavedSearchModal(
             ) : null}
             {props.editSources.length === 0 ? (
               <p className="text-xs text-red-300">Select at least one source.</p>
+            ) : null}
+            {showSplitSourceRecommendation ? (
+              <div className="rounded-xl border border-amber-300/20 bg-amber-300/10 p-3 text-xs leading-relaxed text-amber-100">
+                For best reliability, split into two saved searches: Facebook and non-Facebook.
+              </div>
             ) : null}
           </div>
 
@@ -2627,6 +2971,36 @@ function getMarketplaceLogoMeta(source: string): {
   return null;
 }
 
+function NotificationItemThumb({
+  imageUrl,
+}: {
+  imageUrl?: string | null;
+}) {
+  const [failedImageUrl, setFailedImageUrl] = useState<string | null>(null);
+  const normalizedImageUrl = imageUrl?.trim() || null;
+  const showImage = Boolean(normalizedImageUrl) && failedImageUrl !== normalizedImageUrl;
+
+  return (
+    <div className="relative size-14 shrink-0 overflow-hidden rounded-lg border border-white/10 bg-gradient-to-br from-white/[0.05] via-white/[0.02] to-transparent">
+      {showImage ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={normalizedImageUrl ?? ""}
+          alt=""
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          className="size-full object-cover transition duration-300 group-hover:scale-[1.04]"
+          onError={() => setFailedImageUrl(normalizedImageUrl)}
+        />
+      ) : (
+        <div className="flex size-full items-center justify-center text-zinc-600">
+          <ImageIcon className="size-5" aria-hidden />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MarketplaceSourceBadge({ source }: { source: string }) {
   const logo = getMarketplaceLogoMeta(source);
 
@@ -2663,7 +3037,12 @@ function InsightPill({
   const toneClasses = insightPillToneClasses(tone);
 
   return (
-    <span className={cn("rounded-full border px-2 py-0.5 text-[10px] font-medium", toneClasses)}>
+    <span
+      className={cn(
+        "rounded-full border px-2 py-0.5 font-mono text-[9px] font-medium uppercase tracking-[0.12em]",
+        toneClasses,
+      )}
+    >
       {label}
     </span>
   );
@@ -2671,9 +3050,9 @@ function InsightPill({
 
 function insightPillToneClasses(tone: "emerald" | "amber" | "red" | "slate") {
   return {
-    emerald: "border-emerald-300/25 bg-emerald-400/10 text-emerald-100",
-    amber: "border-amber-300/25 bg-amber-300/10 text-amber-100",
-    red: "border-red-300/25 bg-red-400/10 text-red-100",
+    emerald: "border-emerald-200/15 bg-emerald-500/[0.06] text-emerald-100/85",
+    amber: "border-amber-200/15 bg-amber-500/[0.06] text-amber-100/85",
+    red: "border-red-200/15 bg-red-500/[0.06] text-red-100/85",
     slate: "border-white/10 bg-white/[0.03] text-zinc-300",
   }[tone];
 }
@@ -2693,9 +3072,9 @@ function hasValuationBand(valuation?: Valuation | null) {
 function valuationLabel(valuation?: Valuation | null) {
   if (!valuation) return null;
   if (valuation.verdict === "insufficient_data") {
-    return hasValuationBand(valuation) ? "Value: rough estimate" : "Value: pending";
+    return hasValuationBand(valuation) ? "VALUE: ROUGH ESTIMATE" : "VALUE: PENDING";
   }
-  return `Value: ${valuation.verdict.replace("_", " ")}`;
+  return `VALUE: ${valuation.verdict.replace("_", " ").toUpperCase()}`;
 }
 
 function valuationTooltipLines(valuation?: Valuation | null) {
@@ -2873,7 +3252,7 @@ function ListingValuationBadge({
         <TooltipTrigger asChild>
           <span
             className={cn(
-              "inline-flex cursor-help rounded-full border px-2 py-0.5 text-[10px] font-medium outline-none",
+              "inline-flex cursor-help rounded-full border px-2 py-0.5 font-mono text-[9px] font-medium uppercase tracking-[0.12em] outline-none",
               allowTooltipFocus && "focus-visible:ring-2 focus-visible:ring-white/30 focus-visible:ring-offset-0",
               insightPillToneClasses(valuationToneValue),
             )}
@@ -2913,11 +3292,16 @@ function ListingCardBody({
   const imageUrl = item.image_urls?.[0];
   const distanceLabel = formatDistanceKm(item.distance_km, item.distance_is_approximate);
   const vehicleMileageLabel = formatVehicleMileageKm(inferVehicleMileageKm(item));
-  const footerLabel = vehicleMileageLabel ?? item.condition?.toUpperCase() ?? null;
+  const conditionLabel = item.condition?.trim() ? item.condition.trim().toUpperCase() : null;
+  const locationLabel = item.location || `${formatSourceLabel(item.source)} listing`;
+  const mobileLocationLabel = [distanceLabel, locationLabel].filter(Boolean).join(" \u00b7 ");
+  const detailLabels = [vehicleMileageLabel, conditionLabel].filter(
+    (label): label is string => Boolean(label),
+  );
 
   return (
     <>
-      <div className="relative aspect-[5/4] shrink-0 overflow-hidden bg-zinc-900">
+      <div className="relative aspect-square shrink-0 overflow-hidden bg-zinc-900 sm:aspect-[5/4]">
         {imageUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
@@ -2931,51 +3315,76 @@ function ListingCardBody({
           </div>
         )}
 
-        <div className="absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-2.5">
+        <div className="absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-1.5 sm:p-2.5">
           <MarketplaceSourceBadge source={item.source} />
         </div>
       </div>
 
-      <div className="flex min-h-[152px] flex-1 flex-col gap-2.5 overflow-hidden p-3.5">
-        <div className="flex items-start justify-between gap-2">
+      <div className="flex min-h-[74px] flex-1 flex-col gap-1.5 overflow-hidden p-2.5 sm:min-h-[152px] sm:gap-2.5 sm:p-3.5">
+        <div className="sm:hidden">
+          <p className="line-clamp-2 text-[13px] font-semibold leading-snug text-zinc-100 transition group-hover:text-white">
+            <span className="text-white">{formatPrice(item.price)}</span>
+            <span className="text-zinc-500">{" \u00b7 "}</span>
+            {item.title}
+          </p>
+          <p className="mt-0.5 line-clamp-1 text-[11px] text-zinc-500">
+            {mobileLocationLabel}
+          </p>
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            <ListingValuationBadge item={item} allowTooltipFocus={allowTooltipFocus} />
+            {detailLabels.map((label) => (
+              <span
+                key={`mobile-detail-${label}`}
+                className="rounded-full border border-white/10 bg-white/[0.03] px-1.5 py-0.5 text-[10px] font-medium leading-none text-zinc-300"
+              >
+                {label}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        <div className="hidden items-start justify-between gap-2 sm:flex">
           <p className="text-base font-semibold tracking-tight text-white">{formatPrice(item.price)}</p>
           {distanceLabel ? (
-            <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[10px] text-zinc-300">
+            <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 font-mono text-[9px] font-medium uppercase tracking-[0.12em] text-zinc-300">
               {distanceLabel}
             </span>
           ) : null}
         </div>
 
-        <p
-          className={cn(
-            "line-clamp-2 text-sm font-medium leading-snug text-zinc-100 transition group-hover:text-white",
-            titleClassName,
-          )}
-        >
-          {item.title}
-        </p>
+        <div className="hidden sm:block">
+          <p
+            className={cn(
+              "line-clamp-2 text-sm font-medium leading-snug text-zinc-100 transition group-hover:text-white",
+              titleClassName,
+            )}
+          >
+            {item.title}
+          </p>
+        </div>
 
-        <p className="line-clamp-1 text-xs text-zinc-400">
-          {item.location || `${formatSourceLabel(item.source)} listing`}
-        </p>
+        <div className="hidden sm:block">
+          <p className="line-clamp-1 text-xs text-zinc-400">{locationLabel}</p>
+        </div>
 
-        <div className="flex flex-wrap gap-1.5">
+        <div className="hidden flex-wrap gap-1.5 sm:flex">
           <ListingValuationBadge item={item} allowTooltipFocus={allowTooltipFocus} />
         </div>
 
-        <div className="mt-auto min-h-[16px]">
-          {footerLabel ? (
-            <p
+        <div className="mt-auto hidden min-h-[16px] flex-wrap gap-1.5 sm:flex">
+          {detailLabels.map((label) => (
+            <span
+              key={`desktop-detail-${label}`}
               className={cn(
-                "line-clamp-1 text-zinc-500",
-                vehicleMileageLabel
+                "rounded-full border border-white/10 bg-white/[0.02] px-2 py-0.5 text-zinc-500",
+                label === vehicleMileageLabel
                   ? "text-xs font-medium tracking-[0.02em] text-zinc-400"
                   : "text-[11px] uppercase tracking-[0.12em]",
               )}
             >
-              {footerLabel}
-            </p>
-          ) : null}
+              {label}
+            </span>
+          ))}
         </div>
       </div>
     </>
@@ -2999,7 +3408,7 @@ function MarketplaceResultCard({
     <li className="h-full">
       <article
         className={cn(
-          "group flex h-full flex-col overflow-hidden rounded-2xl border bg-zinc-950/85 transition hover:-translate-y-0.5 hover:border-white/20 hover:bg-zinc-950",
+          "group flex h-full flex-col overflow-hidden rounded-xl border bg-zinc-950/85 transition hover:border-white/20 hover:bg-zinc-950 sm:rounded-2xl sm:hover:-translate-y-0.5",
           copilotSelected
             ? "border-emerald-300/50 shadow-[0_0_0_1px_rgba(110,231,183,0.35)_inset]"
             : "border-white/10",
@@ -3065,7 +3474,7 @@ function CopilotShortlistCard({
         <div className="flex items-start justify-between gap-2">
           <p className="text-sm font-semibold tracking-tight text-white">{formatPrice(item.price)}</p>
           {distanceLabel ? (
-            <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[10px] text-zinc-300">
+            <span className="shrink-0 rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 font-mono text-[9px] font-medium uppercase tracking-[0.12em] text-zinc-300">
               {distanceLabel}
             </span>
           ) : null}
@@ -5522,6 +5931,66 @@ export default function HomePage() {
     }
   }
 
+  async function onCreateSplitSavedSearches() {
+    setSavedError(null);
+    setSavingSearch(true);
+
+    try {
+      if (!accessToken) throw new Error("Please log in to save searches.");
+      const trimmedQuery = q.trim();
+      if (!trimmedQuery) throw new Error("Enter a query before creating split searches.");
+
+      const splitConfigs = buildSplitSavedSearchConfigs(trimmedQuery, sources);
+      if (splitConfigs.length === 0) {
+        throw new Error("Select Facebook and at least one other source first.");
+      }
+      if (saved.length + splitConfigs.length > savedSearchMaxPerUserRef.current) {
+        throw new Error(
+          `Saved search limit reached. Delete an older saved search before creating ${splitConfigs.length} split searches.`,
+        );
+      }
+
+      const createdRows: SavedSearch[] = [];
+      for (const config of splitConfigs) {
+        const res = await fetch(`${API_BASE}/saved-searches`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            query: config.query,
+            sources: config.sources,
+            alerts_enabled: true,
+          }),
+        });
+
+        if (!res.ok) {
+          throw new Error(await parseApiError(res, "Failed to create split saved searches"));
+        }
+
+        let created = (await res.json()) as SavedSearch;
+        if (
+          hasIncompleteSavedSearchBaseline(created)
+          && !created.last_alert_attempted_at
+          && !created.last_alert_error_message
+        ) {
+          created = (await refreshSavedSearchAlert(created.id)) ?? created;
+        }
+        createdRows.push(created);
+      }
+
+      setSaved((prev) => [
+        ...createdRows,
+        ...prev.filter((entry) => !createdRows.some((created) => created.id === entry.id)),
+      ]);
+    } catch (err: unknown) {
+      setSavedError(err instanceof Error ? err.message : "Failed to create split saved searches");
+    } finally {
+      setSavingSearch(false);
+    }
+  }
+
   async function onDeleteSavedSearch(id: number) {
     setSavedError(null);
 
@@ -6104,6 +6573,7 @@ export default function HomePage() {
       savingSearch={savingSearch}
       onSearch={onSearch}
       onSaveCurrentSearch={onSaveCurrentSearch}
+      onCreateSplitSavedSearches={onCreateSplitSavedSearches}
       limit={limit}
       savedSearchMaxPerUser={effectiveSavedSearchMaxPerUser}
       activeSavedSearchCount={activeSavedSearchCount}

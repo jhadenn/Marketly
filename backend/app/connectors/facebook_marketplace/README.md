@@ -66,6 +66,10 @@ Cookie mode improves results when guest mode hits login walls.
 
 For hosted multi-user Marketly deployments, the preferred setup is now the local browser helper in
 `extension/facebook-session-helper/`, which keeps the stored cookie jar fresh without manually re-exporting it.
+Users should pair the helper from `/facebook-configuration`, paste the pairing code into the extension
+options page, and keep Facebook open occasionally in Chrome/Edge so helper can refresh on startup and
+periodic sync. The production API origin is built into the helper; developer mode is available for the
+local backend at `http://127.0.0.1:8000`.
 
 Expected file: `secrets/fb_cookies.json` (override with `cookie_path`).
 Example template: `secrets/fb_cookies.example.json`.
@@ -128,3 +132,11 @@ Copy-Item .\secrets\fb_cookies.example.json .\secrets\fb_cookies.json
   - `PUT /me/connectors/facebook/cookies`
   - `POST /me/connectors/facebook/verify`
   - `DELETE /me/connectors/facebook`
+- Browser-helper endpoints:
+  - `POST /me/connectors/facebook/helper/pairing-sessions`
+  - `POST /connectors/facebook/helper/pair`
+  - `PUT /connectors/facebook/helper/cookies`
+  - `POST /connectors/facebook/helper/heartbeat`
+  - `DELETE /me/connectors/facebook/helper`
+- For alert runs, `MARKETLY_ALERTS_PARTIAL_SOURCE_SUCCESS_ENABLED=true` lets mixed-source saved
+  searches continue on healthy sources while persisting `source_errors.facebook` for transparency.

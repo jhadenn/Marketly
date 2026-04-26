@@ -8,14 +8,17 @@ import {
   BadgeCheck,
   ChevronDown,
   CircleAlert,
+  Clipboard,
   ExternalLink,
   Loader2,
   LogOut,
+  RefreshCw,
   Sparkles,
   Upload,
 } from "lucide-react";
 
 import Dither from "@/components/Dither";
+import { getFacebookStaleActions } from "@/lib/facebook-reliability";
 import { useAuth } from "../providers";
 
 type FacebookConnectorStatus = {
@@ -33,6 +36,7 @@ type FacebookConnectorStatus = {
   earliest_cookie_expiry_at?: string | null;
   helper_connected?: boolean;
   helper_label?: string | null;
+  helper_last_seen_at?: string | null;
   stale_reason?: string | null;
   updated_at?: string | null;
 };
@@ -370,8 +374,8 @@ function getSetupState({
 
   return {
     badge: "Needed",
-    title: "Waiting for your cookie export",
-    description: "Follow the Chrome walkthrough, then upload the exported JSON in this panel.",
+    title: "Waiting for Browser Helper pairing",
+    description: "Generate a pairing code and pair the Chrome or Edge helper before relying on Facebook saved searches.",
     panelClassName: "border-sky-300/20 bg-sky-400/10",
     badgeClassName: "border-sky-300/20 bg-sky-400/15 text-sky-50",
   };
@@ -393,6 +397,7 @@ export default function FacebookConfigurationPage() {
   const [facebookHelperLabel, setFacebookHelperLabel] = useState("Chrome helper");
   const [facebookHelperPairing, setFacebookHelperPairing] =
     useState<FacebookHelperPairingSessionResponse | null>(null);
+  const [facebookCopyMessage, setFacebookCopyMessage] = useState<string | null>(null);
 
   const parseApiError = useCallback(async (res: Response, fallback: string) => {
     const text = await res.text();
@@ -562,6 +567,7 @@ export default function FacebookConfigurationPage() {
       }
       const json = (await res.json()) as FacebookHelperPairingSessionResponse;
       setFacebookHelperPairing(json);
+      setFacebookCopyMessage("Pairing code ready. Copy it into the helper options page.");
     } catch (err: unknown) {
       setFacebookConfigError(err instanceof Error ? err.message : "Failed to create a helper pairing code.");
     } finally {
@@ -612,6 +618,20 @@ export default function FacebookConfigurationPage() {
     [uploadFacebookCookiePayload],
   );
 
+  const copySetupValue = useCallback(async (label: string, value?: string | null) => {
+    const normalized = String(value || "").trim();
+    if (!normalized) {
+      setFacebookCopyMessage(`${label} is not available yet.`);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(normalized);
+      setFacebookCopyMessage(`${label} copied.`);
+    } catch {
+      setFacebookCopyMessage(`Copy failed. Select and copy the ${label.toLowerCase()} manually.`);
+    }
+  }, []);
+
   useEffect(() => {
     if (!user || !accessToken) {
       setFacebookConfigStatus(null);
@@ -636,6 +656,7 @@ export default function FacebookConfigurationPage() {
   const lastConnectorMessage =
     !facebookConfigError && facebookConfigStatus?.last_error_message ? facebookConfigStatus.last_error_message : null;
   const staleReasonDescription = describeStaleReason(facebookConfigStatus);
+  const staleActions = getFacebookStaleActions(facebookConfigStatus?.stale_reason);
   const credentialSourceValue = formatLabel(facebookConfigStatus?.credential_source);
   const helperStateValue = facebookConfigStatus?.helper_connected
     ? "Connected"
@@ -728,13 +749,13 @@ export default function FacebookConfigurationPage() {
         <GlassPanel className="p-6 sm:p-8">
           <p className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/35 px-3 py-1 font-mono text-[11px] uppercase tracking-[0.2em] text-zinc-300">
             <Sparkles className="size-3.5 text-zinc-400" />
-            Facebook BYOC
+            Facebook Helper
           </p>
           <h1 className="mt-4 text-3xl font-semibold tracking-tight text-white sm:text-4xl">
-            Facebook configuration
+            Pair Browser Helper
           </h1>
           <p className="mt-3 max-w-3xl text-sm leading-relaxed text-zinc-400 sm:text-base">
-            Pair the browser helper for hands-off session refresh, or keep using manual cookie upload if you prefer a one-off export workflow.
+            Recommended for saved searches: pair the Chrome or Edge helper so Marketly can keep your Facebook session fresh without repeated cookie exports. Keep Facebook open occasionally in Chrome/Edge so helper can refresh on startup and periodic sync.
           </p>
 
           <div className="mt-6 flex flex-col gap-3 sm:flex-row">
@@ -742,17 +763,17 @@ export default function FacebookConfigurationPage() {
               href="#setup-card"
               className="inline-flex items-center justify-center rounded-full bg-white px-5 py-3 text-sm font-medium text-black transition hover:bg-zinc-200"
             >
-              Upload cookies
+              Pair Browser Helper
             </Link>
             <Link
               href="#guide"
               className="inline-flex items-center justify-center rounded-full border border-white/10 bg-white/[0.03] px-5 py-3 text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.06]"
             >
-              View walkthrough
+              Manual fallback
             </Link>
           </div>
 
-          <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+          <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <MetricCard label="Configured" value={configuredValue} helper="Saved for your account" />
             <MetricCard
               label="Source"
@@ -771,7 +792,12 @@ export default function FacebookConfigurationPage() {
             <MetricCard
               label="Last Sync"
               value={formatTimestamp(facebookConfigStatus?.last_synced_at)}
-              helper="Most recent browser helper heartbeat"
+              helper="Most recent helper cookie upload"
+            />
+            <MetricCard
+              label="Last Attempt"
+              value={formatTimestamp(facebookConfigStatus?.helper_last_seen_at)}
+              helper="Most recent helper check-in"
             />
             <MetricCard label="Cookies" value={cookieCountValue} helper="Found in the current upload" />
             <MetricCard
@@ -802,9 +828,14 @@ export default function FacebookConfigurationPage() {
                   <Sparkles className="size-4 text-zinc-400" />
                   <p className="font-mono text-xs uppercase tracking-[0.18em] text-zinc-400">Setup workspace</p>
                 </div>
-                <h2 className="mt-3 text-2xl font-semibold tracking-tight text-white">Upload and verify</h2>
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <h2 className="text-2xl font-semibold tracking-tight text-white">Pair Browser Helper</h2>
+                  <span className="rounded-full border border-emerald-300/20 bg-emerald-400/10 px-3 py-1 text-[11px] uppercase tracking-[0.18em] text-emerald-100">
+                    Recommended
+                  </span>
+                </div>
                 <p className="mt-2 text-sm leading-relaxed text-zinc-400">
-                  Once you export the cookie JSON from Chrome, this panel is all you need to finish the setup.
+                  Generate a pairing code and pair the extension. Manual cookie upload stays available below as a fallback.
                 </p>
               </div>
 
@@ -843,7 +874,7 @@ export default function FacebookConfigurationPage() {
                     <div>
                       <p className="text-sm font-medium text-white">Leave Facebook open in Chrome or Edge</p>
                       <p className="mt-1 text-xs leading-relaxed text-zinc-400">
-                        The helper reads only the current facebook.com cookies from your own browser and uploads fresh state on a schedule.
+                        Keep Facebook open occasionally in Chrome/Edge so helper can refresh on startup and periodic sync.
                       </p>
                     </div>
                   </div>
@@ -891,6 +922,54 @@ export default function FacebookConfigurationPage() {
                     <div className="rounded-[24px] border border-amber-300/20 bg-amber-400/10 p-4 text-sm text-amber-50">
                       <p className="font-medium">Current recovery step</p>
                       <p className="mt-2 leading-relaxed">{staleReasonDescription}</p>
+                      {staleActions.length > 0 ? (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {staleActions.map((action) =>
+                            action.kind === "facebook" ? (
+                              <a
+                                key={action.label}
+                                href="https://www.facebook.com/marketplace/"
+                                target="_blank"
+                                rel="noreferrer"
+                                title={action.description}
+                                className="inline-flex items-center justify-center gap-2 rounded-2xl bg-white px-3 py-2 text-xs font-medium text-black transition hover:bg-zinc-200"
+                              >
+                                <ExternalLink className="size-3.5" />
+                                {action.label}
+                              </a>
+                            ) : (
+                              <button
+                                key={action.label}
+                                type="button"
+                                title={action.description}
+                                onClick={() => {
+                                  if (action.kind === "pair") {
+                                    void onCreateFacebookHelperPairing();
+                                  } else if (action.kind === "verify") {
+                                    void onVerifyFacebookCookies();
+                                  } else {
+                                    setFacebookCopyMessage("Open the helper options page with Facebook open, then click Sync now.");
+                                  }
+                                }}
+                                disabled={
+                                  (action.kind === "pair" && facebookHelperPairBusy)
+                                  || (action.kind === "verify" && facebookVerifyBusy)
+                                }
+                                className="inline-flex items-center justify-center gap-2 rounded-2xl border border-amber-100/20 bg-amber-50/10 px-3 py-2 text-xs font-medium text-amber-50 transition hover:border-amber-100/30 hover:bg-amber-50/15 disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                {action.kind === "sync" ? <RefreshCw className="size-3.5" /> : null}
+                                {action.label}
+                              </button>
+                            ),
+                          )}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+
+                  {facebookCopyMessage ? (
+                    <div className="rounded-[24px] border border-sky-300/20 bg-sky-400/10 p-4 text-sm text-sky-50">
+                      {facebookCopyMessage}
                     </div>
                   ) : null}
 
@@ -940,40 +1019,60 @@ export default function FacebookConfigurationPage() {
                       </div>
 
                       <div className="rounded-[24px] border border-white/10 bg-black/30 p-4">
-                        <p className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Extension setup</p>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Extension setup</p>
+                          <span className="rounded-full border border-emerald-300/20 bg-emerald-400/10 px-3 py-1 text-[11px] uppercase tracking-[0.16em] text-emerald-100">
+                            Production API built in
+                          </span>
+                        </div>
                         {facebookHelperPairing ? (
                           <div className="mt-3 space-y-3">
                             <div>
-                              <p className="text-xs text-zinc-400">Pairing code</p>
-                              <p className="mt-1 break-all rounded-2xl border border-white/10 bg-white/[0.03] px-3 py-2 font-mono text-sm text-white">
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="text-xs text-zinc-400">Pairing code</p>
+                                <button
+                                  type="button"
+                                  onClick={() => void copySetupValue("Pairing Code", facebookHelperPairing.pairing_code)}
+                                  className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.07]"
+                                >
+                                  <Clipboard className="size-3.5" />
+                                  Copy Pairing Code
+                                </button>
+                              </div>
+                              <p className="mt-2 break-all rounded-2xl border border-white/10 bg-white/[0.03] px-3 py-2 font-mono text-sm text-white">
                                 {facebookHelperPairing.pairing_code}
                               </p>
                             </div>
                             <p className="text-xs leading-relaxed text-zinc-400">
                               Expires {formatTimestamp(facebookHelperPairing.expires_at)}. In the extension options page,
-                              paste this code and use <span className="font-mono text-zinc-200">{API_BASE}</span> as the API base.
+                              paste this code and click Pair helper. The options page also accepts a <span className="font-mono text-zinc-200">pairing_code</span> query param for prefill.
                             </p>
                           </div>
                         ) : (
                           <p className="mt-3 text-sm leading-relaxed text-zinc-400">
-                            Generate a code here, then open the unpacked extension options page and paste both the code
-                            and the API base.
+                            Generate a code here, then open the unpacked extension options page. The production API endpoint is already built into the helper.
                           </p>
                         )}
                         <ol className="mt-4 space-y-2 text-xs leading-relaxed text-zinc-400">
                           <li>1. Load the unpacked extension from <span className="font-mono text-zinc-200">extension/facebook-session-helper</span>.</li>
                           <li>2. Open the extension options page.</li>
-                          <li>3. Paste the API base and pairing code, then click Pair helper.</li>
-                          <li>4. Keep Facebook open in Chrome or Edge so periodic syncs can refresh the saved session.</li>
+                          <li>3. Paste the pairing code, then click Pair helper.</li>
+                          <li>4. Open Facebook in Chrome or Edge occasionally so startup and periodic sync can refresh the saved session.</li>
                         </ol>
                       </div>
                     </div>
                   </div>
 
-                  <div className="space-y-2">
-                    <label className="block text-xs font-medium uppercase tracking-[0.16em] text-zinc-400">
-                      Upload exported JSON
-                    </label>
+                  <div className="rounded-[24px] border border-white/10 bg-white/[0.02] p-4 opacity-90">
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Manual fallback</p>
+                        <p className="mt-1 text-sm font-medium text-white">Upload exported JSON</p>
+                      </div>
+                      <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[11px] uppercase tracking-[0.16em] text-zinc-300">
+                        Fallback
+                      </span>
+                    </div>
                     <label
                       className={`group flex cursor-pointer items-center gap-4 rounded-[24px] border border-dashed border-white/10 bg-white/[0.03] p-4 transition ${
                         facebookUploadBusy ? "pointer-events-none opacity-70" : "hover:border-white/20 hover:bg-white/[0.05]"
@@ -1001,23 +1100,23 @@ export default function FacebookConfigurationPage() {
                         {facebookUploadBusy ? "Working" : "Browse"}
                       </span>
                     </label>
-                  </div>
 
-                  <div className="space-y-2">
-                    <label className="block text-xs font-medium uppercase tracking-[0.16em] text-zinc-400">
-                      Paste JSON manually
-                    </label>
-                    <textarea
-                      value={facebookCookieJsonText}
-                      onChange={(e) => setFacebookCookieJsonText(e.target.value)}
-                      placeholder='[{"name":"c_user","domain":".facebook.com","value":"..."}, ...]'
-                      className="min-h-36 w-full rounded-[24px] border border-white/10 bg-white/[0.03] px-4 py-3 text-xs leading-relaxed text-zinc-100 placeholder:text-zinc-500 focus:border-white/20 focus:outline-none"
-                    />
-                    <p className="text-xs leading-relaxed text-zinc-500">
-                      Fallback only. Marketly accepts a raw cookie array or an object shaped like
-                      {" "}
-                      <span className="font-mono text-zinc-400">{`{"cookies":[...]}`}</span>.
-                    </p>
+                    <div className="mt-4 space-y-2">
+                      <label className="block text-xs font-medium uppercase tracking-[0.16em] text-zinc-400">
+                        Paste JSON manually
+                      </label>
+                      <textarea
+                        value={facebookCookieJsonText}
+                        onChange={(e) => setFacebookCookieJsonText(e.target.value)}
+                        placeholder='[{"name":"c_user","domain":".facebook.com","value":"..."}, ...]'
+                        className="min-h-36 w-full rounded-[24px] border border-white/10 bg-white/[0.03] px-4 py-3 text-xs leading-relaxed text-zinc-100 placeholder:text-zinc-500 focus:border-white/20 focus:outline-none"
+                      />
+                      <p className="text-xs leading-relaxed text-zinc-500">
+                        Fallback only. Marketly accepts a raw cookie array or an object shaped like
+                        {" "}
+                        <span className="font-mono text-zinc-400">{`{"cookies":[...]}`}</span>.
+                      </p>
+                    </div>
                   </div>
 
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">

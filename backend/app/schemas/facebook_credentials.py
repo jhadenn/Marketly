@@ -24,6 +24,7 @@ class FacebookConnectorStatusResponse(BaseModel):
     earliest_cookie_expiry_at: str | None = None
     helper_connected: bool = False
     helper_label: str | None = None
+    helper_last_seen_at: str | None = None
     stale_reason: str | None = None
     updated_at: str | None = None
 

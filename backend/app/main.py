@@ -106,7 +106,7 @@ if configured_cors_origins:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=sorted(default_cors_origins),
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origin_regex=r"https://.*\.vercel\.app|chrome-extension://[a-p]{32}",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -219,6 +219,7 @@ def _facebook_status_response(
         ),
         helper_connected=state.helper_connected,
         helper_label=state.helper_label,
+        helper_last_seen_at=_dt_str(state.helper_last_seen_at),
         stale_reason=state.stale_reason,
         updated_at=_dt_str(getattr(row, "updated_at", None) if row else None),
     )
@@ -302,6 +303,7 @@ def _saved_search_out(row: SavedSearch) -> SavedSearchOut:
         last_alert_notified_at=_dt_str(getattr(row, "last_alert_notified_at", None)),
         last_alert_error_code=getattr(row, "last_alert_error_code", None),
         last_alert_error_message=getattr(row, "last_alert_error_message", None),
+        last_alert_source_errors=getattr(row, "last_alert_source_errors_json", None) or {},
         next_alert_check_due_at=_dt_str(_saved_search_next_due_at(row)),
         created_at=str(row.created_at),
     )
@@ -849,6 +851,26 @@ def sync_facebook_helper_cookies(
     except RuntimeError as exc:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return _facebook_status_response(row, db=db, user_id=client.user_id)
+
+
+@app.post("/connectors/facebook/helper/heartbeat", response_model=FacebookConnectorStatusResponse)
+def heartbeat_facebook_helper(
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    client = get_sync_client_from_authorization(db, authorization)
+    if client is None:
+        raise HTTPException(status_code=401, detail="Missing or invalid helper token")
+
+    try:
+        touch_sync_client(db, client, commit=True)
+    except Exception as exc:
+        db.rollback()
+        logger.warning("facebook helper heartbeat failed user=%s error=%s", client.user_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to record helper heartbeat.") from exc
+
+    row = get_user_facebook_credential(db, client.user_id)
     return _facebook_status_response(row, db=db, user_id=client.user_id)
 
 

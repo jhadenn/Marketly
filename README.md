@@ -123,6 +123,18 @@ npm run dev
 
 Open `http://localhost:3000`.
 
+### Facebook saved-search reliability
+
+For production Facebook saved searches, use the browser helper in `extension/facebook-session-helper/` as the recommended path. Users pair it from `/facebook-configuration`, paste the pairing code into the extension options page, and keep Facebook open occasionally in Chrome/Edge so helper can refresh on startup and periodic sync. The production API origin is built into the helper; developer mode is available for `http://127.0.0.1:8000`. Manual cookie upload remains available as a fallback.
+
+Run the saved-search alert backstop from cron or your scheduler every 15 minutes:
+
+```bash
+python scripts/run_saved_search_alerts.py --limit 20
+```
+
+Strict alert mode is the default: any source error fails the alert check. Set `MARKETLY_ALERTS_PARTIAL_SOURCE_SUCCESS_ENABLED=true` to continue mixed-source saved-search alerts for healthy sources while surfacing failed-source details in saved search and notification payloads.
+
 ---
 
 ## Environment Variables
@@ -152,6 +164,7 @@ Optional:
 MARKETLY_ENABLE_FACEBOOK=false
 MARKETLY_FACEBOOK_AUTH_MODE=guest
 MARKETLY_FACEBOOK_COOKIE_PATH=secrets/fb_cookies.json
+MARKETLY_ALERTS_PARTIAL_SOURCE_SUCCESS_ENABLED=false
 ```
 
 ### Frontend (`frontend/.env.local`)

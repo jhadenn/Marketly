@@ -45,6 +45,23 @@
       .grid.two {
         grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
       }
+      .dev-panel {
+        border-top: 1px solid var(--border);
+        margin-top: 4px;
+        padding-top: 16px;
+      }
+      .toggle-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--muted);
+      }
+      .toggle-row input {
+        width: auto;
+      }
+      .dev-fields[hidden] {
+        display: none;
+      }
       label {
         display: block;
         font-size: 11px;
@@ -94,6 +111,15 @@
       .muted {
         color: var(--muted);
       }
+      .help {
+        margin-top: 8px;
+        font-size: 12px;
+      }
+      .warning {
+        margin-top: 8px;
+        color: #fcd34d;
+        font-size: 12px;
+      }
       .status {
         white-space: pre-wrap;
         border-radius: 18px;
@@ -128,19 +154,30 @@
         <p class="muted">Marketly Facebook Session Helper</p>
         <h1>Pair once, then let the helper keep Facebook fresh.</h1>
         <p class="muted">
-          Paste the API base and pairing code from Marketly. After pairing, this helper syncs only
-          <code>facebook.com</code> cookies. It does not read Facebook page content.
+          Paste the one-time pairing code from Marketly. After pairing, this helper syncs only
+          <code>facebook.com</code> cookies to Marketly.
         </p>
       </section>
 
-      <section class="panel grid two">
-        <div>
-          <label for="api-base">API Base</label>
-          <input id="api-base" placeholder="https://your-marketly-api.example.com" />
-        </div>
+      <section class="panel stack">
         <div>
           <label for="pairing-code">Pairing Code</label>
           <input id="pairing-code" placeholder="Paste the one-time code from Marketly" />
+        </div>
+        <div class="dev-panel">
+          <label class="toggle-row" for="developer-mode">
+            <input id="developer-mode" type="checkbox" />
+            Developer mode
+          </label>
+          <div id="developer-fields" class="dev-fields grid" hidden>
+            <div>
+              <label for="dev-api-base">Local API Base</label>
+              <input id="dev-api-base" placeholder="http://127.0.0.1:8000" />
+              <p id="dev-api-base-help" class="muted help">
+                Developer mode only allows localhost or 127.0.0.1 API bases.
+              </p>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -148,11 +185,12 @@
         <div class="actions">
           <button id="pair-helper">Pair helper</button>
           <button id="sync-now" class="secondary">Sync now</button>
-          <button id="forget-helper" class="danger">Forget local token</button>
+          <button id="forget-helper" class="danger">Delete local token</button>
         </div>
         <div id="status" class="status">Loading helper state...</div>
       </section>
     </main>
+    <script src="utils.js"></script>
     <script src="options.js"></script>
   </body>
   </html>

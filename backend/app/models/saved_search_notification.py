@@ -12,5 +12,6 @@ class SavedSearchNotification(Base):
     saved_search_query = Column(String, nullable=False)
     summary_text = Column(Text, nullable=False)
     items_json = Column(JSON, nullable=False)
+    source_errors_json = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
     read_at = Column(DateTime(timezone=True), nullable=True, index=True)

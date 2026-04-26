@@ -90,3 +90,43 @@ def test_normalizer_prefers_richer_scope_when_it_contains_vehicle_details() -> N
 
     assert listing is not None
     assert listing.raw["lines"] == ["$2,200", "2008 Honda civic", "123,456 km", "Toronto, ON"]
+
+
+def test_normalizer_splits_compact_facebook_vehicle_text() -> None:
+    card = _card(
+        listing_id="1006",
+        lines=["CA$4,9991993 Mazda miata mx-5Richmond Hill, ON223K km"],
+    )
+
+    listing = normalize_marketplace_card(card)
+
+    assert listing is not None
+    assert listing.price_value == 4999.0
+    assert listing.title == "1993 Mazda miata mx-5"
+    assert listing.location_text == "Richmond Hill, ON"
+    assert listing.raw["lines"] == [
+        "CA$4,999",
+        "1993 Mazda miata mx-5",
+        "Richmond Hill, ON",
+        "223K km",
+    ]
+
+
+def test_normalizer_splits_compact_facebook_discount_price_text() -> None:
+    card = _card(
+        listing_id="1007",
+        lines=["CA$50,900CA$60,900Mazda Miata MX5 35th anniversary edition 2025Mississauga, ON"],
+    )
+
+    listing = normalize_marketplace_card(card)
+
+    assert listing is not None
+    assert listing.price_value == 50900.0
+    assert listing.title == "Mazda Miata MX5 35th anniversary edition 2025"
+    assert listing.location_text == "Mississauga, ON"
+    assert listing.raw["lines"] == [
+        "CA$50,900",
+        "CA$60,900",
+        "Mazda Miata MX5 35th anniversary edition 2025",
+        "Mississauga, ON",
+    ]

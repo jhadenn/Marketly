@@ -1,20 +1,42 @@
 const STORAGE_KEYS = {
   apiBase: "apiBase",
+  developerMode: "developerMode",
+  devApiBase: "devApiBase",
+  pairedApiTarget: "pairedApiTarget",
   helperToken: "helperToken",
   helperLabel: "helperLabel",
   lastFingerprint: "lastFingerprint",
   lastSyncAt: "lastSyncAt",
   lastError: "lastError",
   lastAttemptAt: "lastAttemptAt",
-  lastSyncSummary: "lastSyncSummary"
+  lastSyncSummary: "lastSyncSummary",
+  lastFailureReason: "lastFailureReason",
+  lastStatus: "lastStatus",
+  nextRetryAt: "nextRetryAt",
+  retryAttempt: "retryAttempt"
 };
 
-const apiBaseInput = document.getElementById("api-base");
+const {
+  DEFAULT_DEVELOPER_API_BASE,
+  buildStatusLines,
+  getApiTargetId,
+  normalizeApiBase,
+  parseOptionsPrefill,
+  resolveApiBase,
+  resolveApiMode,
+  toOriginPattern,
+  validateDeveloperApiBase
+} = window.MarketlyHelperUtils;
+
 const pairingCodeInput = document.getElementById("pairing-code");
 const pairButton = document.getElementById("pair-helper");
 const syncButton = document.getElementById("sync-now");
 const forgetButton = document.getElementById("forget-helper");
 const statusNode = document.getElementById("status");
+const developerModeInput = document.getElementById("developer-mode");
+const developerFields = document.getElementById("developer-fields");
+const devApiBaseInput = document.getElementById("dev-api-base");
+const devApiBaseHelpNode = document.getElementById("dev-api-base-help");
 
 function storageGet(keys) {
   return new Promise((resolve) => chrome.storage.local.get(keys, resolve));
@@ -26,18 +48,6 @@ function storageSet(payload) {
 
 function storageRemove(keys) {
   return new Promise((resolve) => chrome.storage.local.remove(keys, resolve));
-}
-
-function normalizeApiBase(value) {
-  const trimmed = String(value || "").trim();
-  if (!trimmed) {
-    return "";
-  }
-  return trimmed.replace(/\/+$/, "");
-}
-
-function toOriginPattern(apiBase) {
-  return `${new URL(normalizeApiBase(apiBase)).origin}/*`;
 }
 
 function permissionsRequest(permissions) {
@@ -52,21 +62,23 @@ async function readState() {
   return storageGet(Object.values(STORAGE_KEYS));
 }
 
+function stateWithCurrentDeveloperControls(state = {}) {
+  return {
+    ...state,
+    developerMode: developerModeInput.checked,
+    devApiBase: normalizeApiBase(devApiBaseInput.value || DEFAULT_DEVELOPER_API_BASE)
+  };
+}
+
 function renderState(state, extraMessage = "") {
-  apiBaseInput.value = state.apiBase || "";
-  const lines = [
-    state.helperLabel ? `Helper label: ${state.helperLabel}` : "Helper label: not paired",
-    state.lastSyncAt ? `Last sync: ${new Date(state.lastSyncAt).toLocaleString()}` : "Last sync: never",
-    state.lastAttemptAt
-      ? `Last attempt: ${new Date(state.lastAttemptAt).toLocaleString()}`
-      : "Last attempt: never",
-    state.lastSyncSummary ? `Summary: ${state.lastSyncSummary}` : "Summary: no sync yet",
-    state.lastError ? `Last error: ${state.lastError}` : "Last error: none"
-  ];
-  if (extraMessage) {
-    lines.unshift(extraMessage);
-  }
+  const effectiveDeveloperMode = resolveApiMode(state) === "developer";
+  developerModeInput.checked = effectiveDeveloperMode;
+  devApiBaseInput.value = normalizeApiBase(state.devApiBase || state.apiBase || DEFAULT_DEVELOPER_API_BASE);
+  developerFields.hidden = !effectiveDeveloperMode;
+
+  const lines = buildStatusLines(stateWithCurrentDeveloperControls(state), extraMessage);
   statusNode.textContent = lines.join("\n");
+  updateDeveloperApiBaseHelp();
 }
 
 async function refreshState(extraMessage = "") {
@@ -75,29 +87,40 @@ async function refreshState(extraMessage = "") {
 }
 
 async function pairHelper() {
-  const apiBase = normalizeApiBase(apiBaseInput.value);
+  const targetState = stateWithCurrentDeveloperControls(await readState());
+  let apiBase = normalizeApiBase(resolveApiBase(targetState));
+  let targetId = getApiTargetId(targetState);
   const pairingCode = String(pairingCodeInput.value || "").trim();
-  if (!apiBase) {
-    await refreshState("Enter the Marketly API base first.");
-    return;
-  }
   if (!pairingCode) {
     await refreshState("Paste the one-time pairing code from Marketly first.");
     return;
   }
 
-  let originPattern;
-  try {
-    originPattern = toOriginPattern(apiBase);
-  } catch {
-    await refreshState("API base is not a valid URL.");
-    return;
-  }
+  if (resolveApiMode(targetState) === "developer") {
+    const developerApiBase = normalizeApiBase(targetState.devApiBase || DEFAULT_DEVELOPER_API_BASE);
+    const validation = validateDeveloperApiBase(developerApiBase);
+    if (!validation.ok) {
+      await refreshState(validation.message);
+      return;
+    }
+    apiBase = developerApiBase;
+    targetId = getApiTargetId({ ...targetState, devApiBase: apiBase });
 
-  const granted = await permissionsRequest({ origins: [originPattern] });
-  if (!granted) {
-    await refreshState("The helper needs permission for that Marketly API origin before it can pair.");
-    return;
+    let originPattern;
+    try {
+      originPattern = toOriginPattern(apiBase);
+    } catch {
+      await refreshState("Developer API base is not a valid URL.");
+      return;
+    }
+
+    const granted = await permissionsRequest({ origins: [originPattern] });
+    if (!granted) {
+      await refreshState(
+        "Local API permission was not granted. Allow the developer API origin, then retry."
+      );
+      return;
+    }
   }
 
   let response;
@@ -129,19 +152,44 @@ async function pairHelper() {
   }
 
   await storageSet({
-    [STORAGE_KEYS.apiBase]: apiBase,
+    [STORAGE_KEYS.developerMode]: resolveApiMode(targetState) === "developer",
+    [STORAGE_KEYS.devApiBase]: resolveApiMode(targetState) === "developer" ? apiBase : DEFAULT_DEVELOPER_API_BASE,
+    [STORAGE_KEYS.pairedApiTarget]: targetId,
     [STORAGE_KEYS.helperToken]: payload.helper_token,
     [STORAGE_KEYS.helperLabel]: payload.helper_label || "Browser Helper",
     [STORAGE_KEYS.lastError]: "",
+    [STORAGE_KEYS.lastFailureReason]: "",
+    [STORAGE_KEYS.lastStatus]: "paired",
+    [STORAGE_KEYS.nextRetryAt]: "",
+    [STORAGE_KEYS.retryAttempt]: 0,
     [STORAGE_KEYS.lastSyncSummary]: "Paired successfully. Syncing now..."
   });
+  await storageRemove([STORAGE_KEYS.apiBase]);
   pairingCodeInput.value = "";
-  const syncResult = await runtimeSendMessage({ type: "sync-now" });
+  const isDeveloper = resolveApiMode(targetState) === "developer";
+  const syncResult = await runtimeSendMessage({
+    type: "sync-now",
+    config: {
+      helperToken: payload.helper_token,
+      developerMode: isDeveloper,
+      devApiBase: isDeveloper ? apiBase : DEFAULT_DEVELOPER_API_BASE,
+      pairedApiTarget: targetId
+    }
+  });
   await refreshState(syncResult && syncResult.message ? syncResult.message : "Paired successfully.");
 }
 
 async function syncNow() {
-  const result = await runtimeSendMessage({ type: "sync-now" });
+  const state = await readState();
+  const result = await runtimeSendMessage({
+    type: "sync-now",
+    config: {
+      helperToken: state.helperToken,
+      developerMode: state.developerMode,
+      devApiBase: state.devApiBase,
+      pairedApiTarget: state.pairedApiTarget
+    }
+  });
   await refreshState(result && result.message ? result.message : "Sync request sent.");
 }
 
@@ -149,20 +197,76 @@ async function forgetLocalToken() {
   await storageRemove([
     STORAGE_KEYS.helperToken,
     STORAGE_KEYS.helperLabel,
+    STORAGE_KEYS.pairedApiTarget,
     STORAGE_KEYS.lastFingerprint,
     STORAGE_KEYS.lastSyncAt,
     STORAGE_KEYS.lastError,
     STORAGE_KEYS.lastAttemptAt,
-    STORAGE_KEYS.lastSyncSummary
+    STORAGE_KEYS.lastSyncSummary,
+    STORAGE_KEYS.lastFailureReason,
+    STORAGE_KEYS.lastStatus,
+    STORAGE_KEYS.nextRetryAt,
+    STORAGE_KEYS.retryAttempt
   ]);
   await refreshState("Removed the local helper token. Pair again from Marketly when you are ready.");
+}
+
+async function persistDeveloperSettings() {
+  const developerMode = developerModeInput.checked;
+  const devApiBase = normalizeApiBase(devApiBaseInput.value || DEFAULT_DEVELOPER_API_BASE);
+  developerFields.hidden = !developerMode;
+  await storageSet({
+    [STORAGE_KEYS.developerMode]: developerMode,
+    [STORAGE_KEYS.devApiBase]: devApiBase
+  });
+  await storageRemove([STORAGE_KEYS.apiBase]);
+  await refreshState();
+}
+
+function updateDeveloperApiBaseHelp() {
+  const validation = validateDeveloperApiBase(devApiBaseInput.value || DEFAULT_DEVELOPER_API_BASE);
+  const message = validation.warning || validation.message || "";
+  devApiBaseHelpNode.textContent = message || "Example: http://127.0.0.1:8000";
+  devApiBaseHelpNode.className = validation.warning ? "warning" : "muted help";
+}
+
+async function applyQueryPrefill() {
+  const prefill = parseOptionsPrefill(window.location.search);
+  const updates = {};
+  let message = "";
+  if (prefill.apiBase) {
+    const validation = validateDeveloperApiBase(prefill.apiBase);
+    if (validation.ok) {
+      developerModeInput.checked = true;
+      developerFields.hidden = false;
+      devApiBaseInput.value = prefill.apiBase;
+      updates[STORAGE_KEYS.developerMode] = true;
+      updates[STORAGE_KEYS.devApiBase] = prefill.apiBase;
+      message = "Developer API base prefilled.";
+    }
+  }
+  if (prefill.pairingCode) {
+    pairingCodeInput.value = prefill.pairingCode;
+    message = message ? `${message} Pairing code prefilled.` : "Pairing code prefilled from Marketly.";
+  }
+  if (Object.keys(updates).length > 0) {
+    await storageSet(updates);
+    await storageRemove([STORAGE_KEYS.apiBase]);
+  }
+  if (message) {
+    await refreshState(message);
+    pairingCodeInput.value = prefill.pairingCode;
+  }
 }
 
 pairButton.addEventListener("click", () => void pairHelper());
 syncButton.addEventListener("click", () => void syncNow());
 forgetButton.addEventListener("click", () => void forgetLocalToken());
+developerModeInput.addEventListener("change", () => void persistDeveloperSettings());
+devApiBaseInput.addEventListener("input", updateDeveloperApiBaseHelp);
+devApiBaseInput.addEventListener("change", () => void persistDeveloperSettings());
 chrome.storage.onChanged.addListener(() => {
   void refreshState();
 });
 
-void refreshState();
+void refreshState().then(() => applyQueryPrefill());

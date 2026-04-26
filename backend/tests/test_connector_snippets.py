@@ -202,6 +202,42 @@ def test_facebook_unified_connector_extracts_vehicle_mileage_from_raw_lines():
     assert listing.vehicle_mileage_km == 123456.0
 
 
+def test_facebook_unified_connector_extracts_compact_k_vehicle_mileage():
+    listing = _to_listing(
+        FacebookNormalizedListing(
+            source="facebook",
+            external_id="vehicle-k-1",
+            title="1993 Mazda miata mx-5",
+            price_value=4999.0,
+            price_currency="CAD",
+            location_text="Richmond Hill, ON",
+            latitude=None,
+            longitude=None,
+            image_urls=["https://example.com/car-k.jpg"],
+            listing_url="https://www.facebook.com/marketplace/item/vehicle-k-1/",
+            seller_name="Seller",
+            posted_at=None,
+            raw={
+                "href": "/marketplace/item/vehicle-k-1/",
+                "lines": [
+                    "CA$4,999",
+                    "1993 Mazda miata mx-5",
+                    "Richmond Hill, ON",
+                    "223K km",
+                ],
+            },
+            price_bucket="3000-5000",
+            title_keywords=["mazda", "miata"],
+            has_images=True,
+            location_quality=0.95,
+            age_hint="2 days ago",
+            dedup_key="facebook:vehicle-k-1",
+        )
+    )
+
+    assert listing.vehicle_mileage_km == 223000.0
+
+
 def test_facebook_unified_connector_extracts_vehicle_mileage_from_raw_text():
     listing = _to_listing(
         FacebookNormalizedListing(

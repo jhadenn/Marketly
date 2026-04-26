@@ -177,12 +177,23 @@ def test_facebook_helper_pair_and_sync_flow(monkeypatch):
     assert sync_payload["helper_connected"] is True
     assert sync_payload["helper_label"] == "Chrome helper"
     assert sync_payload["last_synced_at"] is not None
+    assert sync_payload["helper_last_seen_at"] is not None
 
     status_res = client.get("/me/connectors/facebook")
     assert status_res.status_code == 200
     status_payload = status_res.json()
     assert status_payload["credential_source"] == "browser_helper"
     assert status_payload["helper_connected"] is True
+    assert status_payload["helper_last_seen_at"] is not None
+
+    heartbeat_res = client.post(
+        "/connectors/facebook/helper/heartbeat",
+        headers={"Authorization": f"Bearer {helper_token}"},
+    )
+    assert heartbeat_res.status_code == 200
+    heartbeat_payload = heartbeat_res.json()
+    assert heartbeat_payload["helper_connected"] is True
+    assert heartbeat_payload["helper_last_seen_at"] is not None
 
     app.dependency_overrides.clear()
     engine.dispose()

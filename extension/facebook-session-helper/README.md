@@ -12,7 +12,51 @@
 1. Open Marketly `Facebook configuration`.
 2. Generate a helper pairing code.
 3. Open the extension options page.
-4. Paste the Marketly API base and the pairing code.
+4. Paste the pairing code.
 5. Click `Pair helper`.
 
-After pairing, the extension syncs `facebook.com` cookies on startup, every 15 minutes, and when Facebook tabs become active or finish loading.
+After pairing, the extension syncs `facebook.com` cookies on startup and every 15 minutes. Keep Facebook open occasionally in Chrome/Edge so helper can refresh on startup and periodic sync.
+
+Production mode always uses:
+
+```text
+https://marketly-backend-870323632900.northamerica-northeast2.run.app
+```
+
+Developer mode is optional and only allows loopback API bases such as:
+
+```text
+http://127.0.0.1:8000
+```
+
+The options page also reads query params for prefill:
+
+```text
+options.html?pairing_code=PAIRING_CODE
+```
+
+For local development, `dev_api_base` can also be used with a loopback URL.
+
+## Reliability behavior
+
+- Transient API/network failures retry with exponential backoff and jitter.
+- Retry attempts are capped; the options page shows `Next retry` and the last failure reason.
+- When cookies are unchanged, the helper sends a heartbeat to `/connectors/facebook/helper/heartbeat` so Marketly can show the last check-in.
+- `Sync now` forces a cookie upload attempt and clears successful retry state.
+
+## Options status meanings
+
+- `Not paired`: generate a fresh code in Marketly and pair again.
+- `Paired / healthy`: the helper has a token and no current error.
+- `Token invalid`: disconnect or forget the local token, then re-pair from Marketly.
+- `Marketly API unreachable`: verify network connectivity. In developer mode, verify the local backend is running at `http://127.0.0.1:8000`.
+- `Re-pair helper for this API mode`: the local token was created against a different API target. Delete the local token and pair again.
+- `No Facebook cookies found`: open Facebook Marketplace in Chrome or Edge, sign in, then click `Sync now`.
+
+## Troubleshooting
+
+- Invalid token: re-pair the helper from Facebook Configuration.
+- Wrong developer API base: production users do not enter an API base. For local development, enable Developer mode and use `http://127.0.0.1:8000`.
+- Helper disconnected: open Facebook in Chrome/Edge and click `Sync now`.
+- Facebook checkpoint/login wall: resolve the Facebook prompt in the browser, then sync and re-verify in Marketly.
+- Permission prompt denied: this only applies to developer mode. Click `Pair helper` again and allow the local API origin.

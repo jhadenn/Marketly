@@ -16,6 +16,7 @@ from app.services.alerts import (
     refresh_saved_search_alerts_for_user,
     run_saved_search_alert_check,
     run_saved_search_alert_job,
+    serialize_notification,
 )
 from app.services.facebook_verification import FacebookCredentialVerificationOutcome
 from app.services.location import get_user_location_preference
@@ -110,6 +111,7 @@ def test_run_saved_search_alert_job_creates_digest_for_new_high_confidence_listi
         price_amount=430,
         snippet="Clean frame and detailed listing.",
     )
+    new_listing.image_urls = ["/marketplaces/EBay_logo.svg", "https://example.com/new-1.jpg"]
 
     db.add(
         ListingSnapshot(
@@ -160,6 +162,7 @@ def test_run_saved_search_alert_job_creates_digest_for_new_high_confidence_listi
     assert notifications[0].saved_search_id == saved_search.id
     assert notifications[0].summary_text == "1 new listing for road bike"
     assert notifications[0].items_json[0]["source_listing_id"] == "new-1"
+    assert notifications[0].items_json[0]["image_url"] == "https://example.com/new-1.jpg"
     assert captured["sort"] == "newest"
     assert saved_search.last_alert_baseline_version == ALERT_BASELINE_VERSION
     assert saved_search.last_alert_result_count == 2
@@ -168,6 +171,37 @@ def test_run_saved_search_alert_job_creates_digest_for_new_high_confidence_listi
 
     db.close()
     engine.dispose()
+
+
+def test_serialize_notification_promotes_legacy_image_urls():
+    row = SimpleNamespace(
+        id=1,
+        saved_search_id=2,
+        saved_search_query="road bike",
+        created_at=datetime.now(timezone.utc),
+        read_at=None,
+        items_json=[
+            {
+                "listing_key": "ebay:listing-1",
+                "source": "ebay",
+                "source_listing_id": "listing-1",
+                "title": "Road bike listing",
+                "url": "https://example.com/listing-1",
+                "image_urls": ["", "/marketplaces/EBay_logo.svg", "https://example.com/listing-1.jpg"],
+                "price": {"amount": 450, "currency": "CAD"},
+                "location": "Toronto",
+                "match_confidence": 0.91,
+                "why_matched": ["Strong keyword match to the saved search."],
+                "valuation": None,
+                "risk": None,
+            }
+        ],
+        source_errors_json=None,
+    )
+
+    payload = serialize_notification(row)
+
+    assert payload.items[0].image_url == "https://example.com/listing-1.jpg"
 
 
 def test_run_saved_search_alert_job_baselines_first_check_without_creating_digest(monkeypatch):
@@ -554,6 +588,7 @@ def test_run_saved_search_alert_job_allows_alert_after_zero_result_baseline(monk
 def test_run_saved_search_alert_job_skips_incomplete_source_results(monkeypatch):
     engine, session_factory = build_test_session_factory()
     db = session_factory()
+    monkeypatch.setattr(settings, "MARKETLY_ALERTS_PARTIAL_SOURCE_SUCCESS_ENABLED", False)
 
     saved_search = SavedSearch(
         user_id="user-source-error",
@@ -611,7 +646,159 @@ def test_run_saved_search_alert_job_skips_incomplete_source_results(monkeypatch)
     assert saved_search.last_alert_checked_at is None
     assert saved_search.last_alert_error_code == "LOGIN_REQUIRED"
     assert saved_search.last_alert_error_message == "Facebook: Facebook session expired."
+    assert saved_search.last_alert_source_errors_json == {
+        "facebook": {
+            "code": "LOGIN_REQUIRED",
+            "message": "Facebook session expired.",
+            "retryable": False,
+        }
+    }
     assert saved_search.last_alert_notified_at is None
+
+    db.close()
+    engine.dispose()
+
+
+def test_run_saved_search_alert_job_partial_mode_continues_for_healthy_sources(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    db = session_factory()
+    monkeypatch.setattr(settings, "MARKETLY_ALERTS_PARTIAL_SOURCE_SUCCESS_ENABLED", True)
+
+    previous_check = datetime.now(timezone.utc) - timedelta(days=1)
+    saved_search = SavedSearch(
+        user_id="user-partial",
+        query="mazda miata",
+        sources="facebook,ebay",
+        alerts_enabled=True,
+        last_alert_checked_at=previous_check,
+    )
+    _mark_verified_baseline(saved_search, result_count=0)
+    db.add(saved_search)
+    db.commit()
+    db.refresh(saved_search)
+
+    fresh_listing = _build_listing(
+        source_listing_id="miata-ebay-1",
+        title="Mazda Miata healthy source listing",
+        price_amount=8200,
+        snippet="Fresh eBay result while Facebook is unavailable.",
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_facebook_runtime_context(db, user_id):
+        return None, SourceError(
+            code="LOGIN_REQUIRED",
+            message="Facebook session expired.",
+            retryable=False,
+        )
+
+    async def fake_unified_search(**kwargs):
+        captured.update(kwargs)
+        return [fresh_listing], None, None, {}
+
+    monkeypatch.setattr(
+        "app.services.alerts._facebook_runtime_context",
+        fake_facebook_runtime_context,
+    )
+    monkeypatch.setattr("app.services.alerts.unified_search", fake_unified_search)
+    monkeypatch.setattr("app.services.alerts.enrich_listings_with_insights", lambda db, query, results: results)
+    monkeypatch.setattr("app.services.alerts.persist_listing_snapshots", lambda **kwargs: len(kwargs["listings"]))
+
+    result = asyncio.run(
+        run_saved_search_alert_job(
+            db,
+            limit_per_search=20,
+            user_id="user-partial",
+        )
+    )
+
+    notifications = db.query(SavedSearchNotification).all()
+    db.refresh(saved_search)
+
+    assert result["checked"] == 1
+    assert result["notifications_created"] == 1
+    assert captured["sources"] == ["ebay"]
+    assert saved_search.last_alert_error_code is None
+    assert saved_search.last_alert_error_message is None
+    assert saved_search.last_alert_source_errors_json == {
+        "facebook": {
+            "code": "LOGIN_REQUIRED",
+            "message": "Facebook session expired.",
+            "retryable": False,
+        }
+    }
+    assert len(notifications) == 1
+    assert notifications[0].items_json[0]["source_listing_id"] == "miata-ebay-1"
+    assert notifications[0].source_errors_json == saved_search.last_alert_source_errors_json
+    assert "Facebook unavailable this run" in notifications[0].summary_text
+    serialized = serialize_notification(notifications[0])
+    assert serialized.source_errors["facebook"].message == "Facebook session expired."
+    assert "Facebook unavailable this run" in serialized.summary
+
+    db.close()
+    engine.dispose()
+
+
+def test_run_saved_search_alert_job_partial_mode_fails_when_all_sources_fail(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    db = session_factory()
+    monkeypatch.setattr(settings, "MARKETLY_ALERTS_PARTIAL_SOURCE_SUCCESS_ENABLED", True)
+
+    saved_search = SavedSearch(
+        user_id="user-all-fail",
+        query="mazda miata",
+        sources="facebook,ebay",
+        alerts_enabled=True,
+        last_alert_checked_at=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    _mark_verified_baseline(saved_search, result_count=0)
+    db.add(saved_search)
+    db.commit()
+    db.refresh(saved_search)
+
+    async def fake_unified_search(**kwargs):
+        return [], None, None, {
+            "facebook": SourceError(
+                code="LOGIN_REQUIRED",
+                message="Facebook session expired.",
+                retryable=False,
+            ),
+            "ebay": SourceError(
+                code="TIMEOUT",
+                message="eBay timed out.",
+                retryable=True,
+            ),
+        }
+
+    monkeypatch.setattr("app.services.alerts.unified_search", fake_unified_search)
+
+    result = asyncio.run(
+        run_saved_search_alert_job(
+            db,
+            limit_per_search=20,
+            user_id="user-all-fail",
+        )
+    )
+
+    notifications = db.query(SavedSearchNotification).all()
+    db.refresh(saved_search)
+
+    assert result["checked"] == 1
+    assert result["notifications_created"] == 0
+    assert notifications == []
+    assert saved_search.last_alert_error_code == "SOURCE_ERRORS"
+    assert saved_search.last_alert_source_errors_json == {
+        "facebook": {
+            "code": "LOGIN_REQUIRED",
+            "message": "Facebook session expired.",
+            "retryable": False,
+        },
+        "ebay": {
+            "code": "TIMEOUT",
+            "message": "eBay timed out.",
+            "retryable": True,
+        },
+    }
 
     db.close()
     engine.dispose()
@@ -1185,6 +1372,13 @@ def test_execute_saved_search_alert_check_clears_prior_error_state_on_success(mo
         last_alert_checked_at=previous_check,
         last_alert_error_code="TIMEOUT",
         last_alert_error_message="eBay: timed out.",
+        last_alert_source_errors_json={
+            "ebay": {
+                "code": "TIMEOUT",
+                "message": "eBay: timed out.",
+                "retryable": True,
+            }
+        },
     )
     db.add(saved_search)
     db.commit()
@@ -1216,6 +1410,7 @@ def test_execute_saved_search_alert_check_clears_prior_error_state_on_success(mo
     assert _as_utc(saved_search.last_alert_checked_at) > previous_check
     assert saved_search.last_alert_error_code is None
     assert saved_search.last_alert_error_message is None
+    assert saved_search.last_alert_source_errors_json is None
 
     db.close()
     engine.dispose()
