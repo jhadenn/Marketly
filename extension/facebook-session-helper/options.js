@@ -5,6 +5,7 @@ const STORAGE_KEYS = {
   pairedApiTarget: "pairedApiTarget",
   helperToken: "helperToken",
   helperLabel: "helperLabel",
+  marketlyAppBase: "marketlyAppBase",
   lastFingerprint: "lastFingerprint",
   lastSyncAt: "lastSyncAt",
   lastError: "lastError",
@@ -13,7 +14,9 @@ const STORAGE_KEYS = {
   lastFailureReason: "lastFailureReason",
   lastStatus: "lastStatus",
   nextRetryAt: "nextRetryAt",
-  retryAttempt: "retryAttempt"
+  retryAttempt: "retryAttempt",
+  lastAttentionPromptAt: "lastAttentionPromptAt",
+  lastAttentionReason: "lastAttentionReason"
 };
 
 const {
@@ -198,6 +201,8 @@ async function forgetLocalToken() {
     STORAGE_KEYS.helperToken,
     STORAGE_KEYS.helperLabel,
     STORAGE_KEYS.pairedApiTarget,
+    STORAGE_KEYS.lastAttentionPromptAt,
+    STORAGE_KEYS.lastAttentionReason,
     STORAGE_KEYS.lastFingerprint,
     STORAGE_KEYS.lastSyncAt,
     STORAGE_KEYS.lastError,

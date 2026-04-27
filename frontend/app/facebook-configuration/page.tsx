@@ -263,7 +263,7 @@ function describeStaleReason(status: FacebookConnectorStatus | null) {
   if (!reason) return null;
   switch (reason) {
     case "helper_disconnected":
-      return "The browser helper has stopped checking in. Open Facebook in Chrome or Edge and let the helper sync again, or pair the helper again if you removed the extension.";
+      return "The browser helper has stopped checking in. Open Facebook in Chrome or Edge, then ask the helper to sync again. Re-pair only if the extension was removed, reset, or revoked.";
     case "cookie_expired":
       return "The saved Facebook session has already expired. Open Facebook again so the helper can refresh it, or upload a new manual export.";
     case "cookie_expiring_soon":
@@ -273,6 +273,59 @@ function describeStaleReason(status: FacebookConnectorStatus | null) {
     default:
       return status?.last_error_message ?? "Facebook session needs attention.";
   }
+}
+
+const FACEBOOK_HELPER_EXTENSION_ID = (process.env.NEXT_PUBLIC_FACEBOOK_HELPER_EXTENSION_ID || "").trim();
+
+type FacebookHelperExtensionResponse = {
+  ok?: boolean;
+  status?: string;
+  message?: string;
+};
+
+type ChromeRuntimeBridge = {
+  sendMessage?: (
+    extensionId: string,
+    message: unknown,
+    callback: (response?: FacebookHelperExtensionResponse) => void,
+  ) => void;
+  lastError?: { message?: string };
+};
+
+function isLoopbackApiBase(apiBase: string) {
+  try {
+    const parsed = new URL(apiBase);
+    return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function helperMessageConfig(apiBase: string) {
+  const developerMode = isLoopbackApiBase(apiBase);
+  return developerMode ? { developerMode, devApiBase: apiBase } : { developerMode };
+}
+
+function sendFacebookHelperMessage(message: unknown): Promise<FacebookHelperExtensionResponse> {
+  if (!FACEBOOK_HELPER_EXTENSION_ID) {
+    return Promise.reject(new Error("Helper extension bridge is not configured."));
+  }
+  const runtime = (globalThis as typeof globalThis & { chrome?: { runtime?: ChromeRuntimeBridge } }).chrome?.runtime;
+  if (!runtime?.sendMessage) {
+    return Promise.reject(new Error("Chrome extension messaging is not available in this browser."));
+  }
+  const sendMessage = runtime.sendMessage.bind(runtime);
+
+  return new Promise((resolve, reject) => {
+    sendMessage(FACEBOOK_HELPER_EXTENSION_ID, message, (response) => {
+      const lastError = runtime.lastError;
+      if (lastError?.message) {
+        reject(new Error(lastError.message));
+        return;
+      }
+      resolve(response ?? { ok: false, status: "no_response", message: "Helper did not respond." });
+    });
+  });
 }
 
 function getSetupState({
@@ -392,6 +445,7 @@ export default function FacebookConfigurationPage() {
   const [facebookVerifyBusy, setFacebookVerifyBusy] = useState(false);
   const [facebookDeleteBusy, setFacebookDeleteBusy] = useState(false);
   const [facebookHelperPairBusy, setFacebookHelperPairBusy] = useState(false);
+  const [facebookHelperBridgeBusy, setFacebookHelperBridgeBusy] = useState(false);
   const [facebookHelperDeleteBusy, setFacebookHelperDeleteBusy] = useState(false);
   const [facebookCookieJsonText, setFacebookCookieJsonText] = useState("");
   const [facebookHelperLabel, setFacebookHelperLabel] = useState("Chrome helper");
@@ -546,6 +600,33 @@ export default function FacebookConfigurationPage() {
     }
   }, [API_BASE, accessToken, fetchFacebookConfigStatus, parseApiError]);
 
+  const onSyncFacebookHelper = useCallback(async () => {
+    setFacebookConfigError(null);
+    if (!FACEBOOK_HELPER_EXTENSION_ID) {
+      setFacebookCopyMessage("Open the Marketly Helper popup with Facebook open, then click Sync Facebook cookies.");
+      return;
+    }
+
+    setFacebookHelperBridgeBusy(true);
+    try {
+      const response = await sendFacebookHelperMessage({
+        type: "marketly-helper-sync-now",
+        openPopup: true,
+        config: helperMessageConfig(API_BASE),
+      });
+      if (!response.ok) {
+        throw new Error(response.message || "Helper sync did not complete.");
+      }
+      setFacebookCopyMessage(response.message || "Helper sync requested.");
+      await fetchFacebookConfigStatus();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Could not reach the helper extension.";
+      setFacebookCopyMessage(`${message} Open the Marketly Helper popup, then click Sync Facebook cookies.`);
+    } finally {
+      setFacebookHelperBridgeBusy(false);
+    }
+  }, [API_BASE, fetchFacebookConfigStatus]);
+
   const onCreateFacebookHelperPairing = useCallback(async () => {
     if (!accessToken) {
       setFacebookConfigError("Please log in to pair the Facebook browser helper.");
@@ -567,13 +648,33 @@ export default function FacebookConfigurationPage() {
       }
       const json = (await res.json()) as FacebookHelperPairingSessionResponse;
       setFacebookHelperPairing(json);
-      setFacebookCopyMessage("Pairing code ready. Copy it into the helper options page.");
+      let message = "Pairing code ready. Copy it into the helper options page.";
+      if (FACEBOOK_HELPER_EXTENSION_ID) {
+        try {
+          const helperResponse = await sendFacebookHelperMessage({
+            type: "marketly-helper-pair-and-sync",
+            pairingCode: json.pairing_code,
+            openPopup: true,
+            config: helperMessageConfig(API_BASE),
+          });
+          if (helperResponse.ok) {
+            message = helperResponse.message || "Helper paired and sync requested.";
+            await fetchFacebookConfigStatus();
+          } else {
+            message = `${helperResponse.message || "Helper did not accept the pairing code."} Copy the pairing code into the helper popup instead.`;
+          }
+        } catch (err: unknown) {
+          const helperMessage = err instanceof Error ? err.message : "Could not reach the helper extension.";
+          message = `${helperMessage} Copy the pairing code into the helper popup instead.`;
+        }
+      }
+      setFacebookCopyMessage(message);
     } catch (err: unknown) {
       setFacebookConfigError(err instanceof Error ? err.message : "Failed to create a helper pairing code.");
     } finally {
       setFacebookHelperPairBusy(false);
     }
-  }, [API_BASE, accessToken, facebookHelperLabel, parseApiError]);
+  }, [API_BASE, accessToken, facebookHelperLabel, fetchFacebookConfigStatus, parseApiError]);
 
   const onDeleteFacebookHelper = useCallback(async () => {
     if (!accessToken) {
@@ -947,6 +1048,8 @@ export default function FacebookConfigurationPage() {
                                     void onCreateFacebookHelperPairing();
                                   } else if (action.kind === "verify") {
                                     void onVerifyFacebookCookies();
+                                  } else if (action.kind === "helper_sync" || action.kind === "sync") {
+                                    void onSyncFacebookHelper();
                                   } else {
                                     setFacebookCopyMessage("Open the helper options page with Facebook open, then click Sync now.");
                                   }
@@ -954,10 +1057,11 @@ export default function FacebookConfigurationPage() {
                                 disabled={
                                   (action.kind === "pair" && facebookHelperPairBusy)
                                   || (action.kind === "verify" && facebookVerifyBusy)
+                                  || ((action.kind === "helper_sync" || action.kind === "sync") && facebookHelperBridgeBusy)
                                 }
                                 className="inline-flex items-center justify-center gap-2 rounded-2xl border border-amber-100/20 bg-amber-50/10 px-3 py-2 text-xs font-medium text-amber-50 transition hover:border-amber-100/30 hover:bg-amber-50/15 disabled:cursor-not-allowed disabled:opacity-50"
                               >
-                                {action.kind === "sync" ? <RefreshCw className="size-3.5" /> : null}
+                                {action.kind === "helper_sync" || action.kind === "sync" ? <RefreshCw className="size-3.5" /> : null}
                                 {action.label}
                               </button>
                             ),
@@ -1006,6 +1110,15 @@ export default function FacebookConfigurationPage() {
                         >
                           {facebookHelperPairBusy ? <Loader2 className="size-3.5 animate-spin" /> : null}
                           {facebookHelperPairBusy ? "Creating code..." : "Generate pairing code"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void onSyncFacebookHelper()}
+                          disabled={facebookHelperBridgeBusy || authLoading || !user}
+                          className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-2.5 text-xs text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {facebookHelperBridgeBusy ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+                          {facebookHelperBridgeBusy ? "Opening helper..." : "Open helper & sync"}
                         </button>
                         <button
                           type="button"

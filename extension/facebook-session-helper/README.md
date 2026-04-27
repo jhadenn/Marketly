@@ -15,7 +15,7 @@
 4. Paste the pairing code.
 5. Click `Pair helper`.
 
-After pairing, the extension syncs `facebook.com` cookies on startup and every 15 minutes. Keep Facebook open occasionally in Chrome/Edge so helper can refresh on startup and periodic sync.
+After pairing, the extension syncs `facebook.com` cookies on startup and every 15 minutes. Keep Facebook open occasionally in Chrome/Edge so helper can refresh on startup and periodic sync. If the helper detects a local desync, it badges the toolbar icon and tries to open the helper popup; if Chrome blocks the popup, it shows a notification with quick actions.
 
 Production mode always uses:
 
@@ -37,6 +37,14 @@ options.html?pairing_code=PAIRING_CODE
 
 For local development, `dev_api_base` can also be used with a loopback URL.
 
+The deployed frontend can trigger one-click helper sync/pairing when it knows the extension ID:
+
+```text
+NEXT_PUBLIC_FACEBOOK_HELPER_EXTENSION_ID=<chrome-extension-id>
+```
+
+If that variable is not configured, Marketly falls back to opening/copying the pairing code and the helper's own auto-recovery prompts. Production web messaging is limited to `https://marketly.app`; local development is limited to `http://localhost/*` and `http://127.0.0.1/*`.
+
 ## Reliability behavior
 
 - Transient API/network failures retry with exponential backoff and jitter.
@@ -57,6 +65,6 @@ For local development, `dev_api_base` can also be used with a loopback URL.
 
 - Invalid token: re-pair the helper from Facebook Configuration.
 - Wrong developer API base: production users do not enter an API base. For local development, enable Developer mode and use `http://127.0.0.1:8000`.
-- Helper disconnected: open Facebook in Chrome/Edge and click `Sync now`.
+- Helper disconnected: open Facebook in Chrome/Edge and click `Sync Facebook cookies`; re-pair only if the helper token was deleted, revoked, or created for another API mode.
 - Facebook checkpoint/login wall: resolve the Facebook prompt in the browser, then sync and re-verify in Marketly.
 - Permission prompt denied: this only applies to developer mode. Click `Pair helper` again and allow the local API origin.

@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/png" href="icon-32.png" />
+    <title>Marketly Helper</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #09090b;
+        --panel: rgba(24, 24, 27, 0.92);
+        --border: rgba(255, 255, 255, 0.10);
+        --border-strong: rgba(255, 255, 255, 0.18);
+        --text: #f4f4f5;
+        --muted: #a1a1aa;
+        --subtle: #71717a;
+        --accent: #f5f5f5;
+        --accent-fg: #111;
+        --ok: #34d399;
+        --warn: #fcd34d;
+        --danger: #fca5a5;
+        --danger-bg: rgba(248, 113, 113, 0.10);
+        --danger-border: rgba(248, 113, 113, 0.28);
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; }
+      body {
+        width: 360px;
+        background:
+          radial-gradient(circle at top left, rgba(255,255,255,0.06), transparent 40%),
+          radial-gradient(circle at bottom right, rgba(56,189,248,0.10), transparent 40%),
+          var(--bg);
+        color: var(--text);
+        font: 13px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif;
+      }
+      .shell {
+        padding: 14px 14px 12px;
+        display: grid;
+        gap: 12px;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      header .title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+      }
+      header .logo {
+        width: 22px; height: 22px;
+        border-radius: 7px;
+        object-fit: cover;
+        box-shadow: inset 0 0 0 1px rgba(255,255,255,0.18);
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 9px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 500;
+        border: 1px solid var(--border);
+        background: rgba(255,255,255,0.04);
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .pill .dot {
+        width: 7px; height: 7px;
+        border-radius: 999px;
+        background: var(--muted);
+      }
+      .pill[data-tone="ok"] { color: var(--ok); border-color: rgba(52, 211, 153, 0.35); background: rgba(52, 211, 153, 0.08); }
+      .pill[data-tone="ok"] .dot { background: var(--ok); }
+      .pill[data-tone="warn"] { color: var(--warn); border-color: rgba(252, 211, 77, 0.35); background: rgba(252, 211, 77, 0.08); }
+      .pill[data-tone="warn"] .dot { background: var(--warn); }
+      .pill[data-tone="error"] { color: var(--danger); border-color: var(--danger-border); background: var(--danger-bg); }
+      .pill[data-tone="error"] .dot { background: var(--danger); }
+      .pill[data-tone="busy"] { color: #93c5fd; border-color: rgba(147, 197, 253, 0.35); background: rgba(147, 197, 253, 0.08); }
+      .pill[data-tone="busy"] .dot {
+        background: #93c5fd;
+        animation: pulse 1.1s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        0%, 100% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.4; transform: scale(0.7); }
+      }
+      .panel {
+        border: 1px solid var(--border);
+        background: var(--panel);
+        border-radius: 14px;
+        padding: 12px;
+        display: grid;
+        gap: 10px;
+      }
+      label {
+        display: block;
+        font-size: 10px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--subtle);
+        margin: 0 0 6px;
+      }
+      input[type="text"] {
+        width: 100%;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: rgba(255,255,255,0.04);
+        color: var(--text);
+        padding: 9px 11px;
+        font: inherit;
+        outline: none;
+        transition: border-color .15s, background .15s;
+      }
+      input[type="text"]:focus {
+        border-color: var(--border-strong);
+        background: rgba(255,255,255,0.06);
+      }
+      input[type="text"][aria-invalid="true"] {
+        border-color: rgba(248,113,113,0.55);
+      }
+      input[type="text"][data-valid="true"] {
+        border-color: rgba(52,211,153,0.45);
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .row > * { flex: 1; }
+      .row > .grow-2 { flex: 2; }
+      button {
+        border: 0;
+        border-radius: 10px;
+        padding: 9px 12px;
+        font: inherit;
+        font-weight: 500;
+        cursor: pointer;
+        color: var(--accent-fg);
+        background: var(--accent);
+        transition: transform .08s, opacity .15s, background .15s;
+      }
+      button:hover:not(:disabled) { background: #fff; }
+      button:active:not(:disabled) { transform: translateY(1px); }
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      button.secondary {
+        color: var(--text);
+        background: rgba(255,255,255,0.06);
+        border: 1px solid var(--border);
+      }
+      button.secondary:hover:not(:disabled) {
+        background: rgba(255,255,255,0.10);
+      }
+      button.ghost {
+        color: var(--muted);
+        background: transparent;
+        border: 1px solid transparent;
+        padding: 6px 8px;
+        font-size: 12px;
+      }
+      button.ghost:hover:not(:disabled) {
+        color: var(--text);
+        background: rgba(255,255,255,0.04);
+      }
+      button.danger {
+        color: var(--danger);
+        background: var(--danger-bg);
+        border: 1px solid var(--danger-border);
+        font-size: 12px;
+        padding: 7px 10px;
+      }
+      button.danger:hover:not(:disabled) {
+        background: rgba(248,113,113,0.18);
+      }
+      .helper-id {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 8px 10px;
+        border-radius: 10px;
+        background: rgba(255,255,255,0.03);
+        border: 1px solid var(--border);
+      }
+      .helper-id .label-line {
+        font-weight: 500;
+        font-size: 12.5px;
+      }
+      .helper-id .sublabel {
+        color: var(--subtle);
+        font-size: 11px;
+      }
+      .meta {
+        font-size: 11.5px;
+        color: var(--muted);
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .meta .sep { color: var(--subtle); }
+      .inline-msg {
+        font-size: 11.5px;
+        min-height: 0;
+        margin: 0;
+      }
+      .inline-msg[data-tone="ok"] { color: var(--ok); }
+      .inline-msg[data-tone="warn"] { color: var(--warn); }
+      .inline-msg[data-tone="error"] { color: var(--danger); }
+      .inline-msg[data-tone="muted"] { color: var(--muted); }
+      details {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: rgba(255,255,255,0.02);
+      }
+      details > summary {
+        list-style: none;
+        cursor: pointer;
+        padding: 9px 12px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        color: var(--muted);
+        font-size: 12px;
+        user-select: none;
+      }
+      details > summary::-webkit-details-marker { display: none; }
+      details > summary .chev {
+        width: 12px; height: 12px;
+        border-right: 1.5px solid currentColor;
+        border-bottom: 1.5px solid currentColor;
+        transform: rotate(-45deg);
+        transition: transform .18s;
+      }
+      details[open] > summary .chev { transform: rotate(45deg); }
+      details > .body {
+        padding: 4px 12px 12px;
+        display: grid;
+        gap: 10px;
+      }
+      .kv {
+        display: grid;
+        grid-template-columns: 92px 1fr;
+        gap: 6px 10px;
+        font-size: 11.5px;
+      }
+      .kv dt { color: var(--subtle); }
+      .kv dd { margin: 0; color: var(--text); word-break: break-word; }
+      .kv dd.error { color: var(--danger); }
+      .toggle {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 12.5px;
+        color: var(--text);
+      }
+      .toggle input { accent-color: #93c5fd; }
+      .help {
+        font-size: 11px;
+        color: var(--muted);
+        margin: 0;
+      }
+      .help[data-tone="warn"] { color: var(--warn); }
+      .help[data-tone="error"] { color: var(--danger); }
+      .help[data-tone="ok"] { color: var(--ok); }
+      .footer {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        font-size: 11px;
+        color: var(--subtle);
+      }
+      .empty {
+        text-align: center;
+        color: var(--muted);
+        font-size: 12px;
+        padding: 4px 0 2px;
+      }
+      .confirm-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .confirm-row .grow { flex: 1; font-size: 11.5px; color: var(--danger); }
+      .hidden { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <div class="title">
+          <img src="icon-48.png" class="logo" alt="" aria-hidden="true" />
+          Marketly Helper
+        </div>
+        <span id="status-pill" class="pill" data-tone="muted" role="status" aria-live="polite">
+          <span class="dot"></span><span class="text">Loading</span>
+        </span>
+      </header>
+
+      <!-- Pairing -->
+      <section class="panel" id="pair-panel">
+        <div id="paired-view" class="hidden">
+          <div class="helper-id">
+            <div>
+              <div class="label-line" id="paired-label">Browser Helper</div>
+              <div class="sublabel">Paired</div>
+            </div>
+            <button class="ghost" id="repair-toggle" type="button">Re-pair</button>
+          </div>
+        </div>
+        <div id="unpaired-view">
+          <label for="pairing-code">Pairing code</label>
+          <input id="pairing-code" type="text" autocomplete="off" spellcheck="false"
+            placeholder="Paste code from Marketly" />
+          <div class="row">
+            <button id="pair-helper" class="grow-2" type="button">Pair helper</button>
+            <button id="cancel-repair" class="secondary hidden" type="button">Cancel</button>
+          </div>
+          <p id="pair-msg" class="inline-msg" data-tone="muted"></p>
+        </div>
+      </section>
+
+      <!-- Sync -->
+      <section class="panel">
+        <div class="row">
+          <button id="sync-now" class="grow-2" type="button">Sync Facebook cookies</button>
+          <button id="open-marketly" class="secondary" type="button">Open Marketly</button>
+        </div>
+        <div class="meta">
+          <span id="last-sync-text">No sync yet</span>
+        </div>
+        <p id="sync-msg" class="inline-msg" data-tone="muted"></p>
+      </section>
+
+      <!-- Status details -->
+      <details id="status-details">
+        <summary>
+          <span>Status details</span>
+          <span class="chev" aria-hidden="true"></span>
+        </summary>
+        <div class="body">
+          <dl class="kv">
+            <dt>API mode</dt><dd id="dt-api-mode">—</dd>
+            <dt>Pairing</dt><dd id="dt-pairing">—</dd>
+            <dt>Last attempt</dt><dd id="dt-last-attempt">—</dd>
+            <dt>Next retry</dt><dd id="dt-next-retry">—</dd>
+            <dt>Last error</dt><dd id="dt-last-error" class="error">—</dd>
+          </dl>
+        </div>
+      </details>
+
+      <!-- Developer mode -->
+      <details id="dev-details">
+        <summary>
+          <span>Developer mode</span>
+          <span class="chev" aria-hidden="true"></span>
+        </summary>
+        <div class="body">
+          <label class="toggle" for="developer-mode">
+            <input id="developer-mode" type="checkbox" />
+            Enable developer mode
+          </label>
+          <div id="developer-fields" class="hidden">
+            <label for="dev-api-base">Local API base</label>
+            <input id="dev-api-base" type="text" placeholder="http://127.0.0.1:8000" autocomplete="off" spellcheck="false" />
+            <p id="dev-api-base-help" class="help">Only localhost or 127.0.0.1 URLs are accepted.</p>
+          </div>
+        </div>
+      </details>
+
+      <!-- Danger zone -->
+      <details id="danger-details">
+        <summary>
+          <span>Danger zone</span>
+          <span class="chev" aria-hidden="true"></span>
+        </summary>
+        <div class="body">
+          <p class="help">Removes the local helper token only. Marketly will need a new pairing.</p>
+          <div id="forget-default">
+            <button id="forget-helper" class="danger" type="button">Delete local token</button>
+          </div>
+          <div id="forget-confirm" class="confirm-row hidden">
+            <span class="grow">Delete local token?</span>
+            <button id="forget-cancel" class="ghost" type="button">Cancel</button>
+            <button id="forget-confirm-btn" class="danger" type="button">Confirm</button>
+          </div>
+        </div>
+      </details>
+
+      <div class="footer">
+        <span>v0.1.0</span>
+        <button id="open-options" class="ghost" type="button">Open full settings</button>
+      </div>
+    </main>
+    <script src="utils.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -2,12 +2,16 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  ATTENTION_PROMPT_THROTTLE_MS,
+  buildMarketlyAppUrl,
   buildStatusLines,
   classifyError,
   computeBackoffDelayMs,
   getApiTargetId,
+  getHelperAttentionDescriptor,
   parseOptionsPrefill,
   resolveApiBase,
+  shouldPromptForAttention,
   validateDeveloperApiBase
 } = require("./utils.js");
 
@@ -89,4 +93,65 @@ test("validateDeveloperApiBase only accepts loopback origins", () => {
   const remote = validateDeveloperApiBase("https://api.example.com");
   assert.equal(remote.ok, false);
   assert.match(remote.message, /localhost/);
+});
+
+test("attention descriptor treats desync as sync recovery before re-pairing", () => {
+  const missingCookies = getHelperAttentionDescriptor({
+    helperToken: "token",
+    lastFailureReason: "no_facebook_cookies",
+  });
+  assert.equal(missingCookies.reason, "no_facebook_cookies");
+  assert.equal(missingCookies.preferredAction, "open_facebook");
+  assert.equal(missingCookies.prompt, true);
+
+  const targetMismatch = getHelperAttentionDescriptor({
+    helperToken: "token",
+    pairedApiTarget: "developer:http://127.0.0.1:8000",
+    developerMode: false,
+  });
+  assert.equal(targetMismatch.reason, "target_mismatch");
+  assert.equal(targetMismatch.preferredAction, "open_helper");
+});
+
+test("attention prompts are throttled per reason", () => {
+  const descriptor = { reason: "no_facebook_cookies", prompt: true };
+  const now = Date.parse("2026-04-27T12:00:00.000Z");
+
+  assert.equal(shouldPromptForAttention({}, descriptor, now), true);
+  assert.equal(
+    shouldPromptForAttention(
+      {
+        lastAttentionReason: "no_facebook_cookies",
+        lastAttentionPromptAt: new Date(now - ATTENTION_PROMPT_THROTTLE_MS + 1000).toISOString(),
+      },
+      descriptor,
+      now,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldPromptForAttention(
+      {
+        lastAttentionReason: "token_invalid",
+        lastAttentionPromptAt: new Date(now - 1000).toISOString(),
+      },
+      descriptor,
+      now,
+    ),
+    true,
+  );
+});
+
+test("marketly app URL resolves production and developer targets", () => {
+  assert.equal(buildMarketlyAppUrl({}, "/facebook-configuration"), "https://marketly.app/facebook-configuration");
+  assert.equal(
+    buildMarketlyAppUrl(
+      {
+        developerMode: true,
+        marketlyAppBase: "http://localhost:3000/",
+      },
+      "/facebook-configuration",
+    ),
+    "http://localhost:3000/facebook-configuration",
+  );
 });

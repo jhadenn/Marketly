@@ -125,7 +125,7 @@ Open `http://localhost:3000`.
 
 ### Facebook saved-search reliability
 
-For production Facebook saved searches, use the browser helper in `extension/facebook-session-helper/` as the recommended path. Users pair it from `/facebook-configuration`, paste the pairing code into the extension options page, and keep Facebook open occasionally in Chrome/Edge so helper can refresh on startup and periodic sync. The production API origin is built into the helper; developer mode is available for `http://127.0.0.1:8000`. Manual cookie upload remains available as a fallback.
+For production Facebook saved searches, use the browser helper in `extension/facebook-session-helper/` as the recommended path. Users pair it from `/facebook-configuration`, paste the pairing code into the extension options page, and keep Facebook open occasionally in Chrome/Edge so helper can refresh on startup and periodic sync. The helper badges and opens its popup when local sync needs attention, with notification fallback when Chrome blocks popup opening. The production API origin is built into the helper; developer mode is available for `http://127.0.0.1:8000`. Manual cookie upload remains available as a fallback.
 
 Run the saved-search alert backstop from cron or your scheduler every 15 minutes:
 
@@ -173,6 +173,7 @@ MARKETLY_ALERTS_PARTIAL_SOURCE_SUCCESS_ENABLED=false
 NEXT_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=YOUR_SUPABASE_ANON_KEY
 NEXT_PUBLIC_API_BASE=http://127.0.0.1:8000
+NEXT_PUBLIC_FACEBOOK_HELPER_EXTENSION_ID=OPTIONAL_CHROME_EXTENSION_ID
 ```
 
 ---

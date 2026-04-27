@@ -11,7 +11,7 @@ import {
 test("stale reason CTA mapping covers direct recovery actions", () => {
   assert.deepEqual(
     getFacebookStaleActions("helper_disconnected").map((action) => action.label),
-    ["Open Facebook now", "Re-pair helper"],
+    ["Open Facebook now", "Open helper & sync", "Re-pair helper"],
   );
   assert.deepEqual(
     getFacebookStaleActions("cookie_expired").map((action) => action.label),

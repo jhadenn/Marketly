@@ -5,8 +5,8 @@ export type FacebookStaleReason =
   | "facebook_session_invalid";
 
 export type FacebookStaleAction = {
-  label: "Open Facebook now" | "Sync now" | "Re-pair helper" | "Re-verify";
-  kind: "facebook" | "sync" | "pair" | "verify";
+  label: "Open Facebook now" | "Open helper & sync" | "Sync now" | "Re-pair helper" | "Re-verify";
+  kind: "facebook" | "helper_sync" | "sync" | "pair" | "verify";
   description: string;
 };
 
@@ -18,9 +18,14 @@ export const FACEBOOK_STALE_REASON_ACTIONS: Record<FacebookStaleReason, Facebook
       description: "Open Facebook in Chrome or Edge so the helper can see an active session.",
     },
     {
+      label: "Open helper & sync",
+      kind: "helper_sync",
+      description: "Ask the installed helper to open and push fresh cookies now.",
+    },
+    {
       label: "Re-pair helper",
       kind: "pair",
-      description: "Generate a fresh pairing code if the extension was removed or reset.",
+      description: "Fallback only: generate a fresh pairing code if the extension was removed, reset, or revoked.",
     },
   ],
   cookie_expired: [

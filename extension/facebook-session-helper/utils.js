@@ -1,8 +1,12 @@
 (function attachMarketlyHelperUtils(root) {
   const PRODUCTION_API_BASE = "https://marketly-backend-870323632900.northamerica-northeast2.run.app";
   const DEFAULT_DEVELOPER_API_BASE = "http://127.0.0.1:8000";
+  const MARKETLY_APP_BASE_PRODUCTION = "https://marketly.app";
+  const MARKETLY_APP_BASE_DEVELOPER = "http://localhost:3000";
+  const MARKETLY_APP_PATH = "/facebook-configuration";
   const TRANSIENT_HTTP_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
   const MAX_BACKOFF_MS = 15 * 60 * 1000;
+  const ATTENTION_PROMPT_THROTTLE_MS = 30 * 60 * 1000;
 
   function normalizeApiBase(value) {
     const trimmed = String(value || "").trim();
@@ -118,6 +122,33 @@
     return `legacy:${legacyApiBase}`;
   }
 
+  function isLoopbackAppBase(value) {
+    const appBase = normalizeApiBase(value);
+    let parsed;
+    try {
+      parsed = new URL(appBase);
+    } catch {
+      return false;
+    }
+    return /^https?:$/.test(parsed.protocol)
+      && ["localhost", "127.0.0.1", "::1", "[::1]"].includes(parsed.hostname);
+  }
+
+  function resolveMarketlyAppBase(state) {
+    if (resolveApiMode(state) === "developer") {
+      const stored = normalizeApiBase(state && state.marketlyAppBase);
+      return isLoopbackAppBase(stored) ? stored : MARKETLY_APP_BASE_DEVELOPER;
+    }
+    return MARKETLY_APP_BASE_PRODUCTION;
+  }
+
+  function buildMarketlyAppUrl(state, path) {
+    const normalizedPath = String(path || MARKETLY_APP_PATH).startsWith("/")
+      ? String(path || MARKETLY_APP_PATH)
+      : `/${path}`;
+    return `${resolveMarketlyAppBase(state)}${normalizedPath}`;
+  }
+
   function classifyError(error) {
     const status = Number(error && error.status);
     const message = error instanceof Error ? error.message : String(error || "Request failed.");
@@ -136,6 +167,86 @@
       return { status: "api_unreachable", retryable: true, message: "Marketly API unreachable. Check your network, then retry." };
     }
     return { status: "sync_failed", retryable: false, message };
+  }
+
+  function getHelperAttentionDescriptor(state) {
+    const helperToken = String((state && state.helperToken) || "").trim();
+    const failureReason = String((state && state.lastFailureReason) || "").trim();
+    const lastError = String((state && state.lastError) || "").trim();
+    const pairedTarget = getPairedApiTargetId(state);
+    const activeTarget = getApiTargetId(state);
+
+    if (!helperToken) {
+      return null;
+    }
+    if (pairedTarget && pairedTarget !== activeTarget) {
+      return {
+        reason: "target_mismatch",
+        badgeText: "!",
+        badgeColor: "#f59e0b",
+        title: "Marketly helper needs re-pairing",
+        message: "This helper token belongs to another API mode. Re-pair it from Marketly.",
+        preferredAction: "open_helper",
+        prompt: true
+      };
+    }
+    if (failureReason === "token_invalid") {
+      return {
+        reason: "token_invalid",
+        badgeText: "!",
+        badgeColor: "#ef4444",
+        title: "Marketly helper token is invalid",
+        message: "Re-pair the helper from Marketly to resume Facebook sync.",
+        preferredAction: "open_helper",
+        prompt: true
+      };
+    }
+    if (failureReason === "no_facebook_cookies") {
+      return {
+        reason: "no_facebook_cookies",
+        badgeText: "FB",
+        badgeColor: "#f59e0b",
+        title: "Open Facebook to refresh Marketly",
+        message: "No facebook.com cookies were found. Open Facebook, then sync the helper again.",
+        preferredAction: "open_facebook",
+        prompt: true
+      };
+    }
+    if (failureReason === "api_unreachable") {
+      return {
+        reason: "api_unreachable",
+        badgeText: "API",
+        badgeColor: "#f59e0b",
+        title: "Marketly API unreachable",
+        message: lastError || "The helper cannot reach the Marketly API right now.",
+        preferredAction: "open_helper",
+        prompt: false
+      };
+    }
+    if (failureReason === "sync_failed" || lastError) {
+      return {
+        reason: failureReason || "sync_failed",
+        badgeText: "!",
+        badgeColor: "#ef4444",
+        title: "Marketly helper sync failed",
+        message: lastError || "Open the helper to review the Facebook sync failure.",
+        preferredAction: "open_helper",
+        prompt: true
+      };
+    }
+    return null;
+  }
+
+  function shouldPromptForAttention(state, descriptor, nowMs) {
+    if (!descriptor || !descriptor.prompt) {
+      return false;
+    }
+    const lastReason = String((state && state.lastAttentionReason) || "").trim();
+    const lastPromptAt = Date.parse(String((state && state.lastAttentionPromptAt) || ""));
+    if (lastReason !== descriptor.reason || !Number.isFinite(lastPromptAt)) {
+      return true;
+    }
+    return Math.max(0, Number(nowMs) || Date.now()) - lastPromptAt >= ATTENTION_PROMPT_THROTTLE_MS;
   }
 
   function computeBackoffDelayMs(attempt, options) {
@@ -191,18 +302,27 @@
   }
 
   const api = {
+    ATTENTION_PROMPT_THROTTLE_MS,
     DEFAULT_DEVELOPER_API_BASE,
+    MARKETLY_APP_BASE_DEVELOPER,
+    MARKETLY_APP_BASE_PRODUCTION,
+    MARKETLY_APP_PATH,
     PRODUCTION_API_BASE,
+    buildMarketlyAppUrl,
     buildStatusLines,
     classifyError,
     computeBackoffDelayMs,
     getApiTargetId,
+    getHelperAttentionDescriptor,
     getPairedApiTargetId,
+    isLoopbackAppBase,
     isLoopbackApiBase,
     normalizeApiBase,
     parseOptionsPrefill,
+    resolveMarketlyAppBase,
     resolveApiBase,
     resolveApiMode,
+    shouldPromptForAttention,
     toOriginPattern,
     validateDeveloperApiBase
   };

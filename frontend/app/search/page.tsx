@@ -2062,6 +2062,20 @@ function SavedSearchRail(props: SavedSearchRailProps) {
           <p className="font-mono text-xs uppercase tracking-[0.18em] text-zinc-400">
             Saved Searches
           </p>
+          {props.user ? (
+            <span
+              aria-label={`${props.activeSavedSearchCount} of ${props.savedSearchMaxPerUser} saved searches used`}
+              className={cn(
+                "rounded-full border px-2 py-0.5 font-mono text-[10px] font-medium leading-none tracking-normal",
+                props.activeSavedSearchCount >= props.savedSearchMaxPerUser
+                  ? "border-amber-300/25 bg-amber-300/10 text-amber-100"
+                  : "border-white/10 bg-white/[0.03] text-zinc-300",
+              )}
+              title={`${props.activeSavedSearchCount}/${props.savedSearchMaxPerUser} saved searches used`}
+            >
+              {props.activeSavedSearchCount}/{props.savedSearchMaxPerUser}
+            </span>
+          ) : null}
         </div>
 
         <div className="flex items-center gap-2">
@@ -2102,15 +2116,6 @@ function SavedSearchRail(props: SavedSearchRailProps) {
           </ActionIconButton>
         </div>
       </div>
-
-      {props.user ? (
-        <p className="mb-3 text-xs text-zinc-500">
-          {`${props.activeSavedSearchCount}/${props.savedSearchMaxPerUser} saved searches used.`}
-          {props.activeSavedSearchCount >= props.savedSearchMaxPerUser
-            ? " Delete an older saved search to save another."
-            : ""}
-        </p>
-      ) : null}
 
       {props.savedError ? (
         <div className="mb-3 rounded-xl border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-100">
