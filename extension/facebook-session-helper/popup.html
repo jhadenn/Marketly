@@ -308,6 +308,24 @@
         </span>
       </header>
 
+      <section class="panel hidden" id="consent-gate">
+        <div>
+          <label>One-time consent</label>
+          <p class="help">Allow Marketly to receive the required Facebook auth cookies from this browser before the helper can sync your Facebook Marketplace session.</p>
+        </div>
+        <p class="help">
+          Shared cookie names: <code>c_user</code>, <code>xs</code>, <code>fr</code>, <code>datr</code>, and <code>sb</code>.
+        </p>
+        <p class="help">You only need to do this once on this browser.</p>
+        <div class="row">
+          <button id="privacy-consent-accept" class="grow-2" type="button">Allow cookie sync</button>
+          <button id="privacy-consent-open-marketly" class="secondary" type="button">Open Marketly</button>
+        </div>
+        <p id="consent-msg" class="inline-msg" data-tone="muted"></p>
+      </section>
+
+      <div id="helper-main">
+
       <!-- Pairing -->
       <section class="panel" id="pair-panel">
         <div id="paired-view" class="hidden">
@@ -333,13 +351,7 @@
 
       <!-- Sync -->
       <section class="panel">
-        <label class="toggle" for="privacy-consent">
-          <input id="privacy-consent" type="checkbox" />
-          I consent to share required Facebook auth cookies with Marketly.
-        </label>
-        <p class="help">
-          Shared cookie names: <code>c_user</code>, <code>xs</code>, <code>fr</code>, <code>datr</code>, and <code>sb</code>.
-        </p>
+        <p class="help">Facebook cookie sharing is already approved for this browser.</p>
         <div class="row">
           <button id="sync-now" class="grow-2" type="button">Sync Facebook cookies</button>
           <button id="open-marketly" class="secondary" type="button">Open Marketly</button>
@@ -408,6 +420,7 @@
       <div class="footer">
         <span>v0.1.0</span>
         <button id="open-options" class="ghost" type="button">Open full settings</button>
+      </div>
       </div>
     </main>
     <script src="utils.js"></script>

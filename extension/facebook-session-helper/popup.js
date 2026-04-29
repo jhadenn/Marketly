@@ -39,6 +39,11 @@ const $ = (id) => document.getElementById(id);
 
 const els = {
   pill: $("status-pill"),
+  consentGate: $("consent-gate"),
+  consentAccept: $("privacy-consent-accept"),
+  consentOpenMarketly: $("privacy-consent-open-marketly"),
+  consentMsg: $("consent-msg"),
+  helperMain: $("helper-main"),
   pairedView: $("paired-view"),
   unpairedView: $("unpaired-view"),
   pairedLabel: $("paired-label"),
@@ -65,8 +70,7 @@ const els = {
   forgetBtn: $("forget-helper"),
   forgetCancelBtn: $("forget-cancel"),
   forgetConfirmBtn: $("forget-confirm-btn"),
-  openOptions: $("open-options"),
-  privacyConsent: $("privacy-consent")
+  openOptions: $("open-options")
 };
 
 let busy = false;
@@ -93,9 +97,20 @@ function readState() {
   return storageGet(Object.values(STORAGE_KEYS));
 }
 
+function hasPrivacyConsent(state) {
+  return state && state.privacyConsentAccepted === true;
+}
+
 function setBusy(value) {
   busy = !!value;
-  const buttons = [els.pairBtn, els.syncBtn, els.forgetBtn, els.forgetConfirmBtn, els.repairToggle];
+  const buttons = [
+    els.consentAccept,
+    els.pairBtn,
+    els.syncBtn,
+    els.forgetBtn,
+    els.forgetConfirmBtn,
+    els.repairToggle
+  ];
   for (const btn of buttons) {
     if (btn) btn.disabled = busy;
   }
@@ -173,11 +188,18 @@ function renderState(state) {
   lastRenderedState = state || {};
   const helperToken = String(state.helperToken || "").trim();
   const paired = Boolean(helperToken);
-  els.privacyConsent.checked = state.privacyConsentAccepted === true;
+  const consentAccepted = hasPrivacyConsent(state);
+  els.consentGate.classList.toggle("hidden", consentAccepted);
+  els.helperMain.classList.toggle("hidden", !consentAccepted);
+  setMessage(
+    els.consentMsg,
+    "muted",
+    consentAccepted ? "" : "Allow cookie sync once to finish setting up the helper on this browser."
+  );
 
   // Header pill (don't override "Syncing" while busy)
   if (!busy) {
-    const pill = describePillFromState(state);
+    const pill = consentAccepted ? describePillFromState(state) : { tone: "warn", text: "Consent" };
     setPill(pill.tone, pill.text);
   }
 
@@ -196,7 +218,7 @@ function renderState(state) {
   }
 
   // Sync section
-  els.syncBtn.disabled = busy || !paired || !els.privacyConsent.checked;
+  els.syncBtn.disabled = busy || !paired || !consentAccepted;
   els.lastSyncText.textContent = describeLastSync(state);
 
   // Status details
@@ -270,7 +292,8 @@ function stateWithCurrentDeveloperControls(state) {
 
 async function pairHelper() {
   if (busy) return;
-  if (!els.privacyConsent.checked) {
+  const currentState = await readState();
+  if (!hasPrivacyConsent(currentState)) {
     setMessage(els.pairMsg, "warn", "Accept the privacy disclosure before pairing.");
     return;
   }
@@ -280,7 +303,7 @@ async function pairHelper() {
     return;
   }
 
-  const targetState = stateWithCurrentDeveloperControls(await readState());
+  const targetState = stateWithCurrentDeveloperControls(currentState);
   let apiBase = normalizeApiBase(resolveApiBase(targetState));
   let targetId = getApiTargetId(targetState);
   const isDeveloper = resolveApiMode(targetState) === "developer";
@@ -387,11 +410,11 @@ async function pairHelper() {
 
 async function syncNow() {
   if (busy) return;
-  if (!els.privacyConsent.checked) {
+  const state = await readState();
+  if (!hasPrivacyConsent(state)) {
     setMessage(els.syncMsg, "warn", "Accept the privacy disclosure before syncing.");
     return;
   }
-  const state = await readState();
   if (!state.helperToken) {
     setMessage(els.syncMsg, "warn", "Pair the helper before syncing.");
     return;
@@ -439,8 +462,7 @@ async function forgetLocalToken() {
     STORAGE_KEYS.lastFailureReason,
     STORAGE_KEYS.lastStatus,
     STORAGE_KEYS.nextRetryAt,
-    STORAGE_KEYS.retryAttempt,
-    STORAGE_KEYS.privacyConsentAccepted
+    STORAGE_KEYS.retryAttempt
   ]);
   setBusy(false);
   hideForgetConfirm();
@@ -448,9 +470,13 @@ async function forgetLocalToken() {
   await refresh();
 }
 
-async function setPrivacyConsent(accepted) {
-  await storageSet({ [STORAGE_KEYS.privacyConsentAccepted]: accepted === true });
+async function acceptPrivacyConsent() {
+  if (busy) return;
+  setBusy(true);
+  await storageSet({ [STORAGE_KEYS.privacyConsentAccepted]: true });
+  setBusy(false);
   await refresh();
+  setMessage(els.pairMsg, "ok", "Consent saved. Pair the helper to continue.");
 }
 
 function showForgetConfirm() {
@@ -504,6 +530,8 @@ async function applyQueryPrefill() {
 els.pairBtn.addEventListener("click", () => void pairHelper());
 els.syncBtn.addEventListener("click", () => void syncNow());
 els.openMarketly.addEventListener("click", openMarketly);
+els.consentOpenMarketly.addEventListener("click", openMarketly);
+els.consentAccept.addEventListener("click", () => void acceptPrivacyConsent());
 els.repairToggle.addEventListener("click", () => {
   repairMode = true;
   renderState(lastRenderedState);
@@ -529,7 +557,6 @@ els.openOptions.addEventListener("click", () => {
     chrome.runtime.openOptionsPage();
   }
 });
-els.privacyConsent.addEventListener("change", () => void setPrivacyConsent(els.privacyConsent.checked));
 
 chrome.storage.onChanged.addListener(() => {
   if (!busy) void refresh();

@@ -41,6 +41,8 @@ const developerModeInput = document.getElementById("developer-mode");
 const developerFields = document.getElementById("developer-fields");
 const devApiBaseInput = document.getElementById("dev-api-base");
 const devApiBaseHelpNode = document.getElementById("dev-api-base-help");
+const privacyConsentPromptNode = document.getElementById("privacy-consent-prompt");
+const privacyConsentSavedNode = document.getElementById("privacy-consent-saved");
 const privacyConsentInput = document.getElementById("privacy-consent");
 
 function storageGet(keys) {
@@ -67,6 +69,10 @@ async function readState() {
   return storageGet(Object.values(STORAGE_KEYS));
 }
 
+function hasPrivacyConsent(state) {
+  return state && state.privacyConsentAccepted === true;
+}
+
 function stateWithCurrentDeveloperControls(state = {}) {
   return {
     ...state,
@@ -77,8 +83,11 @@ function stateWithCurrentDeveloperControls(state = {}) {
 
 function renderState(state, extraMessage = "") {
   const effectiveDeveloperMode = resolveApiMode(state) === "developer";
+  const consentAccepted = hasPrivacyConsent(state);
   developerModeInput.checked = effectiveDeveloperMode;
-  privacyConsentInput.checked = state.privacyConsentAccepted === true;
+  privacyConsentInput.checked = consentAccepted;
+  privacyConsentPromptNode.hidden = consentAccepted;
+  privacyConsentSavedNode.hidden = !consentAccepted;
   devApiBaseInput.value = normalizeApiBase(state.devApiBase || state.apiBase || DEFAULT_DEVELOPER_API_BASE);
   developerFields.hidden = !effectiveDeveloperMode;
 
@@ -93,11 +102,12 @@ async function refreshState(extraMessage = "") {
 }
 
 async function pairHelper() {
-  if (!privacyConsentInput.checked) {
+  const currentState = await readState();
+  if (!hasPrivacyConsent(currentState)) {
     await refreshState("Accept the privacy disclosure before pairing.");
     return;
   }
-  const targetState = stateWithCurrentDeveloperControls(await readState());
+  const targetState = stateWithCurrentDeveloperControls(currentState);
   let apiBase = normalizeApiBase(resolveApiBase(targetState));
   let targetId = getApiTargetId(targetState);
   const pairingCode = String(pairingCodeInput.value || "").trim();
@@ -191,11 +201,11 @@ async function pairHelper() {
 }
 
 async function syncNow() {
-  if (!privacyConsentInput.checked) {
+  const state = await readState();
+  if (!hasPrivacyConsent(state)) {
     await refreshState("Accept the privacy disclosure before syncing.");
     return;
   }
-  const state = await readState();
   const result = await runtimeSendMessage({
     type: "sync-now",
     config: {
@@ -223,8 +233,7 @@ async function forgetLocalToken() {
     STORAGE_KEYS.lastFailureReason,
     STORAGE_KEYS.lastStatus,
     STORAGE_KEYS.nextRetryAt,
-    STORAGE_KEYS.retryAttempt,
-    STORAGE_KEYS.privacyConsentAccepted
+    STORAGE_KEYS.retryAttempt
   ]);
   await refreshState("Removed the local helper token. Pair again from Marketly when you are ready.");
 }

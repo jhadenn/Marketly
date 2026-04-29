@@ -183,10 +183,16 @@
       </section>
 
       <section class="panel stack">
-        <label class="toggle-row" for="privacy-consent">
-          <input id="privacy-consent" type="checkbox" />
-          I consent to share required Facebook auth cookies with Marketly.
-        </label>
+        <div id="privacy-consent-prompt">
+          <label class="toggle-row" for="privacy-consent">
+            <input id="privacy-consent" type="checkbox" />
+            I consent to share required Facebook auth cookies with Marketly.
+          </label>
+          <p class="muted">You only need to do this once on this browser.</p>
+        </div>
+        <p id="privacy-consent-saved" class="muted" hidden>
+          Privacy consent is already saved for this browser.
+        </p>
         <p class="muted">
           Shared cookie names: <code>c_user</code>, <code>xs</code>, <code>fr</code>, <code>datr</code>, and <code>sb</code>.
         </p>
