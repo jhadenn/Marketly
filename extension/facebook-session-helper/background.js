@@ -41,8 +41,17 @@ const STORAGE_KEYS = {
   nextRetryAt: "nextRetryAt",
   retryAttempt: "retryAttempt",
   lastAttentionPromptAt: "lastAttentionPromptAt",
-  lastAttentionReason: "lastAttentionReason"
+  lastAttentionReason: "lastAttentionReason",
+  privacyConsentAccepted: "privacyConsentAccepted"
 };
+
+const FACEBOOK_COOKIE_ALLOWLIST = new Set([
+  "c_user",
+  "xs",
+  "fr",
+  "datr",
+  "sb"
+]);
 
 function storageGet(keys) {
   return new Promise((resolve) => chrome.storage.local.get(keys, resolve));
@@ -121,7 +130,10 @@ function cookiesGetAll(details) {
 async function collectFacebookCookies() {
   const cookies = await cookiesGetAll({ domain: "facebook.com" });
   return cookies
-    .filter((cookie) => (cookie.domain || "").includes("facebook.com"))
+    .filter((cookie) =>
+      (cookie.domain || "").includes("facebook.com")
+      && FACEBOOK_COOKIE_ALLOWLIST.has(String(cookie.name || ""))
+    )
     .map((cookie) => {
       const payload = {
         name: cookie.name,
@@ -325,6 +337,7 @@ async function syncCookies({ force = false, reason = "manual", configOverride = 
   const helperToken = String(config.helperToken || "").trim();
   const nowIso = new Date().toISOString();
   const allowPrompt = reason !== "options-sync";
+  const consentAccepted = config.privacyConsentAccepted === true;
 
   console.log("[marketly-helper] syncCookies", {
     reason,
@@ -342,6 +355,22 @@ async function syncCookies({ force = false, reason = "manual", configOverride = 
       skipped: true,
       message: "Pair the helper before syncing.",
       status: "not_paired"
+    }, { allowPrompt });
+  }
+
+  if (!consentAccepted) {
+    await storageSet({
+      [STORAGE_KEYS.lastError]: "Privacy consent is required before syncing cookies.",
+      [STORAGE_KEYS.lastFailureReason]: "consent_required",
+      [STORAGE_KEYS.lastStatus]: "consent_required",
+      [STORAGE_KEYS.nextRetryAt]: "",
+      [STORAGE_KEYS.retryAttempt]: 0
+    });
+    return finalizeSyncResult({
+      ok: false,
+      skipped: true,
+      message: "Review and accept the privacy disclosure in the helper before syncing.",
+      status: "consent_required"
     }, { allowPrompt });
   }
 

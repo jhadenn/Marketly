@@ -16,7 +16,8 @@ const STORAGE_KEYS = {
   nextRetryAt: "nextRetryAt",
   retryAttempt: "retryAttempt",
   lastAttentionPromptAt: "lastAttentionPromptAt",
-  lastAttentionReason: "lastAttentionReason"
+  lastAttentionReason: "lastAttentionReason",
+  privacyConsentAccepted: "privacyConsentAccepted"
 };
 
 const MARKETLY_APP_PATH = "/facebook-configuration";
@@ -64,7 +65,8 @@ const els = {
   forgetBtn: $("forget-helper"),
   forgetCancelBtn: $("forget-cancel"),
   forgetConfirmBtn: $("forget-confirm-btn"),
-  openOptions: $("open-options")
+  openOptions: $("open-options"),
+  privacyConsent: $("privacy-consent")
 };
 
 let busy = false;
@@ -139,6 +141,7 @@ function describePillFromState(state) {
   const lastError = String(state.lastError || "").trim();
   if (reason === "token_invalid") return { tone: "error", text: "Token invalid" };
   if (reason === "no_facebook_cookies") return { tone: "warn", text: "Open Facebook" };
+  if (reason === "consent_required") return { tone: "warn", text: "Consent required" };
   if (reason === "api_unreachable") return { tone: "warn", text: "API unreachable" };
   if (lastError) return { tone: "error", text: "Error" };
   if (state.nextRetryAt) return { tone: "warn", text: "Retrying soon" };
@@ -170,6 +173,7 @@ function renderState(state) {
   lastRenderedState = state || {};
   const helperToken = String(state.helperToken || "").trim();
   const paired = Boolean(helperToken);
+  els.privacyConsent.checked = state.privacyConsentAccepted === true;
 
   // Header pill (don't override "Syncing" while busy)
   if (!busy) {
@@ -192,7 +196,7 @@ function renderState(state) {
   }
 
   // Sync section
-  els.syncBtn.disabled = busy || !paired;
+  els.syncBtn.disabled = busy || !paired || !els.privacyConsent.checked;
   els.lastSyncText.textContent = describeLastSync(state);
 
   // Status details
@@ -266,6 +270,10 @@ function stateWithCurrentDeveloperControls(state) {
 
 async function pairHelper() {
   if (busy) return;
+  if (!els.privacyConsent.checked) {
+    setMessage(els.pairMsg, "warn", "Accept the privacy disclosure before pairing.");
+    return;
+  }
   const pairingCode = String(els.pairingCode.value || "").trim();
   if (!pairingCode) {
     setMessage(els.pairMsg, "warn", "Paste the one-time code from Marketly first.");
@@ -346,7 +354,8 @@ async function pairHelper() {
     [STORAGE_KEYS.lastStatus]: "paired",
     [STORAGE_KEYS.nextRetryAt]: "",
     [STORAGE_KEYS.retryAttempt]: 0,
-    [STORAGE_KEYS.lastSyncSummary]: "Paired successfully. Syncing now…"
+    [STORAGE_KEYS.lastSyncSummary]: "Paired successfully. Syncing now…",
+    [STORAGE_KEYS.privacyConsentAccepted]: true
   });
   await storageRemove([STORAGE_KEYS.apiBase]);
   els.pairingCode.value = "";
@@ -378,6 +387,10 @@ async function pairHelper() {
 
 async function syncNow() {
   if (busy) return;
+  if (!els.privacyConsent.checked) {
+    setMessage(els.syncMsg, "warn", "Accept the privacy disclosure before syncing.");
+    return;
+  }
   const state = await readState();
   if (!state.helperToken) {
     setMessage(els.syncMsg, "warn", "Pair the helper before syncing.");
@@ -426,11 +439,17 @@ async function forgetLocalToken() {
     STORAGE_KEYS.lastFailureReason,
     STORAGE_KEYS.lastStatus,
     STORAGE_KEYS.nextRetryAt,
-    STORAGE_KEYS.retryAttempt
+    STORAGE_KEYS.retryAttempt,
+    STORAGE_KEYS.privacyConsentAccepted
   ]);
   setBusy(false);
   hideForgetConfirm();
   setMessage(els.pairMsg, "muted", "Local token removed. Pair again from Marketly when you're ready.");
+  await refresh();
+}
+
+async function setPrivacyConsent(accepted) {
+  await storageSet({ [STORAGE_KEYS.privacyConsentAccepted]: accepted === true });
   await refresh();
 }
 
@@ -510,6 +529,7 @@ els.openOptions.addEventListener("click", () => {
     chrome.runtime.openOptionsPage();
   }
 });
+els.privacyConsent.addEventListener("change", () => void setPrivacyConsent(els.privacyConsent.checked));
 
 chrome.storage.onChanged.addListener(() => {
   if (!busy) void refresh();

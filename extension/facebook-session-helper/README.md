@@ -15,7 +15,13 @@
 4. Paste the pairing code.
 5. Click `Pair helper`.
 
-After pairing, the extension syncs `facebook.com` cookies on startup and every 15 minutes. Keep Facebook open occasionally in Chrome/Edge so helper can refresh on startup and periodic sync. If the helper detects a local desync, it badges the toolbar icon and tries to open the helper popup; if Chrome blocks the popup, it shows a notification with quick actions.
+After pairing, the extension syncs only the required Facebook auth cookies (`c_user`, `xs`, `fr`, `datr`, `sb`) on startup and every 15 minutes. Keep Facebook open occasionally in Chrome/Edge so helper can refresh on startup and periodic sync. If the helper detects a local desync, it badges the toolbar icon and tries to open the helper popup; if Chrome blocks the popup, it shows a notification with quick actions.
+
+## Privacy disclosure + consent
+
+- The helper requests explicit consent in the popup/options UI before pairing or syncing.
+- The helper uploads only the cookie fields needed by Marketly's backend session refresh flow.
+- No browsing history, tabs content, or non-Facebook cookies are collected.
 
 Production mode always uses:
 

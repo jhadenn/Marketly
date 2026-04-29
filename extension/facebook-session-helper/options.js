@@ -16,7 +16,8 @@ const STORAGE_KEYS = {
   nextRetryAt: "nextRetryAt",
   retryAttempt: "retryAttempt",
   lastAttentionPromptAt: "lastAttentionPromptAt",
-  lastAttentionReason: "lastAttentionReason"
+  lastAttentionReason: "lastAttentionReason",
+  privacyConsentAccepted: "privacyConsentAccepted"
 };
 
 const {
@@ -40,6 +41,7 @@ const developerModeInput = document.getElementById("developer-mode");
 const developerFields = document.getElementById("developer-fields");
 const devApiBaseInput = document.getElementById("dev-api-base");
 const devApiBaseHelpNode = document.getElementById("dev-api-base-help");
+const privacyConsentInput = document.getElementById("privacy-consent");
 
 function storageGet(keys) {
   return new Promise((resolve) => chrome.storage.local.get(keys, resolve));
@@ -76,6 +78,7 @@ function stateWithCurrentDeveloperControls(state = {}) {
 function renderState(state, extraMessage = "") {
   const effectiveDeveloperMode = resolveApiMode(state) === "developer";
   developerModeInput.checked = effectiveDeveloperMode;
+  privacyConsentInput.checked = state.privacyConsentAccepted === true;
   devApiBaseInput.value = normalizeApiBase(state.devApiBase || state.apiBase || DEFAULT_DEVELOPER_API_BASE);
   developerFields.hidden = !effectiveDeveloperMode;
 
@@ -90,6 +93,10 @@ async function refreshState(extraMessage = "") {
 }
 
 async function pairHelper() {
+  if (!privacyConsentInput.checked) {
+    await refreshState("Accept the privacy disclosure before pairing.");
+    return;
+  }
   const targetState = stateWithCurrentDeveloperControls(await readState());
   let apiBase = normalizeApiBase(resolveApiBase(targetState));
   let targetId = getApiTargetId(targetState);
@@ -165,7 +172,8 @@ async function pairHelper() {
     [STORAGE_KEYS.lastStatus]: "paired",
     [STORAGE_KEYS.nextRetryAt]: "",
     [STORAGE_KEYS.retryAttempt]: 0,
-    [STORAGE_KEYS.lastSyncSummary]: "Paired successfully. Syncing now..."
+    [STORAGE_KEYS.lastSyncSummary]: "Paired successfully. Syncing now...",
+    [STORAGE_KEYS.privacyConsentAccepted]: true
   });
   await storageRemove([STORAGE_KEYS.apiBase]);
   pairingCodeInput.value = "";
@@ -183,6 +191,10 @@ async function pairHelper() {
 }
 
 async function syncNow() {
+  if (!privacyConsentInput.checked) {
+    await refreshState("Accept the privacy disclosure before syncing.");
+    return;
+  }
   const state = await readState();
   const result = await runtimeSendMessage({
     type: "sync-now",
@@ -211,9 +223,15 @@ async function forgetLocalToken() {
     STORAGE_KEYS.lastFailureReason,
     STORAGE_KEYS.lastStatus,
     STORAGE_KEYS.nextRetryAt,
-    STORAGE_KEYS.retryAttempt
+    STORAGE_KEYS.retryAttempt,
+    STORAGE_KEYS.privacyConsentAccepted
   ]);
   await refreshState("Removed the local helper token. Pair again from Marketly when you are ready.");
+}
+
+async function persistPrivacyConsent() {
+  await storageSet({ [STORAGE_KEYS.privacyConsentAccepted]: privacyConsentInput.checked === true });
+  await refreshState();
 }
 
 async function persistDeveloperSettings() {
@@ -270,6 +288,7 @@ forgetButton.addEventListener("click", () => void forgetLocalToken());
 developerModeInput.addEventListener("change", () => void persistDeveloperSettings());
 devApiBaseInput.addEventListener("input", updateDeveloperApiBaseHelp);
 devApiBaseInput.addEventListener("change", () => void persistDeveloperSettings());
+privacyConsentInput.addEventListener("change", () => void persistPrivacyConsent());
 chrome.storage.onChanged.addListener(() => {
   void refreshState();
 });

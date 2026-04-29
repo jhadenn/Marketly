@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Marketly Facebook Session Helper",
   "version": "0.1.0",
-  "description": "Sync fresh facebook.com cookies to Marketly.",
+  "description": "With consent, sync required Facebook auth cookies (c_user, xs, fr, datr, sb) to Marketly.",
   "permissions": ["cookies", "alarms", "storage", "notifications"],
   "host_permissions": [
     "https://marketly-backend-870323632900.northamerica-northeast2.run.app/*",

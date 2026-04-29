@@ -285,6 +285,8 @@
       lines.push("Status: Marketly API unreachable - check network and retry.");
     } else if (failureReason === "no_facebook_cookies") {
       lines.push("Status: No Facebook cookies found - open Facebook and sync again.");
+    } else if (failureReason === "consent_required") {
+      lines.push("Status: Privacy consent required - review disclosure in the helper.");
     } else if (!lastError) {
       lines.push("Status: Paired / healthy");
     } else {
