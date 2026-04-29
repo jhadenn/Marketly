@@ -12,13 +12,13 @@ const sections = [
     title: "Overview",
     body: [
       "This Privacy Policy applies to the Marketly Facebook Session Helper browser extension and describes how it handles data when used with Marketly.",
-      "The extension is used only to connect a user's local Chrome or Edge browser session to their Marketly account so Marketly can use the user's own logged-in Facebook Marketplace session for Marketly Facebook search and saved-search alert features.",
+      "The extension is used only to connect a user's local Chrome or Edge browser session to that user's Marketly account so Marketly can use the user's own logged-in Facebook Marketplace session for Marketly Facebook search and saved-search alert features.",
     ],
   },
   {
     title: "What The Extension Collects",
     body: [
-      "After the user explicitly pairs the extension with their Marketly account, the extension reads facebook.com session cookies from the user's local browser.",
+      "Only after the user gives consent in the extension UI and pairs the extension with their Marketly account does the extension read the required facebook.com authentication cookies from the user's local browser: c_user, xs, fr, datr, and sb.",
       "The extension also stores helper state locally in the browser, including pairing status, helper label, sync status, retry timing, API mode, and related local settings needed to keep the helper connected.",
       "The extension may display local notifications to inform the user when syncing needs attention.",
     ],
@@ -26,7 +26,7 @@ const sections = [
   {
     title: "How The Data Is Used",
     body: [
-      "facebook.com session cookies are sent to Marketly's backend only so Marketly can use the user's own Facebook Marketplace session for Marketly product features.",
+      "Those facebook.com authentication cookies are sent to Marketly's backend only so Marketly can refresh and use the user's own Facebook Marketplace session for that user's Marketly account and related product features.",
       "Local storage data is used only to maintain extension state, recover from disconnects, and support pairing and sync behavior.",
       "Notification data is used only to alert the user when the helper is disconnected, when Facebook needs attention, or when the user needs to reopen the helper.",
     ],
@@ -36,6 +36,7 @@ const sections = [
     body: [
       "The extension is not a general-purpose Facebook extension.",
       "The extension does not post, message, comment, browse Facebook on the user's behalf, or automate unrelated Facebook activity.",
+      "The extension does not collect browsing history, page content, message content, tab content, or content from websites other than the limited facebook.com cookie access described on this page.",
       "The extension does not sell user data.",
       "The extension does not use or transfer user data for purposes unrelated to the extension's single purpose.",
       "The extension does not use or transfer user data to determine creditworthiness or for lending purposes.",
@@ -52,15 +53,16 @@ const sections = [
     title: "Storage And Retention",
     body: [
       "The extension stores helper state locally in the browser until the user removes the extension, clears extension storage, or disconnects the helper.",
-      "Cookie data synced from the extension is stored by Marketly as part of the user's Facebook connector configuration and may be refreshed, replaced, or deleted when the user disconnects or reconfigures the helper.",
+      "Cookie data synced from the extension is stored by Marketly as part of the user's Facebook connector configuration for only as long as needed to keep the user's Facebook connector active for their Marketly account.",
+      "Synced cookie data may be refreshed or replaced during later syncs and is intended to be deleted when the user disconnects, deletes, or reconfigures the Facebook connector or helper.",
     ],
   },
   {
     title: "User Controls",
     body: [
-      "Users control whether to pair the extension with Marketly.",
+      "Users control whether to pair the extension with Marketly, and consent is required in the extension before pairing or syncing can occur.",
       "Users can disconnect the helper from Marketly and can remove the local helper token from the extension.",
-      "Users can also remove the extension from their browser at any time.",
+      "Users can also remove the extension from their browser at any time and can delete their saved Facebook connector data from Marketly.",
     ],
   },
   {
@@ -165,7 +167,7 @@ export default function FacebookHelperPrivacyPage() {
             <h2 className="text-2xl font-semibold tracking-tight text-white">Contact</h2>
             <p className="mt-4 text-sm leading-7 text-zinc-300 sm:text-[15px]">
               Questions about this Privacy Policy or the Marketly Facebook Session Helper can be
-              directed through Marketly support and contact channels published on Marketly.
+              directed to <a className="underline decoration-white/30 underline-offset-4 hover:decoration-white/70" href="mailto:jhadengoy@gmail.com">jhadengoy@gmail.com</a> and any other contact channels published on Marketly.
             </p>
           </section>
         </div>
