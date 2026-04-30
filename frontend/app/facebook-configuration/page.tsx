@@ -275,7 +275,12 @@ function describeStaleReason(status: FacebookConnectorStatus | null) {
   }
 }
 
-const FACEBOOK_HELPER_EXTENSION_ID = (process.env.NEXT_PUBLIC_FACEBOOK_HELPER_EXTENSION_ID || "").trim();
+const PUBLISHED_FACEBOOK_HELPER_EXTENSION_ID = "bnplinkliingimenkokfkoedakfebjmd";
+const FACEBOOK_HELPER_EXTENSION_ID = (
+  process.env.NEXT_PUBLIC_FACEBOOK_HELPER_EXTENSION_ID || PUBLISHED_FACEBOOK_HELPER_EXTENSION_ID
+).trim();
+const FACEBOOK_HELPER_WEB_STORE_URL =
+  "https://chromewebstore.google.com/detail/marketly-facebook-session/bnplinkliingimenkokfkoedakfebjmd";
 
 type FacebookHelperExtensionResponse = {
   ok?: boolean;
@@ -603,7 +608,7 @@ export default function FacebookConfigurationPage() {
   const onSyncFacebookHelper = useCallback(async () => {
     setFacebookConfigError(null);
     if (!FACEBOOK_HELPER_EXTENSION_ID) {
-      setFacebookCopyMessage("Open the Marketly Helper popup with Facebook open, then click Sync Facebook cookies.");
+      setFacebookCopyMessage("Install the Marketly Helper from the Chrome Web Store, open Facebook, then click Sync Facebook cookies in the helper popup.");
       return;
     }
 
@@ -621,7 +626,7 @@ export default function FacebookConfigurationPage() {
       await fetchFacebookConfigStatus();
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Could not reach the helper extension.";
-      setFacebookCopyMessage(`${message} Open the Marketly Helper popup, then click Sync Facebook cookies.`);
+      setFacebookCopyMessage(`${message} Install or open the Marketly Helper, then click Sync Facebook cookies with Facebook open.`);
     } finally {
       setFacebookHelperBridgeBusy(false);
     }
@@ -648,7 +653,7 @@ export default function FacebookConfigurationPage() {
       }
       const json = (await res.json()) as FacebookHelperPairingSessionResponse;
       setFacebookHelperPairing(json);
-      let message = "Pairing code ready. Copy it into the helper options page.";
+      let message = "Pairing code ready. Install or open the Marketly Helper, then copy this code into the helper popup.";
       if (FACEBOOK_HELPER_EXTENSION_ID) {
         try {
           const helperResponse = await sendFacebookHelperMessage({
@@ -661,11 +666,11 @@ export default function FacebookConfigurationPage() {
             message = helperResponse.message || "Helper paired and sync requested.";
             await fetchFacebookConfigStatus();
           } else {
-            message = `${helperResponse.message || "Helper did not accept the pairing code."} Copy the pairing code into the helper popup instead.`;
+            message = `${helperResponse.message || "Helper did not accept the pairing code."} Install or open the helper, then copy the pairing code into the helper popup.`;
           }
         } catch (err: unknown) {
           const helperMessage = err instanceof Error ? err.message : "Could not reach the helper extension.";
-          message = `${helperMessage} Copy the pairing code into the helper popup instead.`;
+          message = `${helperMessage} Install or open the helper, then copy the pairing code into the helper popup.`;
         }
       }
       setFacebookCopyMessage(message);
@@ -856,13 +861,22 @@ export default function FacebookConfigurationPage() {
             Pair Browser Helper
           </h1>
           <p className="mt-3 max-w-3xl text-sm leading-relaxed text-zinc-400 sm:text-base">
-            Recommended for saved searches: pair the Chrome or Edge helper so Marketly can keep your Facebook session fresh without repeated cookie exports. Keep Facebook open occasionally in Chrome/Edge so helper can refresh on startup and periodic sync.
+            Recommended for saved searches: install the Marketly Facebook Session Helper, pair it once, and let it keep your Facebook session fresh without repeated cookie exports. Keep Facebook open occasionally in Chrome or Edge so the helper can refresh on startup and periodic sync.
           </p>
 
           <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+            <a
+              href={FACEBOOK_HELPER_WEB_STORE_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center justify-center gap-2 rounded-full bg-white px-5 py-3 text-sm font-medium text-black transition hover:bg-zinc-200"
+            >
+              <ExternalLink className="size-4" />
+              Install Chrome Extension
+            </a>
             <Link
               href="#setup-card"
-              className="inline-flex items-center justify-center rounded-full bg-white px-5 py-3 text-sm font-medium text-black transition hover:bg-zinc-200"
+              className="inline-flex items-center justify-center rounded-full border border-white/10 bg-white/[0.03] px-5 py-3 text-sm text-zinc-200 transition hover:border-white/20 hover:bg-white/[0.06]"
             >
               Pair Browser Helper
             </Link>
@@ -936,7 +950,7 @@ export default function FacebookConfigurationPage() {
                   </span>
                 </div>
                 <p className="mt-2 text-sm leading-relaxed text-zinc-400">
-                  Generate a pairing code and pair the extension. Manual cookie upload stays available below as a fallback.
+                  Install the published Chrome extension, generate a pairing code, then pair the helper. Manual cookie upload stays available below as a fallback.
                 </p>
               </div>
 
@@ -962,10 +976,19 @@ export default function FacebookConfigurationPage() {
                       1
                     </div>
                     <div>
-                      <p className="text-sm font-medium text-white">Generate a pairing code for the browser helper</p>
+                      <p className="text-sm font-medium text-white">Install the Marketly helper extension</p>
                       <p className="mt-1 text-xs leading-relaxed text-zinc-400">
-                        Pair once from this page, then let the Chrome or Edge helper keep your Facebook session fresh automatically.
+                        Add the published extension from the Chrome Web Store, then keep it pinned or easy to open while pairing.
                       </p>
+                      <a
+                        href={FACEBOOK_HELPER_WEB_STORE_URL}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-zinc-100 underline underline-offset-4 transition hover:text-white"
+                      >
+                        <ExternalLink className="size-3.5" />
+                        Open Chrome Web Store
+                      </a>
                     </div>
                   </div>
                   <div className="flex gap-3">
@@ -973,9 +996,9 @@ export default function FacebookConfigurationPage() {
                       2
                     </div>
                     <div>
-                      <p className="text-sm font-medium text-white">Leave Facebook open in Chrome or Edge</p>
+                      <p className="text-sm font-medium text-white">Generate a pairing code on this page</p>
                       <p className="mt-1 text-xs leading-relaxed text-zinc-400">
-                        Keep Facebook open occasionally in Chrome/Edge so helper can refresh on startup and periodic sync.
+                        Click Generate pairing code. If the extension is installed, Marketly will try to open it automatically; otherwise copy the code into the helper popup.
                       </p>
                     </div>
                   </div>
@@ -984,9 +1007,9 @@ export default function FacebookConfigurationPage() {
                       3
                     </div>
                     <div>
-                      <p className="text-sm font-medium text-white">Fallback to manual upload any time</p>
+                      <p className="text-sm font-medium text-white">Leave Facebook open in Chrome or Edge</p>
                       <p className="mt-1 text-xs leading-relaxed text-zinc-400">
-                        Manual JSON upload still works if you do not want the helper, or if you need to recover quickly after a Facebook checkpoint.
+                        Keep Facebook open occasionally so startup and periodic sync can refresh the saved session. Manual JSON upload remains available as a fallback.
                       </p>
                     </div>
                   </div>
@@ -1083,12 +1106,18 @@ export default function FacebookConfigurationPage() {
                         <p className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Browser helper</p>
                         <h3 className="mt-2 text-lg font-semibold text-white">Pair Chrome or Edge once</h3>
                         <p className="mt-2 text-sm leading-relaxed text-zinc-400">
-                          This is the reliable path for hosted Marketly. The helper keeps uploading fresh <span className="font-mono text-zinc-300">facebook.com</span> cookies from your local logged-in browser so saved searches do not rely on a static export.
+                          This is the reliable path for hosted Marketly. Install the helper from the Chrome Web Store, then it can upload fresh <span className="font-mono text-zinc-300">facebook.com</span> cookies from your local logged-in browser so saved searches do not rely on a static export.
                         </p>
                       </div>
-                      <div className="rounded-2xl border border-white/10 bg-black/30 px-3 py-2 text-xs text-zinc-400">
-                        Extension path: <span className="font-mono text-zinc-200">extension/facebook-session-helper</span>
-                      </div>
+                      <a
+                        href={FACEBOOK_HELPER_WEB_STORE_URL}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-black/30 px-3 py-2 text-xs font-medium text-zinc-100 transition hover:border-white/20 hover:bg-white/[0.06]"
+                      >
+                        <ExternalLink className="size-3.5" />
+                        Chrome Web Store
+                      </a>
                     </div>
 
                     <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
@@ -1163,14 +1192,26 @@ export default function FacebookConfigurationPage() {
                           </div>
                         ) : (
                           <p className="mt-3 text-sm leading-relaxed text-zinc-400">
-                            Generate a code here, then open the unpacked extension options page. The production API endpoint is already built into the helper.
+                            Generate a code here, then open the Marketly Helper extension. The production API endpoint is already built into the helper.
                           </p>
                         )}
                         <ol className="mt-4 space-y-2 text-xs leading-relaxed text-zinc-400">
-                          <li>1. Load the unpacked extension from <span className="font-mono text-zinc-200">extension/facebook-session-helper</span>.</li>
-                          <li>2. Open the extension options page.</li>
-                          <li>3. Paste the pairing code, then click Pair helper.</li>
-                          <li>4. Open Facebook in Chrome or Edge occasionally so startup and periodic sync can refresh the saved session.</li>
+                          <li>
+                            1. Install{" "}
+                            <a
+                              href={FACEBOOK_HELPER_WEB_STORE_URL}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="font-medium text-zinc-100 underline underline-offset-4 transition hover:text-white"
+                            >
+                              Marketly Facebook Session Helper
+                            </a>{" "}
+                            from the Chrome Web Store.
+                          </li>
+                          <li>2. Generate a pairing code on this page.</li>
+                          <li>3. Open the helper popup, paste the pairing code, then click Pair helper.</li>
+                          <li>4. Open Facebook in Chrome or Edge and stay logged in so sync can refresh the saved session.</li>
+                          <li>Developer fallback: load <span className="font-mono text-zinc-200">extension/facebook-session-helper</span> as an unpacked extension only for local testing.</li>
                         </ol>
                       </div>
                     </div>
