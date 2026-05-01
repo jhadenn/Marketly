@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 ALERT_CONFIDENCE_THRESHOLD = 0.65
 ALERT_BASELINE_VERSION = 2
+READ_NOTIFICATION_RETENTION_SECONDS = 12 * 60 * 60
 _alerts_refresh_limiter = TTLCache(max_items=2048)
 _ALERT_ERROR_CODE_CHECK_FAILED = "CHECK_FAILED"
 _ALERT_ERROR_CODE_NO_SOURCES = "NO_SOURCES"
@@ -893,6 +894,7 @@ def purge_stale_notifications(
     *,
     user_id: str,
 ) -> int:
+    read_before = _utc_now() - timedelta(seconds=READ_NOTIFICATION_RETENTION_SECONDS)
     saved_search_rows = (
         db.query(SavedSearch.id, SavedSearch.query)
         .filter(SavedSearch.user_id == user_id)
@@ -905,6 +907,7 @@ def purge_stale_notifications(
             SavedSearchNotification.id,
             SavedSearchNotification.saved_search_id,
             SavedSearchNotification.saved_search_query,
+            SavedSearchNotification.read_at,
         )
         .filter(SavedSearchNotification.user_id == user_id)
         .all()
@@ -914,6 +917,10 @@ def purge_stale_notifications(
         int(row.id)
         for row in notification_rows
         if active_queries_by_id.get(int(row.saved_search_id)) != str(row.saved_search_query)
+        or (
+            row.read_at is not None
+            and (_as_utc(row.read_at) or read_before) <= read_before
+        )
     ]
     if not stale_ids:
         return 0

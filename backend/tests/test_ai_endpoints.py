@@ -1024,6 +1024,88 @@ def test_notifications_endpoint_prunes_orphaned_and_renamed_rows(monkeypatch):
     engine.dispose()
 
 
+def test_notifications_endpoint_prunes_read_rows_after_twelve_hours(monkeypatch):
+    engine, session_factory = build_test_session_factory()
+    app.dependency_overrides[get_current_user_id] = _override_auth
+    app.dependency_overrides[get_db] = db_override_factory(session_factory)
+
+    async def fake_refresh_saved_search_alerts_for_user(db, *, user_id):
+        return False
+
+    monkeypatch.setattr(
+        "app.main.refresh_saved_search_alerts_for_user",
+        fake_refresh_saved_search_alerts_for_user,
+    )
+
+    now = datetime.now(timezone.utc)
+    db = session_factory()
+    try:
+        saved_search = SavedSearch(
+            user_id="user-123",
+            query="mazda miata",
+            sources="facebook,kijiji",
+            alerts_enabled=True,
+        )
+        db.add(saved_search)
+        db.commit()
+        db.refresh(saved_search)
+
+        db.add_all(
+            [
+                SavedSearchNotification(
+                    user_id="user-123",
+                    saved_search_id=saved_search.id,
+                    saved_search_query="mazda miata",
+                    summary_text="unread",
+                    items_json=[],
+                    read_at=None,
+                ),
+                SavedSearchNotification(
+                    user_id="user-123",
+                    saved_search_id=saved_search.id,
+                    saved_search_query="mazda miata",
+                    summary_text="recently read",
+                    items_json=[],
+                    read_at=now - timedelta(hours=11, minutes=59),
+                ),
+                SavedSearchNotification(
+                    user_id="user-123",
+                    saved_search_id=saved_search.id,
+                    saved_search_query="mazda miata",
+                    summary_text="expired read",
+                    items_json=[],
+                    read_at=now - timedelta(hours=12, minutes=1),
+                ),
+            ]
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    notifications_res = client.get("/me/notifications")
+
+    assert notifications_res.status_code == 200
+    payload = notifications_res.json()
+    summaries = {entry["summary"] for entry in payload}
+    assert "0 new listings for mazda miata" in summaries
+    assert len(payload) == 2
+
+    db = session_factory()
+    try:
+        remaining = (
+            db.query(SavedSearchNotification)
+            .filter(SavedSearchNotification.user_id == "user-123")
+            .all()
+        )
+        assert len(remaining) == 2
+        assert all(row.summary_text != "expired read" for row in remaining)
+    finally:
+        db.close()
+
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
 def test_saved_search_run_passes_newest_sort(monkeypatch):
     engine, session_factory = build_test_session_factory()
     app.dependency_overrides[get_current_user_id] = _override_auth

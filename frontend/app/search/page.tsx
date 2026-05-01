@@ -1137,8 +1137,10 @@ type SearchPageViewProps = {
   loadingMore: boolean;
   savingSearch: boolean;
   onSearch: (e: React.FormEvent) => Promise<void>;
-  onSaveCurrentSearch: () => Promise<void>;
+  onSaveCurrentSearch: (options?: { allowMixedFacebookSources?: boolean }) => Promise<void>;
   onCreateSplitSavedSearches: () => Promise<void>;
+  showSplitSourceSaveWarning: boolean;
+  onDismissSplitSourceSaveWarning: () => void;
   limit: number;
   savedSearchMaxPerUser: number;
   activeSavedSearchCount: number;
@@ -1273,6 +1275,8 @@ type SearchControlsRailProps = Pick<
   | "onSearch"
   | "onSaveCurrentSearch"
   | "onCreateSplitSavedSearches"
+  | "showSplitSourceSaveWarning"
+  | "onDismissSplitSourceSaveWarning"
   | "searchLoading"
   | "loadingMore"
   | "savedSearchRefreshing"
@@ -1724,8 +1728,6 @@ function StatTile({ label, value, sub }: { label: string; value: string; sub: st
 }
 
 function SearchControlsRail(props: SearchControlsRailProps) {
-  const showSplitSourceRecommendation = hasMixedFacebookSources(props.sources);
-
   return (
     <>
       <GlassPanel className="p-4 sm:p-5">
@@ -1801,24 +1803,46 @@ function SearchControlsRail(props: SearchControlsRailProps) {
             </div>
           )}
 
-          {showSplitSourceRecommendation ? (
+          {props.showSplitSourceSaveWarning ? (
             <div className="rounded-xl border border-amber-300/20 bg-amber-300/10 p-3 text-xs leading-relaxed text-amber-100">
               <p>
-                For best reliability, split into two saved searches: Facebook and non-Facebook.
+                For best reliability, split this into two saved searches: Facebook and non-Facebook.
               </p>
-              <button
-                type="button"
-                onClick={() => void props.onCreateSplitSavedSearches()}
-                disabled={
-                  props.savingSearch
-                  || !props.q.trim()
-                  || props.savedSearchLimitReached
-                }
-                className="mt-2 inline-flex items-center justify-center gap-2 rounded-lg border border-amber-100/20 bg-amber-50/10 px-3 py-1.5 text-xs font-medium text-amber-50 transition hover:border-amber-100/30 hover:bg-amber-50/15 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {props.savingSearch ? <Loader2 className="size-3.5 animate-spin" /> : null}
-                Create split searches from this config
-              </button>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void props.onCreateSplitSavedSearches()}
+                  disabled={
+                    props.savingSearch
+                    || !props.q.trim()
+                    || props.savedSearchLimitReached
+                  }
+                  className="inline-flex items-center justify-center gap-2 rounded-lg border border-amber-100/20 bg-amber-50/10 px-3 py-1.5 text-xs font-medium text-amber-50 transition hover:border-amber-100/30 hover:bg-amber-50/15 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {props.savingSearch ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                  Create split searches
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void props.onSaveCurrentSearch({ allowMixedFacebookSources: true })}
+                  disabled={
+                    props.savingSearch
+                    || !props.q.trim()
+                    || props.sources.length === 0
+                    || props.savedSearchLimitReached
+                  }
+                  className="inline-flex items-center justify-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-zinc-100 transition hover:border-white/20 hover:bg-white/[0.07] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Save combined anyway
+                </button>
+                <button
+                  type="button"
+                  onClick={props.onDismissSplitSourceSaveWarning}
+                  className="inline-flex items-center justify-center rounded-lg px-3 py-1.5 text-xs font-medium text-amber-50/80 transition hover:bg-amber-50/10 hover:text-amber-50"
+                >
+                  Dismiss
+                </button>
+              </div>
             </div>
           ) : null}
         </form>
@@ -4117,6 +4141,7 @@ export default function HomePage() {
   const [savedSearchBootstrapReady, setSavedSearchBootstrapReady] = useState(false);
   const [savedLoading, setSavedLoading] = useState(false);
   const [savingSearch, setSavingSearch] = useState(false);
+  const [showSplitSourceSaveWarning, setShowSplitSourceSaveWarning] = useState(false);
   const [savedError, setSavedError] = useState<string | null>(null);
   const [savedSearchRefreshing, setSavedSearchRefreshing] = useState(false);
   const [savedSearchRefreshError, setSavedSearchRefreshError] = useState<string | null>(null);
@@ -4190,6 +4215,10 @@ export default function HomePage() {
       applySavedSearchMaxPerUser(DEFAULT_SAVED_SEARCH_MAX_PER_USER);
     }
   }, [applySavedSearchMaxPerUser, savedSearchMaxPerUser]);
+
+  useEffect(() => {
+    setShowSplitSourceSaveWarning(false);
+  }, [q, sources]);
 
   useEffect(() => {
     if (authLoading) {
@@ -5883,21 +5912,38 @@ export default function HomePage() {
     });
   }
 
-  async function onSaveCurrentSearch() {
+  async function onSaveCurrentSearch(options?: { allowMixedFacebookSources?: boolean }) {
     setSavedError(null);
+    const trimmedQuery = q.trim();
+    if (!accessToken) {
+      setSavedError("Please log in to save searches.");
+      return;
+    }
+    if (!trimmedQuery) {
+      setSavedError("Enter a query before saving.");
+      return;
+    }
+    if (sources.length === 0) {
+      setSavedError("Select at least one source.");
+      return;
+    }
+    if (saved.length >= savedSearchMaxPerUserRef.current) {
+      setSavedError(`Saved search limit reached. Maximum is ${savedSearchMaxPerUserRef.current}.`);
+      return;
+    }
+    if (
+      hasMixedFacebookSources(sources)
+      && !options?.allowMixedFacebookSources
+    ) {
+      setShowSplitSourceSaveWarning(true);
+      return;
+    }
+
     setSavingSearch(true);
 
     try {
-      if (!accessToken) throw new Error("Please log in to save searches.");
-      if (sources.length === 0) throw new Error("Select at least one source.");
-      if (saved.length >= savedSearchMaxPerUserRef.current) {
-        throw new Error(
-          `Saved search limit reached. Maximum is ${savedSearchMaxPerUserRef.current}.`,
-        );
-      }
-
       const payload = {
-        query: q.trim(),
+        query: trimmedQuery,
         sources,
         alerts_enabled: true,
       };
@@ -5929,6 +5975,7 @@ export default function HomePage() {
         nextSavedSearch,
         ...prev.filter((entry) => entry.id !== nextSavedSearch.id),
       ]);
+      setShowSplitSourceSaveWarning(false);
     } catch (err: unknown) {
       setSavedError(err instanceof Error ? err.message : "Failed to save search");
     } finally {
@@ -5989,6 +6036,7 @@ export default function HomePage() {
         ...createdRows,
         ...prev.filter((entry) => !createdRows.some((created) => created.id === entry.id)),
       ]);
+      setShowSplitSourceSaveWarning(false);
     } catch (err: unknown) {
       setSavedError(err instanceof Error ? err.message : "Failed to create split saved searches");
     } finally {
@@ -6579,6 +6627,8 @@ export default function HomePage() {
       onSearch={onSearch}
       onSaveCurrentSearch={onSaveCurrentSearch}
       onCreateSplitSavedSearches={onCreateSplitSavedSearches}
+      showSplitSourceSaveWarning={showSplitSourceSaveWarning}
+      onDismissSplitSourceSaveWarning={() => setShowSplitSourceSaveWarning(false)}
       limit={limit}
       savedSearchMaxPerUser={effectiveSavedSearchMaxPerUser}
       activeSavedSearchCount={activeSavedSearchCount}
